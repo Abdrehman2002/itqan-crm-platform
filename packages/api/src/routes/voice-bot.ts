@@ -426,6 +426,105 @@ async function createTicketFromBotCall(
   }
 }
 
+// ── LiveKit (self-hosted Urdu agent "Nadia") — structured complaint → ticket ──
+// Unlike the keyword-derived path above, this trusts the agent's explicit fields
+// (it has already extracted priority/category/subject accurately in Urdu).
+
+const PRIORITY_MAP: Record<string, 'urgent' | 'high' | 'medium' | 'low'> = {
+  p1: 'urgent', p2: 'high', p3: 'medium', p4: 'low',
+  urgent: 'urgent', high: 'high', medium: 'medium', low: 'low',
+};
+
+interface StructuredComplaint {
+  reporterName?: string;
+  reporterPhone?: string;
+  reporterEmail?: string;
+  category?: string;   // loan_issue | account_issue | staff_complaint | digital_banking | fraud | branch_service | other
+  priority?: string;   // P1..P4 or urgent..low
+  subject?: string;
+  description?: string;
+  fraudAmount?: string;
+  transcript?: string;
+  callId?: string;
+}
+
+async function createComplaintFromStructured(
+  db: DatabaseClient,
+  eventBus: EventBus,
+  tenantId: string,
+  s: StructuredComplaint,
+): Promise<{ ticketId: string; ticketNumber: string; voiceCallId: string } | null> {
+  try {
+    const priority = PRIORITY_MAP[(s.priority || 'medium').toLowerCase()] ?? 'medium';
+    const subject = (s.subject || s.description || 'Voice complaint').slice(0, 120);
+    const description = s.description || s.subject || '';
+
+    const [contact] = await db.withSuperAdmin(async (c) => {
+      if (!s.reporterPhone) return [];
+      const r = await c.query(
+        `SELECT id FROM contacts WHERE tenant_id=$1 AND phone ILIKE $2 LIMIT 1`,
+        [tenantId, `%${s.reporterPhone.replace(/\D/g, '').slice(-10)}%`],
+      );
+      return r.rows;
+    });
+
+    const [{ next_val }] = await db.withSuperAdmin(async (c) =>
+      (await c.query(
+        `INSERT INTO ticket_counters (tenant_id, next_val) VALUES ($1, 2)
+         ON CONFLICT (tenant_id) DO UPDATE SET next_val = ticket_counters.next_val + 1
+         RETURNING next_val`, [tenantId])).rows);
+    const ticketNumber = `TKT-${String(Number(next_val) - 1).padStart(5, '0')}`;
+
+    const [queueRow] = await db.withSuperAdmin(async (c) =>
+      (await c.query(`SELECT id FROM ticket_queues WHERE tenant_id=$1 AND is_default=true LIMIT 1`, [tenantId])).rows);
+    const [slaRow] = await db.withSuperAdmin(async (c) =>
+      (await c.query(`SELECT id FROM sla_policies WHERE tenant_id=$1 AND priority=$2 AND is_active=true LIMIT 1`, [tenantId, priority])).rows);
+
+    // Call record (provider='livekit')
+    const [botCall] = await db.withSuperAdmin(async (c) =>
+      (await c.query(
+        `INSERT INTO voice_bot_calls
+           (tenant_id, provider, provider_call_id, from_number, status, transcript, summary,
+            sentiment, extracted_subject, extracted_priority, extracted_reporter_name,
+            extracted_reporter_email, raw_payload)
+         VALUES ($1,'livekit',$2,$3,'completed',$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
+         RETURNING id`,
+        [tenantId, s.callId ?? null, s.reporterPhone ?? null, s.transcript ?? null, description,
+         priority === 'urgent' ? 'urgent' : 'negative', subject, priority,
+         s.reporterName ?? null, s.reporterEmail ?? null,
+         JSON.stringify({ category: s.category, fraudAmount: s.fraudAmount })],
+      )).rows);
+
+    const [ticket] = await db.withSuperAdmin(async (c) =>
+      (await c.query(
+        `INSERT INTO tickets
+           (tenant_id, ticket_number, subject, description, status, priority, channel,
+            queue_id, sla_policy_id, contact_id, reporter_phone, reporter_name, reporter_email,
+            ticket_type, tags, custom_fields)
+         VALUES ($1,$2,$3,$4,'open',$5,'voice_bot',$6,$7,$8,$9,$10,$11,'complaint',$12,$13::jsonb)
+         RETURNING id`,
+        [tenantId, ticketNumber, subject, description, priority,
+         queueRow?.id ?? null, slaRow?.id ?? null, contact?.id ?? null,
+         s.reporterPhone ?? null, s.reporterName ?? null, s.reporterEmail ?? null,
+         [s.category ?? 'other'],
+         JSON.stringify({ category: s.category, fraud_amount: s.fraudAmount, agent: 'nadia' })],
+      )).rows);
+
+    await db.withSuperAdmin(async (c) => {
+      await c.query(`UPDATE voice_bot_calls SET ticket_id=$1 WHERE id=$2`, [ticket.id, botCall.id]);
+    });
+
+    await eventBus.publish(tenantId, CRM_EVENTS.TICKET_CREATED, {
+      source: 'livekit', ticketId: ticket.id, ticketType: 'complaint',
+    });
+
+    return { ticketId: ticket.id as string, ticketNumber, voiceCallId: botCall.id as string };
+  } catch (err: any) {
+    console.error('[LiveKit→Ticket]', err.message);
+    return null;
+  }
+}
+
 // ── Route factory ─────────────────────────────────────────────────────────
 
 export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
@@ -893,6 +992,54 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
       } catch (err: any) {
         return reply.code(500).send({ success: false, error: { message: err.message } });
       }
+    });
+
+    // ══ LiveKit agent (Nadia) — structured ingestion ════════════════════════
+    // Optional shared-secret: set LIVEKIT_INGEST_SECRET on the API; the agent
+    // sends it as "Authorization: Bearer <secret>".
+    const checkSecret = (req: any): boolean => {
+      const secret = process.env.LIVEKIT_INGEST_SECRET;
+      if (!secret) return true;
+      return (req.headers['authorization'] || '') === `Bearer ${secret}`;
+    };
+
+    // Mid-call: create the complaint ticket from structured fields, return the TKT number.
+    fastify.post('/livekit/complaint', async (req, reply) => {
+      const { tenantId } = req.query as { tenantId?: string };
+      if (!tenantId) return reply.code(400).send({ error: 'tenantId query param required' });
+      if (!checkSecret(req)) return reply.code(401).send({ error: 'unauthorized' });
+
+      const result = await createComplaintFromStructured(
+        db, eventBus, tenantId, (req.body ?? {}) as StructuredComplaint,
+      );
+      if (!result) return reply.code(500).send({ success: false, error: 'ticket_creation_failed' });
+      return reply.code(201).send({ success: true, ...result });
+    });
+
+    // Call-end: attach the final transcript / summary / recording to the call record.
+    fastify.post('/livekit/call-ended', async (req, reply) => {
+      const { tenantId } = req.query as { tenantId?: string };
+      if (!tenantId) return reply.code(400).send({ error: 'tenantId query param required' });
+      if (!checkSecret(req)) return reply.code(401).send({ error: 'unauthorized' });
+
+      const b = (req.body ?? {}) as {
+        voiceCallId?: string; transcript?: string; summary?: string;
+        recordingUrl?: string; durationSeconds?: number; sentiment?: string;
+      };
+      if (!b.voiceCallId) return reply.code(400).send({ error: 'voiceCallId required' });
+
+      await db.withSuperAdmin(async (c) => {
+        await c.query(
+          `UPDATE voice_bot_calls
+             SET transcript=COALESCE($2,transcript), summary=COALESCE($3,summary),
+                 recording_url=COALESCE($4,recording_url), duration_seconds=COALESCE($5,duration_seconds),
+                 sentiment=COALESCE($6,sentiment), ended_at=NOW()
+           WHERE id=$1 AND tenant_id=$7`,
+          [b.voiceCallId, b.transcript ?? null, b.summary ?? null, b.recordingUrl ?? null,
+           b.durationSeconds ?? null, b.sentiment ?? null, tenantId],
+        );
+      });
+      return reply.send({ success: true });
     });
   };
 }
