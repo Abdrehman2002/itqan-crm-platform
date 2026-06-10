@@ -27,7 +27,7 @@ export function CallWidget() {
     setStatus('connecting');
     setError('');
     try {
-      const res = await api.post('/api/v1/voice/web-call');
+      const res = await api.post('/api/v1/voice/web-call', {});
       const { url, token } = res.data.data;
 
       const room = new Room({ adaptiveStream: true });
