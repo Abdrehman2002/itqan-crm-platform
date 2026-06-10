@@ -4,6 +4,7 @@ import {
   Save, Loader2, Building2, Bell, Shield, Users, Palette, Clock,
   UserPlus, Trash2, Edit2, Check, X, Search, Crown,
   ShieldCheck, UserCheck, Eye, RotateCcw, Type, Pipette,
+  Route, Tag, Plus, AlertCircle, Layers, ToggleLeft, ToggleRight,
 } from 'lucide-react';
 import { api } from '../services/api';
 import { MilestoneSettings } from './MilestoneSettings';
@@ -16,11 +17,14 @@ import {
   FONT_COLOR_PRESETS,
 } from '../store/appearance.store';
 
-type Tab = 'workspace' | 'team' | 'notifications' | 'security' | 'appearance';
+type Tab = 'workspace' | 'modules' | 'team' | 'routing' | 'tags' | 'notifications' | 'security' | 'appearance';
 
 const TABS: { id: Tab; label: string; icon: any }[] = [
   { id: 'workspace',     label: 'Workspace',     icon: Building2 },
+  { id: 'modules',       label: 'Modules',        icon: Layers },
   { id: 'team',          label: 'Team',           icon: Users },
+  { id: 'routing',       label: 'Routing & SLA',  icon: Route },
+  { id: 'tags',          label: 'Tags',           icon: Tag },
   { id: 'notifications', label: 'Notifications',  icon: Bell },
   { id: 'security',      label: 'Security',       icon: Shield },
   { id: 'appearance',    label: 'Appearance',     icon: Palette },
@@ -143,15 +147,23 @@ function fmtLastLogin(iso: string | null) {
 
 function InviteModal({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
-  const [email,          setEmail]         = useState('');
-  const [name,           setName]          = useState('');
-  const [selectedRoleId, setSelectedRoleId] = useState('');
-  const [error,          setError]         = useState('');
+  const [email,           setEmail]          = useState('');
+  const [name,            setName]           = useState('');
+  const [department,      setDepartment]     = useState('');
+  const [departmentType,  setDepartmentType] = useState('');
+  const [selectedRoleId,  setSelectedRoleId] = useState('');
+  const [error,           setError]          = useState('');
 
   // Fetch all roles (system + custom)
   const { data: allRoles = [] } = useQuery<any[]>({
     queryKey: ['roles'],
     queryFn: () => api.get('/api/v1/roles').then((r) => r.data.data),
+  });
+
+  // Fetch structured department types (Gap 8)
+  const { data: deptTypes = [] } = useQuery<Array<{ value: string; label: string }>>({
+    queryKey: ['dept-types'],
+    queryFn: () => api.get('/api/v1/settings/team/department-types').then(r => r.data.data ?? []),
   });
 
   // Default to first non-admin system role
@@ -165,6 +177,8 @@ function InviteModal({ onClose }: { onClose: () => void }) {
       role: selectedRole?.base_role ?? 'agent',
       custom_role_id: roleId,
       permissions: selectedRole?.permissions,
+      department:     department || undefined,
+      departmentType: departmentType || undefined,
     }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['team-members'] }); onClose(); },
     onError:   (e: any) => setError(e.response?.data?.error?.message ?? 'Failed to invite user'),
@@ -200,6 +214,29 @@ function InviteModal({ onClose }: { onClose: () => void }) {
             <input type="email" value={email} onChange={(e) => setEmail(e.target.value)}
               placeholder="jane@company.com"
               className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400" />
+          </div>
+
+          {/* Department (Gap 8: structured type dropdown) */}
+          <div>
+            <label className="text-xs font-medium text-gray-600 mb-1 block">Department <span className="text-gray-400 font-normal">(optional)</span></label>
+            <input value={department} onChange={(e) => setDepartment(e.target.value)}
+              placeholder="e.g. Customer Support, Sales"
+              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400 mb-2" />
+            {deptTypes.length > 0 && (
+              <>
+                <label className="text-xs font-medium text-gray-600 mb-1 block">
+                  Department Type <span className="text-gray-400 font-normal">— sets module access automatically</span>
+                </label>
+                <select value={departmentType} onChange={(e) => setDepartmentType(e.target.value)}
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400">
+                  <option value="">— No department type —</option>
+                  {deptTypes.map(dt => (
+                    <option key={dt.value} value={dt.value}>{dt.label}</option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-gray-400 mt-1">Selecting a type auto-configures which modules this user can access based on their department's responsibilities.</p>
+              </>
+            )}
           </div>
 
           {/* Role selection */}
@@ -803,9 +840,498 @@ function AppearanceSettings() {
   );
 }
 
+// ── Routing & SLA Settings ────────────────────────────────────────────────────
+
+function RoutingSettings() {
+  const qc = useQueryClient();
+  const [saved, setSaved] = useState(false);
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['routing-settings'],
+    queryFn: () => api.get('/api/v1/settings/routing').then((r) => r.data.data),
+  });
+
+  const [form, setForm] = useState<{
+    per_agent_ticket_limit: number;
+    routing_method: string;
+    csat_expiry_days: number;
+  } | null>(null);
+
+  // Initialise form once data loads
+  const formValues = form ?? (data ? {
+    per_agent_ticket_limit: data.routing.per_agent_ticket_limit,
+    routing_method:         data.routing.routing_method,
+    csat_expiry_days:       data.csat.expiry_days,
+  } : null);
+
+  const mutation = useMutation({
+    mutationFn: (body: typeof formValues) => api.patch('/api/v1/settings/routing', body),
+    onSuccess: () => {
+      setSaved(true);
+      qc.invalidateQueries({ queryKey: ['routing-settings'] });
+      setTimeout(() => setSaved(false), 2500);
+    },
+  });
+
+  if (isLoading || !formValues) {
+    return <div className="flex justify-center py-16"><Loader2 className="w-6 h-6 text-brand-400 animate-spin" /></div>;
+  }
+
+  const set = (k: keyof typeof formValues, v: any) => setForm({ ...formValues, [k]: v });
+
+  return (
+    <div className="space-y-8 max-w-lg">
+      <div>
+        <h2 className="text-base font-semibold text-gray-900">Routing & SLA</h2>
+        <p className="text-sm text-gray-500 mt-0.5">Configure how tickets are assigned and how surveys expire.</p>
+      </div>
+
+      {/* Ticket Routing */}
+      <div className="space-y-4">
+        <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2">
+          <Route className="w-4 h-4 text-brand-500" /> Ticket Routing
+        </h3>
+
+        {/* Routing Method */}
+        <div>
+          <label className="text-xs font-medium text-gray-600 mb-2 block">Routing Method</label>
+          <div className="space-y-2">
+            {([
+              { value: 'random_capacity', label: 'Smart Capacity Routing', desc: 'Randomly assigns to agents under the ticket limit. Agents with 0 tickets get 2× priority.' },
+              { value: 'round_robin',     label: 'Round Robin',            desc: 'Assigns tickets evenly in rotation regardless of current load.' },
+              { value: 'manual',          label: 'Manual Only',            desc: 'No auto-routing. Managers assign all tickets manually.' },
+            ] as const).map((opt) => (
+              <label key={opt.value} className={`flex items-start gap-3 p-3 rounded-xl border-2 cursor-pointer transition-colors ${
+                formValues.routing_method === opt.value
+                  ? 'border-brand-400 bg-brand-50'
+                  : 'border-gray-100 hover:border-gray-200 bg-white'
+              }`}>
+                <input type="radio" name="routing_method" value={opt.value}
+                  checked={formValues.routing_method === opt.value}
+                  onChange={() => set('routing_method', opt.value)}
+                  className="mt-0.5 accent-brand-600" />
+                <div>
+                  <p className="text-sm font-medium text-gray-900">{opt.label}</p>
+                  <p className="text-xs text-gray-400 mt-0.5">{opt.desc}</p>
+                </div>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        {/* Per-agent limit */}
+        <div>
+          <label className="text-xs font-medium text-gray-600 mb-1 block">
+            Per-Agent Ticket Limit
+          </label>
+          <div className="flex items-center gap-3">
+            <input
+              type="number" min={0} max={500}
+              value={formValues.per_agent_ticket_limit}
+              onChange={(e) => set('per_agent_ticket_limit', Math.max(0, parseInt(e.target.value) || 0))}
+              className="w-28 px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400"
+            />
+            <span className="text-xs text-gray-400">
+              {formValues.per_agent_ticket_limit === 0
+                ? 'Unlimited — no cap enforced'
+                : `Max ${formValues.per_agent_ticket_limit} open tickets per agent`}
+            </span>
+          </div>
+          <p className="text-xs text-gray-400 mt-1 flex items-start gap-1">
+            <AlertCircle className="w-3 h-3 mt-0.5 shrink-0" />
+            When all agents hit the limit, the ticket overflows to the agent with the fewest tickets.
+            Set to <strong>0</strong> to disable the limit.
+          </p>
+        </div>
+      </div>
+
+      {/* Divider */}
+      <div className="border-t border-gray-100" />
+
+      {/* CSAT */}
+      <div className="space-y-4">
+        <h3 className="text-sm font-semibold text-gray-700">CSAT Survey Expiry</h3>
+        <div>
+          <label className="text-xs font-medium text-gray-600 mb-1 block">Survey Link Valid For</label>
+          <div className="flex items-center gap-3">
+            <input
+              type="number" min={1} max={90}
+              value={formValues.csat_expiry_days}
+              onChange={(e) => set('csat_expiry_days', Math.min(90, Math.max(1, parseInt(e.target.value) || 7)))}
+              className="w-28 px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400"
+            />
+            <span className="text-xs text-gray-400">days after ticket close (1–90)</span>
+          </div>
+          <p className="text-xs text-gray-400 mt-1">
+            Customers who click a CSAT link after this period will see an "expired" message.
+          </p>
+        </div>
+      </div>
+
+      <button
+        onClick={() => mutation.mutate(formValues)}
+        disabled={mutation.isPending}
+        className="flex items-center gap-2 px-4 py-2 bg-brand-600 text-white text-sm rounded-lg hover:bg-brand-700 disabled:opacity-50"
+      >
+        {mutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : saved ? <Check className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />}
+        {saved ? 'Saved!' : 'Save Settings'}
+      </button>
+    </div>
+  );
+}
+
+// ── Tag Management Settings ───────────────────────────────────────────────────
+
+function TagsSettings() {
+  const qc = useQueryClient();
+
+  const { data: tags = [], isLoading } = useQuery<any[]>({
+    queryKey: ['ticket-tags'],
+    queryFn: () => api.get('/api/v1/tickets/tags').then((r) => r.data.data ?? []),
+  });
+
+  const [creating, setCreating]   = useState(false);
+  const [newName,  setNewName]    = useState('');
+  const [newColor, setNewColor]   = useState('#6b7280');
+  const [newDesc,  setNewDesc]    = useState('');
+  const [createErr, setCreateErr] = useState('');
+
+  const [editId,    setEditId]    = useState<string | null>(null);
+  const [editName,  setEditName]  = useState('');
+  const [editColor, setEditColor] = useState('');
+  const [editDesc,  setEditDesc]  = useState('');
+
+  const createMutation = useMutation({
+    mutationFn: () => api.post('/api/v1/tickets/tags', { name: newName, color: newColor, description: newDesc }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['ticket-tags'] });
+      setCreating(false); setNewName(''); setNewColor('#6b7280'); setNewDesc(''); setCreateErr('');
+    },
+    onError: (e: any) => setCreateErr(e.response?.data?.error?.message ?? 'Failed to create tag'),
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: ({ id, ...body }: any) => api.patch(`/api/v1/tickets/tags/${id}`, body),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['ticket-tags'] }); setEditId(null); },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => api.delete(`/api/v1/tickets/tags/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['ticket-tags'] }),
+  });
+
+  const startEdit = (t: any) => {
+    setEditId(t.id); setEditName(t.name); setEditColor(t.color); setEditDesc(t.description ?? '');
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-start justify-between">
+        <div>
+          <h2 className="text-base font-semibold text-gray-900">Ticket Tags</h2>
+          <p className="text-sm text-gray-500 mt-0.5">
+            Manage reusable labels for categorising tickets across your workspace.
+          </p>
+        </div>
+        <button
+          onClick={() => setCreating(true)}
+          className="flex items-center gap-2 px-4 py-2 bg-brand-600 text-white text-sm rounded-xl hover:bg-brand-700 font-medium"
+        >
+          <Plus className="w-4 h-4" /> New Tag
+        </button>
+      </div>
+
+      {/* Create form */}
+      {creating && (
+        <div className="border-2 border-brand-200 bg-brand-50 rounded-xl p-4 space-y-3">
+          <p className="text-sm font-semibold text-gray-800">New Tag</p>
+          {createErr && <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{createErr}</p>}
+          <div className="flex gap-3">
+            <div className="flex-1">
+              <label className="text-xs font-medium text-gray-600 mb-1 block">Name *</label>
+              <input
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                placeholder="e.g. billing"
+                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400 bg-white"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-gray-600 mb-1 block">Color</label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="color"
+                  value={newColor}
+                  onChange={(e) => setNewColor(e.target.value)}
+                  className="w-10 h-[38px] rounded-lg border border-gray-200 cursor-pointer p-0.5 bg-white"
+                />
+                <input
+                  type="text"
+                  value={newColor}
+                  maxLength={7}
+                  onChange={(e) => { setNewColor(e.target.value); }}
+                  className="w-24 px-2 py-2 text-xs font-mono border border-gray-200 rounded-lg outline-none focus:border-brand-400 bg-white"
+                />
+              </div>
+            </div>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-gray-600 mb-1 block">Description (optional)</label>
+            <input
+              value={newDesc}
+              onChange={(e) => setNewDesc(e.target.value)}
+              placeholder="What is this tag for?"
+              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400 bg-white"
+            />
+          </div>
+          <div className="flex gap-2 pt-1">
+            <button
+              onClick={() => createMutation.mutate()}
+              disabled={!newName.trim() || createMutation.isPending}
+              className="flex items-center gap-2 px-4 py-2 bg-brand-600 text-white text-sm rounded-lg hover:bg-brand-700 disabled:opacity-50"
+            >
+              {createMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+              Create Tag
+            </button>
+            <button
+              onClick={() => { setCreating(false); setCreateErr(''); }}
+              className="px-4 py-2 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-white"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Tag list */}
+      {isLoading ? (
+        <div className="flex justify-center py-12"><Loader2 className="w-6 h-6 text-brand-400 animate-spin" /></div>
+      ) : tags.length === 0 ? (
+        <div className="text-center py-16 text-gray-400">
+          <Tag className="w-10 h-10 mx-auto mb-3 opacity-30" />
+          <p className="text-sm">No tags yet. Create your first tag above.</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {tags.map((t: any) => (
+            <div key={t.id} className="flex items-center gap-3 p-3 bg-white border border-gray-100 rounded-xl hover:border-gray-200 transition-colors">
+              {editId === t.id ? (
+                /* Inline edit row */
+                <div className="flex-1 flex items-center gap-2 flex-wrap">
+                  <input
+                    value={editName}
+                    onChange={(e) => setEditName(e.target.value)}
+                    className="flex-1 min-w-0 px-2 py-1.5 text-sm border border-brand-300 rounded-lg outline-none focus:border-brand-500"
+                  />
+                  <input
+                    type="color"
+                    value={editColor}
+                    onChange={(e) => setEditColor(e.target.value)}
+                    className="w-9 h-9 rounded-lg border border-gray-200 cursor-pointer p-0.5"
+                  />
+                  <input
+                    value={editDesc}
+                    onChange={(e) => setEditDesc(e.target.value)}
+                    placeholder="Description"
+                    className="flex-1 min-w-0 px-2 py-1.5 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400"
+                  />
+                  <button
+                    onClick={() => updateMutation.mutate({ id: t.id, name: editName, color: editColor, description: editDesc })}
+                    disabled={!editName.trim() || updateMutation.isPending}
+                    className="p-1.5 rounded-lg bg-brand-100 text-brand-700 hover:bg-brand-200 disabled:opacity-50"
+                  >
+                    {updateMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                  </button>
+                  <button onClick={() => setEditId(null)} className="p-1.5 rounded-lg bg-gray-100 text-gray-500 hover:bg-gray-200">
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ) : (
+                /* Display row */
+                <>
+                  <span
+                    className="w-3.5 h-3.5 rounded-full shrink-0 ring-1 ring-black/10"
+                    style={{ backgroundColor: t.color }}
+                  />
+                  <div className="flex-1 min-w-0">
+                    <span className="text-sm font-medium text-gray-900">{t.name}</span>
+                    {t.description && <span className="text-xs text-gray-400 ml-2">{t.description}</span>}
+                  </div>
+                  <span className="text-xs text-gray-400 shrink-0">
+                    {t.usage_count ?? 0} ticket{t.usage_count !== 1 ? 's' : ''}
+                  </span>
+                  <button onClick={() => startEdit(t)} className="p-1.5 rounded-lg text-gray-300 hover:text-brand-500 hover:bg-brand-50 transition-colors">
+                    <Edit2 className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={() => { if (confirm(`Delete tag "${t.name}"? It will be removed from all tickets.`)) deleteMutation.mutate(t.id); }}
+                    className="p-1.5 rounded-lg text-gray-300 hover:text-red-500 hover:bg-red-50 transition-colors"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Module Toggles (Gap 9) ────────────────────────────────────────────────
+
+// Extended module metadata for the settings UI
+const MODULE_META: Record<string, { icon: string; warning?: string }> = {
+  crm:          { icon: '🏢' },
+  voice:        { icon: '📞' },
+  voicebot:     { icon: '🤖' },
+  ticketing:    { icon: '🎫' },
+  emails:       { icon: '✉️'  },
+  integrations: { icon: '🔌' },
+  analytics:    { icon: '📊' },
+};
+
+function ModulesSettings() {
+  const qc = useQueryClient();
+  const [saving, setSaving] = useState<string | null>(null);
+  const [toggleError, setToggleError] = useState<string | null>(null);
+
+  // Returns full catalog with licensed + enabled flags per module
+  const { data: modules = [], isLoading } = useQuery<any[]>({
+    queryKey: ['workspace-modules'],
+    queryFn:  () => api.get('/api/v1/settings/workspace/modules').then(r => r.data.data ?? []),
+  });
+
+  const toggleMutation = useMutation({
+    mutationFn: ({ key, enabled }: { key: string; enabled: boolean }) =>
+      api.patch('/api/v1/settings/workspace/modules', { modules: { [key]: enabled } }),
+    onMutate: ({ key }) => { setSaving(key); setToggleError(null); },
+    onError: (err: any) => {
+      setToggleError(err?.response?.data?.error?.message ?? 'Failed to update module');
+    },
+    onSettled: () => {
+      setSaving(null);
+      qc.invalidateQueries({ queryKey: ['workspace-modules'] });
+    },
+  });
+
+  // Split into licensed (can manage) and unlicensed (locked)
+  const licensed   = modules.filter((m: any) => m.licensed || m.always);
+  const unlicensed = modules.filter((m: any) => !m.licensed && !m.always);
+
+  return (
+    <div className="space-y-6 max-w-lg">
+      <div>
+        <h2 className="text-base font-semibold text-gray-900">Workspace Modules</h2>
+        <p className="text-sm text-gray-500 mt-0.5">
+          Enable or disable features for your workspace. You can only manage modules your platform administrator
+          has licensed for you.
+        </p>
+      </div>
+
+      {isLoading ? (
+        <div className="flex justify-center py-8"><Loader2 className="w-5 h-5 animate-spin text-gray-300" /></div>
+      ) : (
+        <>
+          {/* Licensed modules */}
+          <div className="space-y-3">
+            {licensed.map((mod: any) => {
+              const meta = MODULE_META[mod.key] ?? { icon: '📦' };
+              const isSaving = saving === mod.key;
+              const isAlways = mod.always;
+              return (
+                <div key={mod.key} className={`flex items-start gap-4 p-4 rounded-xl border transition-colors ${
+                  mod.enabled ? 'bg-white border-gray-200' : 'bg-gray-50 border-gray-100'
+                } ${isAlways ? 'opacity-60' : ''}`}>
+                  <span className="text-2xl mt-0.5 shrink-0">{meta.icon}</span>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className={`text-sm font-semibold ${mod.enabled ? 'text-gray-900' : 'text-gray-500'}`}>{mod.label}</p>
+                      {isAlways && (
+                        <span className="text-[10px] bg-emerald-100 text-emerald-600 px-1.5 py-0.5 rounded-full font-medium">Always On</span>
+                      )}
+                    </div>
+                    <p className="text-xs text-gray-400 mt-0.5 leading-relaxed">{mod.description}</p>
+                  </div>
+                  {isAlways ? (
+                    <span className="flex items-center gap-1 text-xs text-emerald-600 font-semibold bg-emerald-50 px-2 py-1 rounded-full shrink-0">
+                      <Check className="w-3 h-3" /> On
+                    </span>
+                  ) : (
+                    <button
+                      onClick={() => toggleMutation.mutate({ key: mod.key, enabled: !mod.enabled })}
+                      disabled={isSaving}
+                      className="shrink-0 mt-0.5"
+                      title={mod.enabled ? `Disable ${mod.label}` : `Enable ${mod.label}`}
+                    >
+                      {isSaving ? (
+                        <Loader2 className="w-8 h-8 text-brand-400 animate-spin" />
+                      ) : mod.enabled ? (
+                        <ToggleRight className="w-8 h-8 text-brand-600" />
+                      ) : (
+                        <ToggleLeft className="w-8 h-8 text-gray-300" />
+                      )}
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Unlicensed modules — visible but locked */}
+          {unlicensed.length > 0 && (
+            <div>
+              <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Not Licensed</p>
+              <div className="space-y-2">
+                {unlicensed.map((mod: any) => {
+                  const meta = MODULE_META[mod.key] ?? { icon: '📦' };
+                  return (
+                    <div key={mod.key} className="flex items-start gap-4 p-4 rounded-xl border border-dashed border-gray-200 bg-gray-50 opacity-60">
+                      <span className="text-2xl mt-0.5 shrink-0 grayscale">{meta.icon}</span>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-semibold text-gray-400">{mod.label}</p>
+                        <p className="text-xs text-gray-400 mt-0.5 leading-relaxed">{mod.description}</p>
+                      </div>
+                      <span className="shrink-0 flex items-center gap-1 text-[10px] text-gray-400 bg-gray-100 px-2 py-1 rounded-full mt-0.5 whitespace-nowrap">
+                        🔒 Not licensed
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
+      {toggleError && (
+        <div className="bg-red-50 border border-red-100 rounded-xl px-4 py-3">
+          <p className="text-xs text-red-700 flex items-start gap-1.5">
+            <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+            {toggleError}
+          </p>
+        </div>
+      )}
+
+      <div className="bg-blue-50 border border-blue-100 rounded-xl px-4 py-3">
+        <p className="text-xs text-blue-700 flex items-start gap-1.5">
+          <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+          Module changes take effect immediately for all users in your workspace. Disabling a module hides it
+          from navigation and restricts API access — existing data is preserved and reappears when re-enabled.
+          To unlock additional modules, contact your platform administrator.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 const TAB_CONTENT: Record<Tab, React.FC> = {
   workspace:     WorkspaceSettings,
+  modules:       ModulesSettings,
   team:          TeamSettings,
+  routing:       RoutingSettings,
+  tags:          TagsSettings,
   notifications: NotificationSettings,
   security:      SecuritySettings,
   appearance:    AppearanceSettings,

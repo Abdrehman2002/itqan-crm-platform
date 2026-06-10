@@ -14,8 +14,8 @@ import { getSector, SECTORS } from '@crm/shared';
 export function sectorRoutes(db: DatabaseClient) {
   return async function (fastify: FastifyInstance) {
 
-    const authHandler = [requireScope('settings:read')];
-    const writeHandler = [requireScope('settings:write')];
+    const authHandler = [requireScope('admin:read')];
+    const writeHandler = [requireScope('admin:write')];
 
     // ── GET /api/v1/sector  —  sector + all fields ───────────────────────
     fastify.get('/', { preHandler: authHandler }, async (req, reply) => {

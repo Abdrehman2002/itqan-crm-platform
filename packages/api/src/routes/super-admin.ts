@@ -4,13 +4,29 @@ import type { DatabaseClient, TenantService } from '@crm/core';
 import type { Plan } from '@crm/shared';
 import { requireRole } from '../middlewares/auth.middleware';
 
+// Full module catalog — single source of truth shared with the frontend
+export const MODULE_CATALOG = [
+  { key: 'crm',          label: 'Core CRM',           description: 'Contacts, companies, deals, activities and analytics. Always included.',           always: true  },
+  { key: 'ticketing',    label: 'Ticketing',           description: 'Support tickets, SLA management, escalations, queues and CSAT surveys.',           always: false },
+  { key: 'voice',        label: 'Voice Calls',         description: 'Inbound and outbound call logging, recordings and agent call management.',          always: false },
+  { key: 'voicebot',     label: 'Voice Bot (AI)',      description: 'AI-powered SIP/IVR voice bot for automated customer interactions.',                 always: false },
+  { key: 'emails',       label: 'Email Inbox',         description: 'Shared team email inbox with assignment, threading and SLA tracking.',              always: false },
+  { key: 'integrations', label: 'Integrations',        description: 'SMS gateways, webhooks, Zapier/Make connectors and third-party API bridges.',       always: false },
+  { key: 'analytics',    label: 'Advanced Analytics',  description: 'Cross-module reports, heatmaps, funnels and department performance dashboards.',    always: false },
+] as const;
+export type ModuleKey = typeof MODULE_CATALOG[number]['key'];
+export const ALL_MODULE_KEYS = MODULE_CATALOG.map(m => m.key) as ModuleKey[];
+
 const CreateTenantSchema = z.object({
-  name: z.string().min(2),
-  slug: z.string().min(2).regex(/^[a-z0-9-]+$/),
-  plan: z.enum(['free', 'starter', 'professional', 'enterprise']).default('starter'),
-  adminEmail: z.string().email(),
-  adminName: z.string().min(1),
+  name:         z.string().min(2),
+  slug:         z.string().min(2).regex(/^[a-z0-9-]+$/),
+  plan:         z.enum(['free', 'starter', 'professional', 'enterprise']).default('starter'),
+  adminEmail:   z.string().email(),
+  adminName:    z.string().min(1),
   customDomain: z.string().optional(),
+  // Modules this tenant is licensed for (crm always included).
+  // Super admin selects these at creation time based on what the customer has paid for.
+  modules:      z.array(z.enum(ALL_MODULE_KEYS as [ModuleKey, ...ModuleKey[]])).default(['crm']),
 });
 
 export function superAdminRoutes(db: DatabaseClient, tenantService: TenantService) {
@@ -73,7 +89,7 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
       return reply.send({
         success: true,
         data: tenants,
-        meta: { total: parseInt(count), page: Number(page), pageSize: Number(pageSize) },
+        meta: { total: parseInt(count), page: q.page, pageSize: q.pageSize },
       });
     });
 
@@ -98,6 +114,11 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
       return reply.send({ success: true, data: { ...tenant, usage } });
     });
 
+    // Full module catalog — so the frontend can render it without hard-coding
+    fastify.get('/modules', async (_req, reply) => {
+      return reply.send({ success: true, data: MODULE_CATALOG });
+    });
+
     // Create tenant (when a new customer signs up)
     fastify.post('/tenants', async (req, reply) => {
       const body = CreateTenantSchema.parse(req.body);
@@ -110,13 +131,27 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
         adminName: body.adminName,
       });
 
-      if (body.customDomain) {
-        await db.withSuperAdmin(async (client) => {
+      // Apply licensed modules (always include 'crm')
+      const licensedModules = Array.from(new Set(['crm', ...body.modules]));
+      await db.withSuperAdmin(async (client) => {
+        await client.query(
+          `UPDATE tenants SET active_modules = $1 WHERE id = $2`,
+          [licensedModules, tenant.id],
+        );
+        if (body.customDomain) {
           await client.query('UPDATE tenants SET custom_domain = $1 WHERE id = $2', [body.customDomain, tenant.id]);
-        });
-      }
+        }
+      });
 
-      return reply.code(201).send({ success: true, data: tenant });
+      // Invalidate cache so the new active_modules are visible immediately
+      await tenantService.invalidateCacheById(tenant.id);
+
+      const [updated] = await db.withSuperAdmin(async (client) => {
+        const r = await client.query('SELECT * FROM tenants WHERE id = $1', [tenant.id]);
+        return r.rows;
+      });
+
+      return reply.code(201).send({ success: true, data: updated });
     });
 
     // Upgrade / downgrade plan
@@ -127,25 +162,41 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
       return reply.send({ success: true, message: `Plan updated to ${plan}` });
     });
 
-    // Update active modules for a tenant
+    // Update licensed modules for a tenant (super admin sets the ceiling)
     // e.g. PATCH /super-admin/tenants/:id/modules { "modules": ["crm","voice","ticketing"] }
     fastify.patch('/tenants/:id/modules', async (req, reply) => {
       const { id } = req.params as { id: string };
-      const { modules } = req.body as { modules: string[] };
-      if (!Array.isArray(modules) || modules.length === 0) {
-        return reply.code(400).send({ success: false, error: { code: 'INVALID_INPUT', message: 'modules must be a non-empty array' } });
-      }
+      const body = z.object({
+        modules: z.array(z.string()).min(1),
+      }).parse(req.body);
+
       // Always ensure 'crm' is included
-      const activeModules = Array.from(new Set(['crm', ...modules]));
+      const licensedModules = Array.from(new Set(['crm', ...body.modules]));
+
       await db.withSuperAdmin(async (client) => {
+        // Update licensed modules
         await client.query(
           `UPDATE tenants SET active_modules = $1, updated_at = NOW() WHERE id = $2`,
-          [activeModules, id],
+          [licensedModules, id],
         );
+        // Prune any now-unlicensed modules from the tenant admin's enabled_modules setting
+        // so tenants can't retain access to modules that were revoked
+        const [row] = (await client.query(`SELECT settings FROM tenants WHERE id = $1`, [id])).rows;
+        const settings = row?.settings ?? {};
+        if (settings.enabled_modules) {
+          settings.enabled_modules = (settings.enabled_modules as string[]).filter(
+            (m: string) => licensedModules.includes(m),
+          );
+          await client.query(
+            `UPDATE tenants SET settings = $1 WHERE id = $2`,
+            [JSON.stringify(settings), id],
+          );
+        }
       });
+
       // Invalidate tenant cache
       await tenantService.invalidateCacheById(id);
-      return reply.send({ success: true, data: { activeModules } });
+      return reply.send({ success: true, data: { licensedModules } });
     });
 
     // Suspend tenant

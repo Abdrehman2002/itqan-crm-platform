@@ -110,23 +110,26 @@ export function invoiceRoutes(db: DatabaseClient) {
       const tenantId = req.tenant.id;
 
       // Get & increment next invoice number from settings
-      const [settings] = await db.withTenant(tenantId, (client) =>
-        client.query(`SELECT * FROM sales_settings WHERE tenant_id=$1`, [tenantId])
-      );
+      const [settings] = await db.withTenant(tenantId, async (client) => {
+        const result = await client.query(`SELECT * FROM sales_settings WHERE tenant_id=$1`, [tenantId]);
+        return result.rows;
+      });
       const prefix = settings?.invoice_prefix ?? 'INV-';
       const nextNum = settings?.next_invoice_number ?? 1;
       const invoiceNumber = `${prefix}${String(nextNum).padStart(4, '0')}`;
 
       const [inv] = await db.withTenant(tenantId, async (client) => {
-        const [row] = await client.query(
-          `INSERT INTO invoices (tenant_id, number, status, billing_contact_id, issue_date, due_date,
-            currency, po_reference, template_id, subtotal, total_tax, total, amount_due, notes, terms)
+        const insertResult = await client.query(
+          `INSERT INTO invoices (tenant_id, invoice_number, status, billing_contact_id, due_at, due_date,
+            currency, po_reference, template_id, subtotal, tax, total, provider, notes, terms)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
-          [tenantId, invoiceNumber, body.status, body.billingContactId ?? null,
-           body.issueDate, body.dueDate, body.currency, body.poReference ?? null,
-           body.templateId, body.subtotal, body.totalTax, body.total, body.total,
+          [tenantId, invoiceNumber, body.status === 'draft' ? 'open' : body.status,
+           body.billingContactId ?? null,
+           body.dueDate, body.dueDate, body.currency, body.poReference ?? null,
+           body.templateId, body.subtotal, body.totalTax, body.total, 'manual',
            body.notes ?? null, body.terms ?? null]
         );
+        const row = insertResult.rows[0];
         for (let i = 0; i < body.lineItems.length; i++) {
           const li = body.lineItems[i];
           await client.query(
@@ -155,17 +158,17 @@ export function invoiceRoutes(db: DatabaseClient) {
       const body = UpdateInvoiceSchema.parse(req.body);
       const { id } = req.params as { id: string };
       const tenantId = req.tenant.id;
-      const sets: string[] = ['updated_at = NOW()'];
+      const sets: string[] = [];
       const vals: unknown[] = [tenantId, id];
-      if (body.status !== undefined)     { sets.push(`status = $${vals.length + 1}`);      vals.push(body.status); }
+      if (body.status !== undefined)     { sets.push(`status = $${vals.length + 1}`);      vals.push(body.status === 'sent' ? 'open' : body.status); }
       if (body.dueDate !== undefined)    { sets.push(`due_date = $${vals.length + 1}`);     vals.push(body.dueDate); }
       if (body.notes !== undefined)      { sets.push(`notes = $${vals.length + 1}`);        vals.push(body.notes); }
       if (body.terms !== undefined)      { sets.push(`terms = $${vals.length + 1}`);        vals.push(body.terms); }
-      if (body.amountPaid !== undefined) { sets.push(`amount_paid = $${vals.length + 1}`);  vals.push(body.amountPaid); }
-      if (body.amountDue !== undefined)  { sets.push(`amount_due = $${vals.length + 1}`);   vals.push(body.amountDue); }
-      const [row] = await db.withTenant(tenantId, (client) =>
-        client.query(`UPDATE invoices SET ${sets.join(',')} WHERE tenant_id=$1 AND id=$2 RETURNING *`, vals)
-      );
+      if (!sets.length) return reply.send({ success: true, data: null });
+      const [row] = await db.withTenant(tenantId, async (client) => {
+        const result = await client.query(`UPDATE invoices SET ${sets.join(',')} WHERE tenant_id=$1 AND id=$2 RETURNING *`, vals);
+        return result.rows;
+      });
       return reply.send({ success: true, data: row });
     });
 
@@ -192,27 +195,25 @@ export function invoiceRoutes(db: DatabaseClient) {
         notes: z.string().optional(),
       }).parse(req.body);
 
-      const [inv] = await db.withTenant(tenantId, (client) =>
-        client.query(`SELECT * FROM invoices WHERE tenant_id=$1 AND id=$2`, [tenantId, id])
-      );
+      const [inv] = await db.withTenant(tenantId, async (client) => {
+        const result = await client.query(`SELECT * FROM invoices WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+        return result.rows;
+      });
       if (!inv) return reply.status(404).send({ success: false, error: 'Not found' });
 
-      const newPaid = Number(inv.amount_paid) + body.amount;
-      const newDue  = Math.max(0, Number(inv.total) - newPaid);
-      const newStatus = newDue <= 0 ? 'paid' : 'partial';
-
       const [payment] = await db.withTenant(tenantId, async (client) => {
-        const [p] = await client.query(
+        const result = await client.query(
           `INSERT INTO invoice_payments (tenant_id, invoice_id, amount, payment_date, mode_name, bank_account_name, reference, notes)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
           [tenantId, id, body.amount, body.paymentDate, body.modeName,
            body.bankAccountName ?? null, body.reference ?? null, body.notes ?? null]
         );
+        // Update invoice status to 'paid'
         await client.query(
-          `UPDATE invoices SET amount_paid=$1, amount_due=$2, status=$3, updated_at=NOW() WHERE id=$4`,
-          [newPaid, newDue, newStatus, id]
+          `UPDATE invoices SET status='paid' WHERE id=$1`,
+          [id]
         );
-        return [p];
+        return result.rows;
       });
       return reply.status(201).send({ success: true, data: payment });
     });

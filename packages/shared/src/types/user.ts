@@ -36,4 +36,8 @@ export interface AuthToken {
   plan: string;
   iat: number;
   exp: number;
+  department?: string | null;
+  sector?: string;
+  /** Module-level permission map from users.permissions column (e.g. { deals: "view", tickets: "full" }) */
+  permissions?: Record<string, string>;
 }

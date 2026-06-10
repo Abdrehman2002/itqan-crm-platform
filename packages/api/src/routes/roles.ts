@@ -56,7 +56,7 @@ const ROLE_HIERARCHY: Record<string, number> = {
 export function rolesRoutes(db: DatabaseClient) {
   return async function (fastify: FastifyInstance) {
 
-    // GET /api/v1/roles — list all roles for tenant
+    // GET /api/v1/roles — list all roles for tenant (system built-ins + custom DB rows)
     fastify.get('/', async (req, reply) => {
       const rows = await db.withSuperAdmin(async (client) => {
         const r = await client.query(
@@ -66,19 +66,34 @@ export function rolesRoutes(db: DatabaseClient) {
         );
         return r.rows;
       });
-      // Attach user count per role
-      const counts = await db.withSuperAdmin(async (client) => {
+
+      // Count users by both built-in role string and custom_role_id
+      const userCounts = await db.withSuperAdmin(async (client) => {
         const r = await client.query(
-          `SELECT custom_role_id, COUNT(*) as count
-           FROM users WHERE tenant_id = $1 AND custom_role_id IS NOT NULL
-           GROUP BY custom_role_id`,
+          `SELECT role, custom_role_id, COUNT(*) as count
+           FROM users WHERE tenant_id = $1 GROUP BY role, custom_role_id`,
           [req.tenant.id],
         );
-        return Object.fromEntries(r.rows.map((row: any) => [row.custom_role_id, parseInt(row.count)]));
+        return r.rows;
       });
 
-      const data = rows.map((row: any) => ({ ...row, user_count: counts[row.id] ?? 0 }));
-      return reply.send({ success: true, data });
+      const customCounts: Record<string, number> = {};
+      const builtinCounts: Record<string, number> = {};
+      for (const row of userCounts) {
+        if (row.custom_role_id) customCounts[row.custom_role_id] = (customCounts[row.custom_role_id] ?? 0) + parseInt(row.count);
+        else builtinCounts[row.role] = (builtinCounts[row.role] ?? 0) + parseInt(row.count);
+      }
+
+      // Hardcoded system roles (not stored per-tenant in DB)
+      const SYSTEM_ROLES = [
+        { id: 'tenant_admin', name: 'Admin',   description: 'Full workspace access', color: '#dc2626', is_system: true, base_role: 'tenant_admin', permissions: defaultPermissions('tenant_admin') },
+        { id: 'manager',      name: 'Manager', description: 'Team management & records', color: '#d97706', is_system: true, base_role: 'manager',      permissions: defaultPermissions('manager') },
+        { id: 'agent',        name: 'Agent',   description: 'Day-to-day CRM operations', color: '#2563eb', is_system: true, base_role: 'agent',         permissions: defaultPermissions('agent') },
+        { id: 'viewer',       name: 'Viewer',  description: 'Read-only access',       color: '#6b7280', is_system: true, base_role: 'viewer',        permissions: defaultPermissions('viewer') },
+      ].map((r) => ({ ...r, created_at: null, user_count: builtinCounts[r.base_role] ?? 0 }));
+
+      const customData = rows.map((row: any) => ({ ...row, user_count: customCounts[row.id] ?? 0 }));
+      return reply.send({ success: true, data: [...SYSTEM_ROLES, ...customData] });
     });
 
     // GET /api/v1/roles/modules — module definitions

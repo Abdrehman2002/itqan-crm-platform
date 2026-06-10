@@ -179,6 +179,11 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
         return reply.code(401).send({ success: false, error: { code: 'INVALID_CREDENTIALS', message: 'Invalid credentials' } });
       }
 
+      // ── Suspended tenant check ───────────────────────────────────────────
+      if (tenant.status === 'suspended') {
+        return reply.code(403).send({ success: false, error: { code: 'TENANT_SUSPENDED', message: 'This workspace has been suspended. Please contact your platform administrator.' } });
+      }
+
       // ── Account lockout check ─────────────────────────────────────────────
       const lockKey = LOCKOUT_KEY(tenant.id, body.email);
       const lockedUntil = await redis.get(lockKey);
@@ -248,17 +253,18 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
         await client.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]);
       }).catch((e) => { fastify.log.error({ err: e }, 'Failed to update last_login_at'); });
 
+      // Effective permissions: custom role permissions take priority, else use stored permissions
+      const effectivePermissions = user.role_permissions ?? user.permissions ?? {};
+
       // Include a unique JTI (JWT ID) so this specific token can be revoked on logout
       const jti   = crypto.randomBytes(16).toString('hex');
       const token = await reply.jwtSign({
         sub: user.id, tenantId: tenant.id, role: user.role, plan: tenant.plan,
         department: user.department ?? null,
         sector:     tenant.sector ?? 'other',
+        permissions: effectivePermissions,
         jti,
       });
-
-      // Effective permissions: custom role permissions take priority, else use stored permissions
-      const effectivePermissions = user.role_permissions ?? user.permissions ?? {};
 
       const { password_hash, ...safeUser } = user;
       return reply.send({ success: true, data: {

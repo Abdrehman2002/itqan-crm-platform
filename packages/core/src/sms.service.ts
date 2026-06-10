@@ -107,13 +107,64 @@ export class SmsService {
     return { provider: null, config: null };
   }
 
+  // ── Notify tenant admin when no SMS connector is configured ────────────
+  // Throttled to once per 4 hours per tenant so admins aren't spammed.
+  private async notifyAdminNoConnector(tenantId: string, attemptedTo: string): Promise<void> {
+    try {
+      const admins = await this.db.withSuperAdmin(async (client) => {
+        const r = await client.query(
+          `SELECT id FROM users
+           WHERE tenant_id = $1
+             AND role IN ('tenant_admin','super_admin')
+             AND is_active = true
+           LIMIT 5`,
+          [tenantId],
+        );
+        return r.rows as Array<{ id: string }>;
+      });
+      if (!admins.length) return;
+
+      // Throttle: skip if we already sent this alert within 4 hours
+      const [recent] = await this.db.withSuperAdmin(async (client) => {
+        const r = await client.query(
+          `SELECT id FROM notifications
+           WHERE tenant_id = $1
+             AND type = 'sms_gateway_missing'
+             AND created_at > NOW() - INTERVAL '4 hours'
+           LIMIT 1`,
+          [tenantId],
+        );
+        return r.rows;
+      });
+      if (recent) return;
+
+      const title   = '⚠️ SMS Gateway Not Configured';
+      const message = `A message to ${attemptedTo} could not be sent — no SMS connector is configured for your workspace. Please configure one under Settings → Integrations (Twilio, Jazz SMS, Telenor, Zong, Ufone, or HTTP Gateway).`;
+
+      await this.db.withSuperAdmin(async (client) => {
+        for (const admin of admins) {
+          await client.query(
+            `INSERT INTO notifications (tenant_id, user_id, type, title, message, is_read, created_at)
+             VALUES ($1, $2, 'sms_gateway_missing', $3, $4, false, NOW())`,
+            [tenantId, admin.id, title, message],
+          );
+        }
+      });
+      logger.warn('SmsService: admin notified — SMS gateway missing', { tenantId });
+    } catch (err: any) {
+      logger.error('SmsService: could not send admin alert', { error: err.message });
+    }
+  }
+
   // ── Send SMS ─────────────────────────────────────────────────────────
 
   async send(tenantId: string, opts: SendSmsOpts): Promise<SendSmsResult> {
     const { provider, config } = await this.getConnectorConfig(tenantId);
 
     if (!provider) {
-      logger.warn('SmsService: no SMS connector configured', { tenantId });
+      logger.warn('SmsService: no SMS connector configured', { tenantId, to: opts.to });
+      // Fire-and-forget admin alert (throttled — won't spam)
+      this.notifyAdminNoConnector(tenantId, opts.to).catch(() => {});
       return { success: false, error: 'No SMS gateway configured' };
     }
 

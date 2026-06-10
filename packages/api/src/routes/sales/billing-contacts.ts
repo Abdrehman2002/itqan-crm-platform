@@ -29,29 +29,31 @@ export function billingContactRoutes(db: DatabaseClient) {
     fastify.get('/', { preHandler: requireScope('contacts:read') }, async (req, reply) => {
       const tenantId = req.tenant.id;
       const search = (req.query as any).search as string | undefined;
-      const rows = await db.withTenant(tenantId, (client) =>
-        client.query(
+      const rows = await db.withTenant(tenantId, async (client) => {
+        const result = await client.query(
           `SELECT * FROM billing_contacts
            WHERE tenant_id = $1
            ${search ? `AND (name ILIKE $2 OR email ILIKE $2 OR company ILIKE $2)` : ''}
            ORDER BY name`,
           search ? [tenantId, `%${search}%`] : [tenantId]
-        )
-      );
+        );
+        return result.rows;
+      });
       return reply.send({ success: true, data: rows });
     });
 
     fastify.post('/', { preHandler: requireScope('contacts:write') }, async (req, reply) => {
       const body = CreateSchema.parse(req.body);
       const tenantId = req.tenant.id;
-      const [row] = await db.withTenant(tenantId, (client) =>
-        client.query(
+      const [row] = await db.withTenant(tenantId, async (client) => {
+        const result = await client.query(
           `INSERT INTO billing_contacts (tenant_id, name, email, phone, company, currency, tax_id, billing_address)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
           [tenantId, body.name, body.email, body.phone ?? null, body.company ?? null,
            body.currency, body.taxId ?? null, JSON.stringify(body.billingAddress)]
-        )
-      );
+        );
+        return result.rows;
+      });
       return reply.status(201).send({ success: true, data: row });
     });
 

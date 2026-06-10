@@ -227,6 +227,10 @@ async function buildServer() {
     if (isPublic) return;
     await authMiddleware(req, reply);
     if (reply.sent) return;
+    // Super admin is restricted to /super-admin/* routes only — not tenant-scoped /api/v1/*
+    if (req.url.startsWith('/api/v1/') && (req.user as any)?.role === 'super_admin') {
+      return reply.code(403).send({ success: false, error: { code: 'FORBIDDEN', message: 'Super admin cannot access tenant-scoped routes. Use /super-admin/* endpoints.' } });
+    }
     await tenantMiddleware(req, reply);
   });
 

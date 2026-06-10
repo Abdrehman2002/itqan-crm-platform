@@ -96,6 +96,30 @@ export function contactRoutes(db: DatabaseClient, eventBus: EventBus) {
       const body = CreateContactSchema.parse(req.body);
       const ownerId = body.ownerId ?? req.user.sub;
 
+      const requiredFields = await db.withTenant(req.tenant.id, async (client) => {
+        const r = await client.query(
+          `SELECT name FROM custom_field_definitions WHERE tenant_id = $1 AND entity = 'contact' AND is_required = true`,
+          [req.tenant.id],
+        );
+        return r.rows.map((row: { name: string }) => row.name);
+      });
+
+      const customFields = body.customFields ?? {};
+      const missingFields = requiredFields.filter(
+        (name: string) => customFields[name] === undefined || customFields[name] === null || customFields[name] === '',
+      );
+
+      if (missingFields.length > 0) {
+        return reply.code(400).send({
+          success: false,
+          error: {
+            code: 'MISSING_REQUIRED_FIELDS',
+            message: `Missing required sector fields: ${missingFields.join(', ')}`,
+            fields: missingFields,
+          },
+        });
+      }
+
       const [contact] = await db.withTenant(req.tenant.id, async (client) => {
         const result = await client.query(
           `INSERT INTO contacts (tenant_id, first_name, last_name, email, phone, mobile,
@@ -250,13 +274,17 @@ export function contactRoutes(db: DatabaseClient, eventBus: EventBus) {
     fastify.delete('/:id', { preHandler: requireScope('contacts:write') }, async (req, reply) => {
       const { id } = req.params as { id: string };
       try {
-        await db.withTenant(req.tenant.id, async (client) => {
+        const deleted = await db.withTenant(req.tenant.id, async (client) => {
           // Nullify FK references before deleting
           await client.query('UPDATE deals SET contact_id = NULL WHERE contact_id = $1', [id]);
           await client.query('UPDATE activities SET contact_id = NULL WHERE contact_id = $1', [id]);
           await client.query('UPDATE voice_calls SET contact_id = NULL WHERE contact_id = $1', [id]);
-          await client.query('DELETE FROM contacts WHERE id = $1', [id]);
+          const result = await client.query('DELETE FROM contacts WHERE id = $1', [id]);
+          return result.rowCount ?? 0;
         });
+        if (deleted === 0) {
+          return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Contact not found' } });
+        }
       } catch (err: any) {
         return reply.code(409).send({ success: false, error: { code: 'CONFLICT', message: 'Cannot delete contact — please remove linked records first' } });
       }

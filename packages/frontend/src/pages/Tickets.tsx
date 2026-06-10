@@ -31,7 +31,8 @@ import {
   ArrowUpCircle, CheckCheck, UserCheck, Filter,
   LifeBuoy, PhoneCall, ChevronRight,
   Calendar, TrendingUp, ShieldAlert, Timer,
-  Circle,
+  Circle, ArrowRightLeft, CornerUpLeft, StickyNote,
+  Reply,
 } from 'lucide-react';
 import { api } from '../services/api';
 import { useCan } from '../hooks/useRole';
@@ -66,10 +67,28 @@ interface Comment {
   id: string;
   body: string;
   is_internal: boolean;
+  comment_type: 'reply' | 'remark' | 'note';
   author_name_resolved?: string;
+  author_role?: string;
   created_at: string;
+  // WhatsApp-style reply quote
+  reply_to_id?: string;
+  reply_to_body?: string;
+  reply_to_created_at?: string;
+  reply_to_author_name?: string;
 }
-interface TicketDetail extends Ticket { comments: Comment[]; escalations: any[] }
+interface TicketDetail extends Ticket {
+  comments: Comment[];
+  escalations: any[];
+  // Warm-transfer fields
+  prev_assignee_id?: string;
+  prev_assignee_name?: string;
+  manager_overridden_by?: string;
+  manager_overridden_by_name?: string;
+  manager_overridden_at?: string;
+  manager_override_note?: string;
+  age_seconds?: number;
+}
 
 interface Stats {
   total: string;
@@ -501,13 +520,134 @@ function CreateTicketModal({ queues, onClose }: { queues: Queue[]; onClose: () =
   );
 }
 
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function fmtAge(seconds: number): string {
+  if (seconds < 60)    return `${Math.floor(seconds)}s`;
+  if (seconds < 3600)  return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  return h > 0 ? `${d}d ${h}h` : `${d}d`;
+}
+
+function fmtExact(iso: string): string {
+  return new Date(iso).toLocaleString('en-US', {
+    year: 'numeric', month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  });
+}
+
+// ── Quoted remark preview (WhatsApp-style) ────────────────────────────────
+function ReplyQuote({ authorName, body, createdAt }: {
+  authorName?: string; body?: string; createdAt?: string;
+}) {
+  if (!body) return null;
+  const preview = body.length > 120 ? body.slice(0, 120) + '…' : body;
+  return (
+    <div className="flex items-stretch gap-0 mb-2 rounded-lg overflow-hidden border border-brand-200/60">
+      <div className="w-1 shrink-0 bg-brand-400 rounded-l-lg" />
+      <div className="flex-1 bg-brand-50/80 px-3 py-1.5 min-w-0">
+        <p className="text-[10px] font-semibold text-brand-600 mb-0.5">
+          {authorName ?? 'Unknown'}{createdAt ? ` · ${fmtExact(createdAt)}` : ''}
+        </p>
+        <p className="text-xs text-gray-600 leading-relaxed whitespace-pre-wrap break-words">{preview}</p>
+      </div>
+    </div>
+  );
+}
+
+// ── Single remark / comment bubble ───────────────────────────────────────
+function CommentBubble({ c, onReply, canReply }: {
+  c: Comment; onReply: (c: Comment) => void; canReply: boolean;
+}) {
+  const isRemark  = c.comment_type === 'remark';
+  const isNote    = c.comment_type === 'note' || (c.is_internal && c.comment_type === 'reply');
+  const initials  = (c.author_name_resolved ?? 'A')[0].toUpperCase();
+
+  const roleColor: Record<string, string> = {
+    manager:      'bg-orange-100 text-orange-700',
+    tenant_admin: 'bg-red-100 text-red-700',
+    agent:        'bg-blue-100 text-blue-700',
+    super_admin:  'bg-purple-100 text-purple-700',
+  };
+
+  let bubbleCls = 'bg-white border border-gray-100';
+  let typeLabel: React.ReactNode = null;
+  if (isRemark) {
+    bubbleCls = 'bg-violet-50 border border-violet-200';
+    typeLabel = (
+      <span className="flex items-center gap-1 text-[10px] text-violet-600 bg-violet-100 px-1.5 py-0.5 rounded-full border border-violet-200 font-medium">
+        <StickyNote className="w-2.5 h-2.5" /> Remark
+      </span>
+    );
+  } else if (isNote) {
+    bubbleCls = 'bg-amber-50 border border-amber-200';
+    typeLabel = (
+      <span className="flex items-center gap-1 text-[10px] text-amber-600 bg-amber-100 px-1.5 py-0.5 rounded-full border border-amber-200 font-medium">
+        <Lock className="w-2.5 h-2.5" /> Internal
+      </span>
+    );
+  }
+
+  return (
+    <div className={`group rounded-xl p-3 ${bubbleCls}`}>
+      {/* Header row: avatar + name + role + type + timestamp */}
+      <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+        <div className="w-6 h-6 rounded-full bg-brand-600 flex items-center justify-center text-[10px] font-bold text-white shrink-0">
+          {initials}
+        </div>
+        <span className="text-xs font-semibold text-gray-800">
+          {c.author_name_resolved ?? 'Agent'}
+        </span>
+        {c.author_role && (
+          <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 ${roleColor[c.author_role] ?? 'bg-gray-100 text-gray-600'}`}>
+            {c.author_role.replace('_', ' ')}
+          </span>
+        )}
+        {typeLabel}
+        <span className="ml-auto text-[10px] text-gray-400 shrink-0">{fmtExact(c.created_at)}</span>
+        {/* Reply button — appears on hover */}
+        {canReply && (
+          <button
+            onClick={() => onReply(c)}
+            className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-lg text-gray-400 hover:text-brand-600 hover:bg-brand-50 shrink-0"
+            title="Reply to this remark"
+          >
+            <Reply className="w-3.5 h-3.5" />
+          </button>
+        )}
+      </div>
+
+      {/* Quoted reply (WhatsApp-style) */}
+      {c.reply_to_id && (
+        <ReplyQuote
+          authorName={c.reply_to_author_name}
+          body={c.reply_to_body}
+          createdAt={c.reply_to_created_at}
+        />
+      )}
+
+      {/* Message body */}
+      <p className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap break-words">{c.body}</p>
+    </div>
+  );
+}
+
 // ── Ticket detail side panel ───────────────────────────────────────────────
 function TicketPanel({ ticketId, onClose }: { ticketId: string; onClose: () => void }) {
   const qc  = useQueryClient();
   const can = useCan();
-  const [comment, setComment]     = useState('');
-  const [isInternal, setInternal] = useState(false);
-  const commentsEndRef = useRef<HTMLDivElement>(null);
+
+  // Tab: 'conversation' | 'remarks'
+  const [activeTab, setActiveTab]     = useState<'conversation' | 'remarks'>('conversation');
+  const [comment, setComment]         = useState('');
+  const [isInternal, setInternal]     = useState(false);
+  // WhatsApp-style reply-to state
+  const [replyTo, setReplyTo]         = useState<Comment | null>(null);
+  const commentsEndRef                = useRef<HTMLDivElement>(null);
+  const remarksEndRef                 = useRef<HTMLDivElement>(null);
+  const inputRef                      = useRef<HTMLTextAreaElement>(null);
 
   const { data: t, isLoading } = useQuery<TicketDetail>({
     queryKey: ['ticket', ticketId],
@@ -515,9 +655,14 @@ function TicketPanel({ ticketId, onClose }: { ticketId: string; onClose: () => v
     refetchInterval: 20_000,
   });
 
+  const allComments = t?.comments ?? [];
+  const conversation = allComments.filter(c => c.comment_type !== 'remark');
+  const remarks      = allComments.filter(c => c.comment_type === 'remark');
+
   useEffect(() => {
-    commentsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [t?.comments.length]);
+    if (activeTab === 'conversation') commentsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    else remarksEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [allComments.length, activeTab]);
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['ticket', ticketId] });
@@ -527,10 +672,21 @@ function TicketPanel({ ticketId, onClose }: { ticketId: string; onClose: () => v
 
   const acceptMutation  = useMutation({ mutationFn: () => api.post(`/api/v1/tickets/${ticketId}/accept`, {}),  onSuccess: invalidate });
   const resolveMutation = useMutation({ mutationFn: () => api.post(`/api/v1/tickets/${ticketId}/resolve`, {}), onSuccess: invalidate });
+
   const commentMutation = useMutation({
-    mutationFn: () => api.post(`/api/v1/tickets/${ticketId}/comments`, { body: comment, isInternal }),
-    onSuccess: () => { setComment(''); invalidate(); },
+    mutationFn: () => api.post(`/api/v1/tickets/${ticketId}/comments`, {
+      body:        comment,
+      isInternal,
+      commentType: activeTab === 'remarks' ? 'remark' : (isInternal ? 'note' : 'reply'),
+      replyToId:   replyTo?.id ?? undefined,
+    }),
+    onSuccess: () => { setComment(''); setReplyTo(null); invalidate(); },
   });
+
+  const handleReply = (c: Comment) => {
+    setReplyTo(c);
+    inputRef.current?.focus();
+  };
 
   if (isLoading || !t) return (
     <div className="fixed inset-0 z-40 flex justify-end">
@@ -544,6 +700,7 @@ function TicketPanel({ ticketId, onClose }: { ticketId: string; onClose: () => v
   const pc = PRIORITY_CFG[t.priority] ?? PRIORITY_CFG.medium;
   const sc = STATUS_CFG[t.status]     ?? STATUS_CFG.open;
   const slaInfo = fmtSla(t.sla_seconds_remaining, t.is_overdue);
+  const isWarmTransfer = !!t.prev_assignee_id && !!t.manager_overridden_by;
 
   return (
     <div className="fixed inset-0 z-40 flex justify-end">
@@ -551,7 +708,7 @@ function TicketPanel({ ticketId, onClose }: { ticketId: string; onClose: () => v
       <div className="relative w-full max-w-xl bg-gray-50 border-l border-gray-200 flex flex-col overflow-hidden">
 
         {/* Panel header */}
-        <div className="flex items-start justify-between px-5 pt-5 pb-4 border-b border-gray-200 shrink-0">
+        <div className="flex items-start justify-between px-5 pt-5 pb-4 border-b border-gray-200 shrink-0 bg-white">
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap mb-1.5">
               <span className="font-mono text-xs font-bold text-gray-400 tracking-widest">{t.ticket_number}</span>
@@ -561,6 +718,13 @@ function TicketPanel({ ticketId, onClose }: { ticketId: string; onClose: () => v
               <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${pc.badge}`}>
                 <span className={`inline-block w-1.5 h-1.5 rounded-full mr-1.5 ${pc.dot}`} />{pc.label}
               </span>
+              {/* Age chip — always visible */}
+              {t.age_seconds != null && (
+                <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-gray-100 text-gray-600 border border-gray-200">
+                  <Timer className="w-3 h-3" />
+                  Age: {fmtAge(t.age_seconds)}
+                </span>
+              )}
               {t.escalation_level >= 2 && (
                 <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-red-900/80 text-red-300 border border-red-600/50">
                   <ShieldAlert className="w-3 h-3" /> Escalated L{t.escalation_level}
@@ -574,35 +738,106 @@ function TicketPanel({ ticketId, onClose }: { ticketId: string; onClose: () => v
           </button>
         </div>
 
-        {/* SLA bar (always visible if set) */}
+        {/* SLA bar */}
         {slaInfo && !['resolved','closed'].includes(t.status) && (
           <div className={`px-5 py-2.5 border-b border-gray-200 ${t.is_overdue ? 'bg-red-50' : 'bg-white'}`}>
             <SlaBar ticket={t} />
           </div>
         )}
 
+        {/* ── WARM TRANSFER BANNER ─────────────────────────────────────── */}
+        {isWarmTransfer && (
+          <div className="mx-4 mt-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 shrink-0">
+            <div className="flex items-center gap-2 mb-2">
+              <ArrowRightLeft className="w-4 h-4 text-blue-600 shrink-0" />
+              <p className="text-xs font-semibold text-blue-800">This ticket was transferred to you</p>
+            </div>
+            <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs">
+              <div>
+                <span className="text-blue-500 font-medium">Originally created</span>
+                <p className="text-blue-900 font-semibold mt-0.5">{fmtExact(t.created_at)}</p>
+              </div>
+              <div>
+                <span className="text-blue-500 font-medium">Time elapsed</span>
+                <p className="text-blue-900 font-semibold mt-0.5">
+                  {t.age_seconds != null ? fmtAge(t.age_seconds) : '—'} since creation
+                </p>
+              </div>
+              <div>
+                <span className="text-blue-500 font-medium">Previously with</span>
+                <p className="text-blue-900 font-semibold mt-0.5">{t.prev_assignee_name ?? '—'}</p>
+              </div>
+              <div>
+                <span className="text-blue-500 font-medium">Transferred by</span>
+                <p className="text-blue-900 font-semibold mt-0.5">{t.manager_overridden_by_name ?? '—'}</p>
+              </div>
+              {t.manager_overridden_at && (
+                <div>
+                  <span className="text-blue-500 font-medium">Transferred on</span>
+                  <p className="text-blue-900 font-semibold mt-0.5">{fmtExact(t.manager_overridden_at)}</p>
+                </div>
+              )}
+              {t.manager_override_note && (
+                <div className="col-span-2 mt-1 bg-white/70 rounded-lg px-3 py-2 border border-blue-200">
+                  <span className="text-blue-500 font-medium">Transfer note</span>
+                  <p className="text-blue-900 mt-0.5 leading-relaxed">{t.manager_override_note}</p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── TABS ─────────────────────────────────────────────────────── */}
+        <div className="flex gap-0 px-5 pt-3 pb-0 border-b border-gray-200 bg-white shrink-0">
+          {([
+            { id: 'conversation', label: 'Conversation', icon: MessageSquare, count: conversation.length },
+            { id: 'remarks',      label: 'Remarks',       icon: StickyNote,    count: remarks.length     },
+          ] as const).map(({ id, label, icon: Icon, count }) => (
+            <button
+              key={id}
+              onClick={() => setActiveTab(id)}
+              className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold border-b-2 transition-colors -mb-px ${
+                activeTab === id
+                  ? id === 'remarks'
+                    ? 'border-violet-500 text-violet-700'
+                    : 'border-brand-500 text-brand-700'
+                  : 'border-transparent text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              <Icon className="w-3.5 h-3.5" />
+              {label}
+              <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
+                activeTab === id
+                  ? id === 'remarks' ? 'bg-violet-100 text-violet-700' : 'bg-brand-100 text-brand-700'
+                  : 'bg-gray-100 text-gray-500'
+              }`}>{count}</span>
+            </button>
+          ))}
+        </div>
+
+        {/* ── SCROLLABLE BODY ──────────────────────────────────────────── */}
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
 
-    
-          {/* Milestone progress bar */}
-          {ticket.milestones && ticket.milestones.length > 0 && (() => {
-            const total = ticket.milestones.length;
-            const done  = ticket.milestones.filter((m: any) => m.completed).length;
-            const pct   = Math.round((done / total) * 100);
-            return (
-              <div className="mt-2">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-[10px] text-gray-400 font-medium">Progress</span>
-                  <span className="text-[10px] text-gray-500">{done}/{total} steps</span>
-                </div>
-                <div className="h-1 bg-gray-100 rounded-full overflow-hidden">
-                  <div className={`h-full rounded-full transition-all ${pct === 100 ? 'bg-green-500' : 'bg-brand-500'}`}
-                       style={{ width: `${pct}%` }} />
-                </div>
+          {/* Ticket age + creation info */}
+          {t.age_seconds != null && (
+            <div className="flex items-center gap-3 bg-white rounded-xl px-4 py-2.5 border border-gray-100">
+              <Clock className="w-4 h-4 text-gray-400 shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p className="text-xs text-gray-500">
+                  <span className="font-semibold text-gray-800">Created:</span> {fmtExact(t.created_at)}
+                </p>
               </div>
-            );
-          })()}
-      {/* Action buttons */}
+              <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${
+                t.age_seconds > 86400 ? 'bg-red-100 text-red-700' :
+                t.age_seconds > 3600  ? 'bg-yellow-100 text-yellow-700' :
+                'bg-green-100 text-green-700'
+              }`}>
+                {fmtAge(t.age_seconds)} old
+              </span>
+            </div>
+          )}
+
+          {/* Action buttons */}
           {can.writeRecords && (
             <div className="flex gap-2 flex-wrap">
               {['open','assigned'].includes(t.status) && (
@@ -625,19 +860,19 @@ function TicketPanel({ ticketId, onClose }: { ticketId: string; onClose: () => v
           {/* Info grid */}
           <div className="grid grid-cols-2 gap-3">
             {[
-              { label: 'Reporter',   val: t.reporter_name  || '—'  },
-              { label: 'Phone',      val: t.reporter_phone || '—'  },
-              { label: 'Email',      val: t.reporter_email || '—'  },
-              { label: 'Assigned To',val: t.assignee_name  || 'Unassigned' },
-              { label: 'Queue',      val: t.queue_name     || '—'  },
-              { label: 'Created',    val: fmtDate(t.created_at)     },
+              { label: 'Reporter',    val: t.reporter_name  || '—' },
+              { label: 'Phone',       val: t.reporter_phone || '—' },
+              { label: 'Email',       val: t.reporter_email || '—' },
+              { label: 'Assigned To', val: t.assignee_name  || 'Unassigned' },
+              { label: 'Queue',       val: t.queue_name     || '—' },
+              { label: 'Created',     val: fmtDate(t.created_at) },
               ...(t.accepted_at ? [{ label: 'Accepted', val: fmtDate(t.accepted_at) }] : []),
               ...(t.sla_due_at  ? [{ label: 'TAT Due',  val: fmtDate(t.sla_due_at)  }] : []),
               ...(t.resolved_at ? [{ label: 'Resolved', val: fmtDate(t.resolved_at) }] : []),
             ].map(({ label, val }) => (
               <div key={label} className="bg-white rounded-xl px-3 py-2.5">
                 <p className="text-[10px] text-gray-500 uppercase tracking-wider">{label}</p>
-                <p className="text-sm font-medium text-gray-500 mt-0.5 truncate">{val}</p>
+                <p className="text-sm font-medium text-gray-700 mt-0.5 truncate">{val}</p>
               </div>
             ))}
           </div>
@@ -646,7 +881,7 @@ function TicketPanel({ ticketId, onClose }: { ticketId: string; onClose: () => v
           {t.description && (
             <div className="bg-white rounded-xl p-3">
               <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1.5">Problem Description</p>
-              <p className="text-sm text-gray-500 leading-relaxed whitespace-pre-wrap">{t.description}</p>
+              <p className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap">{t.description}</p>
             </div>
           )}
 
@@ -665,61 +900,138 @@ function TicketPanel({ ticketId, onClose }: { ticketId: string; onClose: () => v
             </div>
           )}
 
-          {/* Comments */}
-          <div className="space-y-3">
-            <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-1.5">
-              <MessageSquare className="w-3.5 h-3.5" /> Conversation ({t.comments.length})
-            </p>
-            {t.comments.length === 0 && (
-              <p className="text-xs text-gray-700 text-center py-4">No messages yet</p>
-            )}
-            {t.comments.map((c) => (
-              <div key={c.id} className={`rounded-xl p-3 ${c.is_internal ? 'bg-amber-50 border border-amber-200' : 'bg-white border border-gray-100'}`}>
-                <div className="flex items-center gap-2 mb-1.5">
-                  <div className="w-6 h-6 rounded-full bg-brand-800 flex items-center justify-center text-xs font-bold text-brand-200 shrink-0">
-                    {(c.author_name_resolved ?? 'A')[0].toUpperCase()}
-                  </div>
-                  <span className="text-xs font-medium text-gray-500">{c.author_name_resolved ?? 'Agent'}</span>
-                  {c.is_internal && (
-                    <span className="flex items-center gap-1 text-[10px] text-amber-500 bg-amber-900/40 px-1.5 py-0.5 rounded-full border border-amber-700/40">
-                      <Lock className="w-2.5 h-2.5" /> Internal
-                    </span>
-                  )}
-                  <span className="ml-auto text-[10px] text-gray-700">{fmtDate(c.created_at)}</span>
-                </div>
-                <p className="text-sm text-gray-500 leading-relaxed whitespace-pre-wrap">{c.body}</p>
-              </div>
-            ))}
-            <div ref={commentsEndRef} />
-          </div>
+          {/* ── CONVERSATION TAB ─────────────────────────────────────── */}
+          {activeTab === 'conversation' && (
+            <div className="space-y-3">
+              <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-1.5">
+                <MessageSquare className="w-3.5 h-3.5" /> Conversation ({conversation.length})
+              </p>
+              {conversation.length === 0 && (
+                <p className="text-xs text-gray-500 text-center py-6">No messages yet</p>
+              )}
+              {conversation.map(c => (
+                <CommentBubble key={c.id} c={c} onReply={handleReply} canReply={can.writeRecords && !['closed'].includes(t.status)} />
+              ))}
+              <div ref={commentsEndRef} />
+            </div>
+          )}
 
-          {/* Add comment */}
+          {/* ── REMARKS TAB ──────────────────────────────────────────── */}
+          {activeTab === 'remarks' && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-1.5">
+                  <StickyNote className="w-3.5 h-3.5 text-violet-500" />
+                  <span className="text-violet-600">Agent Remarks</span>
+                  <span className="ml-1 px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700 text-[10px] font-bold">{remarks.length}</span>
+                </p>
+              </div>
+              <p className="text-[11px] text-gray-400 leading-relaxed bg-violet-50 border border-violet-100 rounded-lg px-3 py-2">
+                Remarks are internal notes visible only to agents and managers. Add context, updates, or observations. Click
+                <Reply className="w-3 h-3 inline mx-1 text-violet-500" />
+                on any remark to reply with a quoted reference.
+              </p>
+              {remarks.length === 0 && (
+                <p className="text-xs text-gray-500 text-center py-6">No remarks yet. Add the first one below.</p>
+              )}
+              {remarks.map(c => (
+                <CommentBubble key={c.id} c={c} onReply={handleReply} canReply={can.writeRecords && !['closed'].includes(t.status)} />
+              ))}
+              <div ref={remarksEndRef} />
+            </div>
+          )}
+
+          {/* ── INPUT AREA ────────────────────────────────────────────── */}
           {can.writeRecords && !['closed'].includes(t.status) && (
             <div className="space-y-2">
-              <div className="flex gap-2">
-                {[
-                  { val: false, label: 'Reply', icon: Send },
-                  { val: true,  label: 'Internal Note', icon: Lock },
-                ].map(({ val, label, icon: Icon }) => (
-                  <button key={String(val)} onClick={() => setInternal(val)}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border transition-all ${
-                      isInternal === val
-                        ? val ? 'bg-amber-900/60 text-amber-300 border-amber-700/50' : 'bg-brand-600/60 text-brand-200 border-brand-600/50'
-                        : 'border-gray-200 text-gray-400 hover:border-gray-300'
-                    }`}>
-                    <Icon className="w-3 h-3" /> {label}
+
+              {/* Reply-to quote preview (shown when replying to a specific remark) */}
+              {replyTo && (
+                <div className="flex items-start gap-2 bg-brand-50 border border-brand-200 rounded-xl px-3 py-2">
+                  <CornerUpLeft className="w-3.5 h-3.5 text-brand-500 mt-0.5 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[10px] font-semibold text-brand-600 mb-0.5">
+                      Replying to {replyTo.author_name_resolved ?? 'Agent'} · {fmtExact(replyTo.created_at)}
+                    </p>
+                    <p className="text-xs text-gray-600 truncate">
+                      {replyTo.body.length > 100 ? replyTo.body.slice(0, 100) + '…' : replyTo.body}
+                    </p>
+                  </div>
+                  <button onClick={() => setReplyTo(null)} className="text-gray-400 hover:text-gray-600 shrink-0 mt-0.5">
+                    <X className="w-3.5 h-3.5" />
                   </button>
-                ))}
-              </div>
-              <div className="flex gap-2">
-                <textarea value={comment} onChange={e => setComment(e.target.value)} rows={3}
-                  placeholder={isInternal ? 'Write internal note…' : 'Write a reply…'}
-                  className="flex-1 bg-white border border-gray-200 text-gray-800 placeholder-gray-600 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-brand-500/60 resize-none" />
-                <button onClick={() => commentMutation.mutate()} disabled={!comment.trim() || commentMutation.isPending}
-                  className="self-end p-2.5 bg-brand-600 text-white rounded-xl hover:bg-brand-500 disabled:opacity-40">
-                  {commentMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                </div>
+              )}
+
+              {/* Message type selector — only on Conversation tab */}
+              {activeTab === 'conversation' && (
+                <div className="flex gap-2">
+                  {[
+                    { val: false, label: 'Reply to Customer', icon: Send },
+                    { val: true,  label: 'Internal Note',     icon: Lock },
+                  ].map(({ val, label, icon: Icon }) => (
+                    <button key={String(val)} onClick={() => setInternal(val)}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border transition-all ${
+                        isInternal === val
+                          ? val ? 'bg-amber-50 text-amber-700 border-amber-300' : 'bg-brand-50 text-brand-700 border-brand-300'
+                          : 'border-gray-200 text-gray-400 hover:border-gray-300'
+                      }`}>
+                      <Icon className="w-3 h-3" /> {label}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Remark badge when on remarks tab */}
+              {activeTab === 'remarks' && (
+                <div className="flex items-center gap-1.5 text-xs text-violet-600">
+                  <StickyNote className="w-3 h-3" />
+                  <span className="font-medium">Adding a remark</span>
+                  <span className="text-violet-400">— internal only, not visible to customers</span>
+                </div>
+              )}
+
+              <div className="flex gap-2 items-end">
+                <textarea
+                  ref={inputRef}
+                  value={comment}
+                  onChange={e => setComment(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && comment.trim()) {
+                      e.preventDefault();
+                      commentMutation.mutate();
+                    }
+                  }}
+                  rows={3}
+                  placeholder={
+                    activeTab === 'remarks'
+                      ? 'Write a remark… (Cmd/Ctrl+Enter to send)'
+                      : isInternal
+                        ? 'Write internal note… (Cmd/Ctrl+Enter to send)'
+                        : 'Write a reply to the customer… (Cmd/Ctrl+Enter to send)'
+                  }
+                  className={`flex-1 border rounded-xl px-3 py-2.5 text-sm outline-none resize-none ${
+                    activeTab === 'remarks'
+                      ? 'bg-violet-50 border-violet-200 text-gray-800 placeholder-violet-300 focus:border-violet-400'
+                      : 'bg-white border-gray-200 text-gray-800 placeholder-gray-400 focus:border-brand-400'
+                  }`}
+                />
+                <button
+                  onClick={() => commentMutation.mutate()}
+                  disabled={!comment.trim() || commentMutation.isPending}
+                  className={`self-end p-2.5 rounded-xl text-white disabled:opacity-40 ${
+                    activeTab === 'remarks' ? 'bg-violet-600 hover:bg-violet-700' : 'bg-brand-600 hover:bg-brand-500'
+                  }`}
+                >
+                  {commentMutation.isPending
+                    ? <Loader2 className="w-4 h-4 animate-spin" />
+                    : activeTab === 'remarks'
+                      ? <StickyNote className="w-4 h-4" />
+                      : <Send className="w-4 h-4" />
+                  }
                 </button>
               </div>
+              <p className="text-[10px] text-gray-400">Cmd/Ctrl + Enter to send</p>
             </div>
           )}
         </div>

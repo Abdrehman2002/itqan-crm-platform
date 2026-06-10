@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { DatabaseClient } from '@crm/core';
 import { requireRole } from '../middlewares/auth.middleware';
 import { EmailService } from '../services/email.service';
+import { MODULE_CATALOG } from './super-admin';
 
 // ── Module permission definitions ─────────────────────────────────────────
 // Each module can have access level: 'none' | 'view' | 'full'
@@ -46,6 +47,109 @@ export function defaultPermissions(role: string): Record<string, string> {
   }
 }
 
+// ── Gap 8 fix: Department type enum (replaces fragile keyword matching) ───────
+//
+// Instead of substring-matching free-text department names, we use a
+// structured `department_type` value stored alongside the department name.
+// The invite & team-edit APIs accept an optional `departmentType` that maps
+// directly to one of the six predefined override sets.  When no explicit type
+// is supplied, we fall back to fuzzy keyword matching only as a last resort
+// (e.g. for legacy rows that have no type stored yet).
+//
+// The six canonical types:
+export const DEPT_TYPES = [
+  'support',             // Customer support / service desk / helpdesk / complaint
+  'sales',               // Sales / retail / commercial / revenue
+  'compliance_audit',    // Compliance / audit / legal / risk
+  'finance_billing',     // Finance / billing / payments / accounts
+  'technical_operations',// Technical / IT / infrastructure / broadband
+  'operations',          // Logistics / warehouse / dispatch / last-mile
+] as const;
+export type DeptType = typeof DEPT_TYPES[number];
+
+// Permissions overlay per department type
+const DEPT_OVERRIDES: Record<DeptType, Record<string, string>> = {
+  support: {
+    deals: 'none', voicebot: 'none', integrations: 'none', billing: 'none', settings: 'none',
+  },
+  sales: {
+    tickets: 'none', voicebot: 'none', integrations: 'none', billing: 'none', settings: 'none',
+  },
+  compliance_audit: {
+    contacts: 'view', companies: 'view', deals: 'view', activities: 'view',
+    tickets: 'view', emails: 'view', voice: 'view', analytics: 'view',
+    voicebot: 'none', integrations: 'none', billing: 'none', settings: 'none',
+  },
+  finance_billing: {
+    deals: 'view', tickets: 'none', voicebot: 'none', integrations: 'none', settings: 'none',
+  },
+  technical_operations: {
+    deals: 'none', voicebot: 'view', integrations: 'view', billing: 'none', settings: 'none',
+  },
+  operations: {
+    deals: 'view', tickets: 'view', voicebot: 'none', integrations: 'none', billing: 'none', settings: 'none',
+  },
+};
+
+// Legacy keyword → department type mapping (used as fallback only for old rows)
+const KEYWORD_TO_DEPT_TYPE: Array<{ keywords: string[]; type: DeptType }> = [
+  { keywords: ['support', 'complaint', 'ticket', 'service desk', 'helpdesk'], type: 'support' },
+  { keywords: ['sales', 'retail', 'new business', 'commercial', 'revenue'],   type: 'sales' },
+  { keywords: ['compliance', 'audit', 'legal', 'risk'],                        type: 'compliance_audit' },
+  { keywords: ['finance', 'billing', 'payment', 'accounts'],                   type: 'finance_billing' },
+  { keywords: ['technical', 'tech support', 'it ', 'infrastructure', 'engineering', 'broadband'], type: 'technical_operations' },
+  { keywords: ['operation', 'logistics', 'warehouse', 'last mile', 'customs', 'dispatch'],        type: 'operations' },
+];
+
+// Resolve the structured type from an explicit value, then fall back to keyword scan.
+// Returns null if neither matches.
+export function resolveDeptType(
+  departmentType: string | null | undefined,
+  departmentName: string | null | undefined,
+): DeptType | null {
+  // 1. Explicit structured type (preferred)
+  if (departmentType && DEPT_TYPES.includes(departmentType as DeptType)) {
+    return departmentType as DeptType;
+  }
+  // 2. Legacy keyword fallback — scan the department name (last resort)
+  if (departmentName) {
+    const lower = departmentName.toLowerCase();
+    for (const { keywords, type } of KEYWORD_TO_DEPT_TYPE) {
+      // Exact word-boundary match using \b to prevent "IT Support" matching both rules
+      if (keywords.some((kw) => new RegExp(`\\b${kw.replace(/\s+/g, '\\s+')}\\b`).test(lower))) {
+        return type;
+      }
+    }
+  }
+  return null;
+}
+
+// Returns permissions appropriate for the given department type + role.
+// Admins and managers always receive their full role defaults.
+export function departmentPermissions(
+  department: string | null | undefined,
+  role: string,
+  departmentType?: string | null,
+): Record<string, string> {
+  const base = defaultPermissions(role);
+  if (!department || role === 'tenant_admin' || role === 'manager') return base;
+
+  const deptType = resolveDeptType(departmentType, department);
+  if (!deptType) return base;
+
+  return { ...base, ...DEPT_OVERRIDES[deptType] };
+}
+
+// Export for use in shared/frontend dropdowns
+export const DEPT_TYPE_LABELS: Record<DeptType, string> = {
+  support:              'Support / Service Desk',
+  sales:                'Sales / Commercial',
+  compliance_audit:     'Compliance / Audit / Legal',
+  finance_billing:      'Finance / Billing',
+  technical_operations: 'Technical / IT / Operations',
+  operations:           'Operations / Logistics',
+};
+
 const WorkspaceSchema = z.object({
   name:       z.string().min(1).optional(),
   domain:     z.string().optional(),
@@ -60,7 +164,7 @@ export function settingsRoutes(db: DatabaseClient) {
   return async function (fastify: FastifyInstance) {
 
     // Root — returns workspace + plan info
-    fastify.get('/', async (req, reply) => {
+    fastify.get('/', { preHandler: requireRole('super_admin', 'tenant_admin', 'manager') }, async (req, reply) => {
       const [tenant] = await db.withSuperAdmin(async (client) => {
         const result = await client.query(
           'SELECT id, name, slug, plan, status, settings, billing_details FROM tenants WHERE id = $1',
@@ -75,7 +179,7 @@ export function settingsRoutes(db: DatabaseClient) {
     fastify.get('/workspace', { preHandler: requireRole('super_admin', 'tenant_admin', 'manager') }, async (req, reply) => {
       const [tenant] = await db.withSuperAdmin(async (client) => {
         const result = await client.query(
-          'SELECT id, name, slug, custom_domain, plan, status, settings, billing_details FROM tenants WHERE id = $1',
+          'SELECT id, name, slug, custom_domain, plan, status, sector, settings, billing_details FROM tenants WHERE id = $1',
           [req.tenant.id],
         );
         return result.rows;
@@ -103,6 +207,62 @@ export function settingsRoutes(db: DatabaseClient) {
       return reply.send({ success: true });
     });
 
+    /**
+     * GET/PATCH /settings/routing
+     * Ticket routing configuration:
+     *   - per_agent_ticket_limit: max pending tickets per agent (0 = unlimited)
+     *   - routing_method: random_capacity | round_robin | manual
+     * CSAT configuration:
+     *   - csat_expiry_days: survey link expiry (default 7)
+     */
+    fastify.get('/routing', { preHandler: requireRole('super_admin', 'tenant_admin', 'manager') }, async (req, reply) => {
+      const [row] = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(`SELECT settings FROM tenants WHERE id = $1`, [req.tenant.id]);
+        return r.rows;
+      });
+      const settings = row?.settings ?? {};
+      return reply.send({
+        success: true,
+        data: {
+          routing: {
+            per_agent_ticket_limit: settings?.routing?.per_agent_ticket_limit ?? 0,
+            routing_method:         settings?.routing?.routing_method ?? 'random_capacity',
+          },
+          csat: {
+            expiry_days: settings?.csat_expiry_days ?? 7,
+          },
+        },
+      });
+    });
+
+    fastify.patch('/routing', { preHandler: requireRole('super_admin', 'tenant_admin') }, async (req, reply) => {
+      const body = z.object({
+        per_agent_ticket_limit: z.number().int().min(0).max(500).optional(), // 0 = unlimited
+        routing_method:         z.enum(['random_capacity','round_robin','manual']).optional(),
+        csat_expiry_days:       z.number().int().min(1).max(90).optional(),
+      }).parse(req.body);
+
+      await db.withSuperAdmin(async (client) => {
+        if (body.per_agent_ticket_limit !== undefined || body.routing_method !== undefined) {
+          const current = (await client.query(`SELECT settings FROM tenants WHERE id = $1`, [req.tenant.id])).rows[0]?.settings ?? {};
+          const routing = { ...(current?.routing ?? {}) };
+          if (body.per_agent_ticket_limit !== undefined) routing.per_agent_ticket_limit = body.per_agent_ticket_limit;
+          if (body.routing_method !== undefined)         routing.routing_method         = body.routing_method;
+          await client.query(
+            `UPDATE tenants SET settings = jsonb_set(COALESCE(settings,'{}'), '{routing}', $1::jsonb) WHERE id = $2`,
+            [JSON.stringify(routing), req.tenant.id],
+          );
+        }
+        if (body.csat_expiry_days !== undefined) {
+          await client.query(
+            `UPDATE tenants SET settings = jsonb_set(COALESCE(settings,'{}'), '{csat_expiry_days}', $1::jsonb) WHERE id = $2`,
+            [body.csat_expiry_days, req.tenant.id],
+          );
+        }
+      });
+      return reply.send({ success: true, message: 'Routing configuration updated' });
+    });
+
     // List team members (super_admin excluded — internal platform role)
     fastify.get('/team', { preHandler: requireRole('super_admin', 'tenant_admin', 'manager') }, async (req, reply) => {
       const members = await db.withTenant(req.tenant.id, async (client) => {
@@ -120,6 +280,127 @@ export function settingsRoutes(db: DatabaseClient) {
       return reply.send({ success: true, data: MODULE_DEFS });
     });
 
+    // ── Module management (tenant admin self-service within licensed set) ─────
+    //
+    // Two-tier model:
+    //   active_modules (DB column)       = modules LICENSED by super admin (the ceiling)
+    //   settings.enabled_modules (JSON)  = modules tenant admin has turned ON
+    //                                      (subset of active_modules; defaults to all licensed)
+    //
+    // Tenant admin can only toggle modules that the super admin has licensed.
+    // Attempting to enable an unlicensed module is rejected with 403.
+
+    fastify.get('/workspace/modules', { preHandler: requireRole('super_admin', 'tenant_admin') }, async (req, reply) => {
+      const [row] = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(`SELECT active_modules, settings FROM tenants WHERE id = $1`, [req.tenant.id]);
+        return r.rows;
+      });
+      const licensedModules: string[] = row?.active_modules ?? ['crm'];
+      // If tenant admin hasn't explicitly configured enabled_modules, default to all licensed
+      const enabledModules: string[] = row?.settings?.enabled_modules ?? licensedModules;
+
+      const result = MODULE_CATALOG.map(m => ({
+        key:         m.key,
+        label:       m.label,
+        description: m.description,
+        always:      m.always,
+        licensed:    licensedModules.includes(m.key),  // set by super admin
+        enabled:     m.always || (licensedModules.includes(m.key) && enabledModules.includes(m.key)),
+      }));
+
+      return reply.send({ success: true, data: result });
+    });
+
+    fastify.patch('/workspace/modules', { preHandler: requireRole('super_admin', 'tenant_admin') }, async (req, reply) => {
+      const body = z.object({
+        // Map of module key → enable/disable boolean
+        modules: z.record(z.string(), z.boolean()),
+      }).parse(req.body);
+
+      const [row] = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(`SELECT active_modules, settings FROM tenants WHERE id = $1`, [req.tenant.id]);
+        return r.rows;
+      });
+      const licensedModules: string[] = row?.active_modules ?? ['crm'];
+      // Start from current enabled state (or default to all licensed)
+      const currentEnabled: string[] = row?.settings?.enabled_modules ?? [...licensedModules];
+      let updatedEnabled = [...currentEnabled];
+
+      for (const [mod, enable] of Object.entries(body.modules)) {
+        // Never allow enabling modules that aren't licensed by super admin
+        if (enable && !licensedModules.includes(mod)) {
+          return reply.code(403).send({
+            success: false,
+            error: {
+              code: 'MODULE_NOT_LICENSED',
+              message: `Module '${mod}' is not licensed for this workspace. Contact your platform administrator.`,
+            },
+          });
+        }
+        if (enable) {
+          if (!updatedEnabled.includes(mod)) updatedEnabled.push(mod);
+        } else {
+          updatedEnabled = updatedEnabled.filter(m => m !== mod);
+        }
+      }
+      // 'crm' is always enabled
+      if (!updatedEnabled.includes('crm')) updatedEnabled.unshift('crm');
+
+      const settings = row?.settings ?? {};
+      settings.enabled_modules = updatedEnabled;
+
+      await db.withSuperAdmin(async (client) => {
+        await client.query(
+          `UPDATE tenants SET settings = $1, updated_at = NOW() WHERE id = $2`,
+          [JSON.stringify(settings), req.tenant.id],
+        );
+      });
+
+      return reply.send({ success: true, data: { enabledModules: updatedEnabled, licensedModules } });
+    });
+
+    // ── Helper: enforce licensed modules on a user permissions map ───────
+    // Modules that aren't in the tenant's active_modules are forced to 'none'
+    // so no user can gain access to an unlicensed module regardless of what
+    // permissions were submitted.
+    const applyModuleLicensing = async (
+      tenantId: string,
+      permissions: Record<string, string>,
+    ): Promise<Record<string, string>> => {
+      const [row] = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(`SELECT active_modules FROM tenants WHERE id = $1`, [tenantId]);
+        return r.rows;
+      });
+      const licensed: string[] = row?.active_modules ?? ['crm'];
+      // Map of module key → top-level permission key(s) in the permissions object
+      // This tells us which permissions control each module so we can enforce 'none'
+      const MODULE_PERMISSION_KEYS: Record<string, string[]> = {
+        voice:        ['voice'],
+        voicebot:     ['voicebot'],
+        ticketing:    ['tickets'],
+        emails:       ['emails'],
+        integrations: ['integrations'],
+        analytics:    ['analytics'],
+      };
+      const updated = { ...permissions };
+      for (const [moduleKey, permKeys] of Object.entries(MODULE_PERMISSION_KEYS)) {
+        if (!licensed.includes(moduleKey)) {
+          for (const pk of permKeys) {
+            if (updated[pk] !== undefined) updated[pk] = 'none';
+          }
+        }
+      }
+      return updated;
+    };
+
+    // Return available department types for the invite / edit UI (Gap 8)
+    fastify.get('/team/department-types', { preHandler: requireRole('super_admin', 'tenant_admin', 'manager') }, async (_req, reply) => {
+      return reply.send({
+        success: true,
+        data: DEPT_TYPES.map(t => ({ value: t, label: DEPT_TYPE_LABELS[t] })),
+      });
+    });
+
     // Invite team member
     fastify.post('/team/invite', { preHandler: requireRole('super_admin', 'tenant_admin') }, async (req, reply) => {
       const InviteSchema = z.object({
@@ -129,27 +410,34 @@ export function settingsRoutes(db: DatabaseClient) {
         role:            z.enum(['tenant_admin', 'manager', 'agent', 'viewer']).default('agent'),
         custom_role_id:  z.string().uuid().optional(),
         permissions:     z.record(z.string()).optional(),
+        department:      z.string().max(100).optional(),
+        // Gap 8: explicit dept type — prevents fragile keyword matching on ambiguous dept names
+        departmentType:  z.enum(DEPT_TYPES).optional(),
       });
       const parsed = InviteSchema.safeParse(req.body);
       if (!parsed.success) {
         return reply.code(400).send({ success: false, error: { code: 'INVALID_INPUT', message: parsed.error.issues[0]?.message ?? 'Invalid input' } });
       }
-      const { email, name, role, custom_role_id, permissions: customPermissions } = parsed.data;
+      const { email, name, role, custom_role_id, permissions: customPermissions, department, departmentType } = parsed.data;
 
       const displayName  = name?.trim() || email.split('@')[0];
       const assignedRole = role ?? 'agent';
-      const perms        = customPermissions ?? defaultPermissions(assignedRole);
+      // Explicit permissions override department defaults; department defaults override role defaults
+      const rawPerms = customPermissions ?? departmentPermissions(department, assignedRole, departmentType);
+      // Enforce: any module not licensed by super admin is forced to 'none'
+      const perms = await applyModuleLicensing(req.tenant.id, rawPerms);
 
-      // 1. Create (or update) user account with role + permissions
+      // 1. Create (or update) user account with role + permissions + department
       const [user] = await db.withTenant(req.tenant.id, async (client) => {
         const result = await client.query(
-          `INSERT INTO users (tenant_id, email, name, role, password_hash, permissions, custom_role_id)
-           VALUES ($1, $2, $3, $4, 'INVITE_PENDING', $5, $6)
+          `INSERT INTO users (tenant_id, email, name, role, password_hash, permissions, custom_role_id, department, department_type)
+           VALUES ($1, $2, $3, $4, 'INVITE_PENDING', $5, $6, $7, $8)
            ON CONFLICT (tenant_id, email) DO UPDATE
              SET role = EXCLUDED.role, name = EXCLUDED.name,
-                 permissions = EXCLUDED.permissions, custom_role_id = EXCLUDED.custom_role_id
-           RETURNING id, email, name, role, permissions, custom_role_id`,
-          [req.tenant.id, email, displayName, assignedRole, JSON.stringify(perms), custom_role_id ?? null],
+                 permissions = EXCLUDED.permissions, custom_role_id = EXCLUDED.custom_role_id,
+                 department = EXCLUDED.department, department_type = EXCLUDED.department_type
+           RETURNING id, email, name, role, permissions, custom_role_id, department, department_type`,
+          [req.tenant.id, email, displayName, assignedRole, JSON.stringify(perms), custom_role_id ?? null, department ?? null, departmentType ?? null],
         );
         return result.rows;
       });
@@ -250,15 +538,16 @@ export function settingsRoutes(db: DatabaseClient) {
       const { userId } = req.params as { userId: string };
       const PatchSchema = z.object({
         // Restrict to tenant-level roles only — super_admin cannot be self-assigned
-        role:        z.enum(['tenant_admin', 'manager', 'agent', 'viewer']).optional(),
-        department:  z.enum(['sales', 'support', 'complaints']).nullable().optional(),
-        permissions: z.record(z.string()).optional(),
+        role:           z.enum(['tenant_admin', 'manager', 'agent', 'viewer']).optional(),
+        department:     z.string().max(100).nullable().optional(),
+        departmentType: z.enum(DEPT_TYPES).nullable().optional(), // Gap 8
+        permissions:    z.record(z.string()).optional(),
       });
       const parsed = PatchSchema.safeParse(req.body);
       if (!parsed.success) {
         return reply.code(400).send({ success: false, error: { code: 'INVALID_INPUT', message: parsed.error.issues[0]?.message ?? 'Invalid input' } });
       }
-      const { role, permissions: customPermissions } = parsed.data;
+      const { role, department, departmentType, permissions: customPermissions } = parsed.data;
 
       const [user] = await db.withTenant(req.tenant.id, async (client) => {
         // Build dynamic update
@@ -266,18 +555,35 @@ export function settingsRoutes(db: DatabaseClient) {
         const vals: any[] = [];
         let i = 1;
 
+        // Fetch current user state to derive permissions when only department changes
+        const [current] = (await client.query('SELECT role, department, department_type FROM users WHERE id = $1', [userId])).rows;
+        const effectiveRole     = role ?? current?.role ?? 'agent';
+        const effectiveDept     = department !== undefined ? department : current?.department;
+        const effectiveDeptType = departmentType !== undefined ? departmentType : current?.department_type;
+
         if (role !== undefined) {
           updates.push(`role = $${i++}`);
           vals.push(role);
-          // When role changes, reset permissions to new role defaults unless custom ones provided
-          if (!customPermissions) {
-            updates.push(`permissions = $${i++}`);
-            vals.push(JSON.stringify(defaultPermissions(role)));
-          }
+        }
+        if (department !== undefined) {
+          updates.push(`department = $${i++}`);
+          vals.push(department);
+        }
+        if (departmentType !== undefined) {
+          updates.push(`department_type = $${i++}`);
+          vals.push(departmentType);
+        }
+        // Recalculate permissions when role or department changes, unless caller supplies explicit permissions
+        if (!customPermissions && (role !== undefined || department !== undefined || departmentType !== undefined)) {
+          const rawPerms = departmentPermissions(effectiveDept, effectiveRole, effectiveDeptType);
+          const enforcedPerms = await applyModuleLicensing(req.tenant.id, rawPerms);
+          updates.push(`permissions = $${i++}`);
+          vals.push(JSON.stringify(enforcedPerms));
         }
         if (customPermissions !== undefined) {
+          const enforcedPerms = await applyModuleLicensing(req.tenant.id, customPermissions);
           updates.push(`permissions = $${i++}`);
-          vals.push(JSON.stringify(customPermissions));
+          vals.push(JSON.stringify(enforcedPerms));
         }
 
         if (updates.length === 0) return [null];
@@ -285,7 +591,7 @@ export function settingsRoutes(db: DatabaseClient) {
         vals.push(userId);
         const result = await client.query(
           `UPDATE users SET ${updates.join(', ')}, updated_at = NOW()
-           WHERE id = $${i} RETURNING id, name, email, role, permissions`,
+           WHERE id = $${i} RETURNING id, name, email, role, department, department_type, permissions`,
           vals,
         );
         return result.rows;
@@ -299,7 +605,7 @@ export function settingsRoutes(db: DatabaseClient) {
     // ── Milestone Templates ───────────────────────────────────────────────
     // GET  /settings/milestone-templates
     // PUT  /settings/milestone-templates/:ticketType
-    fastify.get('/milestone-templates', async (req, reply) => {
+    fastify.get('/milestone-templates', { preHandler: requireRole('super_admin', 'tenant_admin', 'manager') }, async (req, reply) => {
       const templates = await db.withTenant(req.tenant.id, async (client) => {
         const r = await client.query(
           `SELECT * FROM ticket_milestone_templates WHERE tenant_id = $1 ORDER BY ticket_type`,

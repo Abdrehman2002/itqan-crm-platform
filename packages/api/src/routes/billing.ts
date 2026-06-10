@@ -5,6 +5,7 @@ import type { EventBus } from '@crm/core';
 import type { Currency, PaymentProvider } from '@crm/shared';
 import { PLAN_PRICING } from '@crm/shared';
 import { BillingService } from '../../../../modules/billing/src/billing.service';
+import { requireRole } from '../middlewares/auth.middleware';
 
 const CheckoutSchema = z.object({
   plan: z.enum(['starter', 'professional', 'enterprise']),
@@ -54,7 +55,7 @@ export function billingRoutes(db: DatabaseClient, eventBus: EventBus) {
     });
 
     // ── Create checkout session ───────────────────────────────
-    fastify.post('/checkout', async (req, reply) => {
+    fastify.post('/checkout', { preHandler: requireRole('super_admin', 'tenant_admin') }, async (req, reply) => {
       const body = CheckoutSchema.parse(req.body);
       const baseUrl = `${req.protocol}://${req.headers.host}`;
 
@@ -72,7 +73,7 @@ export function billingRoutes(db: DatabaseClient, eventBus: EventBus) {
     });
 
     // ── Invoices list ─────────────────────────────────────────
-    fastify.get('/invoices', async (req, reply) => {
+    fastify.get('/invoices', { preHandler: requireRole('super_admin', 'tenant_admin') }, async (req, reply) => {
       const invoices = await db.withTenant(req.tenant.id, async (client) => {
         const result = await client.query(
           `SELECT * FROM invoices ORDER BY created_at DESC LIMIT 50`,
@@ -83,7 +84,7 @@ export function billingRoutes(db: DatabaseClient, eventBus: EventBus) {
     });
 
     // ── Download invoice PDF ──────────────────────────────────
-    fastify.get('/invoices/:id/pdf', async (req, reply) => {
+    fastify.get('/invoices/:id/pdf', { preHandler: requireRole('super_admin', 'tenant_admin') }, async (req, reply) => {
       const { id } = req.params as { id: string };
       const [invoice] = await db.withTenant(req.tenant.id, async (client) => {
         const result = await client.query('SELECT * FROM invoices WHERE id = $1', [id]);
@@ -99,7 +100,7 @@ export function billingRoutes(db: DatabaseClient, eventBus: EventBus) {
     });
 
     // ── Current subscription ──────────────────────────────────
-    fastify.get('/subscription', async (req, reply) => {
+    fastify.get('/subscription', { preHandler: requireRole('super_admin', 'tenant_admin') }, async (req, reply) => {
       const [sub] = await db.withTenant(req.tenant.id, async (client) => {
         const result = await client.query(
           `SELECT * FROM subscriptions WHERE status IN ('active','trialing','past_due') ORDER BY created_at DESC LIMIT 1`,
@@ -110,7 +111,7 @@ export function billingRoutes(db: DatabaseClient, eventBus: EventBus) {
     });
 
     // ── Current plan usage vs limits ─────────────────────────
-    fastify.get('/usage', async (req, reply) => {
+    fastify.get('/usage', { preHandler: requireRole('super_admin', 'tenant_admin') }, async (req, reply) => {
       const tenantId = req.tenant.id;
       const plan     = req.tenant.plan;
       const limits   = req.tenant.settings?.limits as any ?? {};
@@ -155,7 +156,7 @@ export function billingRoutes(db: DatabaseClient, eventBus: EventBus) {
     });
 
     // ── Cancel subscription ───────────────────────────────────
-    fastify.post('/subscription/cancel', async (req, reply) => {
+    fastify.post('/subscription/cancel', { preHandler: requireRole('super_admin', 'tenant_admin') }, async (req, reply) => {
       const [sub] = await db.withTenant(req.tenant.id, async (client) => {
         const result = await client.query(
           `SELECT * FROM subscriptions WHERE status = 'active' ORDER BY created_at DESC LIMIT 1`,
@@ -201,7 +202,7 @@ export function billingRoutes(db: DatabaseClient, eventBus: EventBus) {
     });
 
     // ── Update billing details (NTN/GST for Pakistan) ─────────
-    fastify.put('/billing-details', async (req, reply) => {
+    fastify.put('/billing-details', { preHandler: requireRole('super_admin', 'tenant_admin') }, async (req, reply) => {
       const body = req.body as any;
       await db.withSuperAdmin(async (client) => {
         await client.query(
@@ -213,7 +214,7 @@ export function billingRoutes(db: DatabaseClient, eventBus: EventBus) {
     });
 
     // ── Payment history ───────────────────────────────────────
-    fastify.get('/payments', async (req, reply) => {
+    fastify.get('/payments', { preHandler: requireRole('super_admin', 'tenant_admin') }, async (req, reply) => {
       const payments = await db.withTenant(req.tenant.id, async (client) => {
         const result = await client.query(
           `SELECT p.*, i.invoice_number FROM payments p

@@ -115,8 +115,10 @@ const CreateSlaSchema = z.object({
 });
 
 const AddCommentSchema = z.object({
-  body:       z.string().min(1),
-  isInternal: z.boolean().default(false),
+  body:        z.string().min(1),              // no max — unlimited remarks
+  isInternal:  z.boolean().default(false),
+  commentType: z.enum(['reply','remark','note']).default('reply'),
+  replyToId:   z.string().uuid().optional(),   // WhatsApp-style quoted reply
 });
 
 const RcaSchema = z.object({
@@ -226,19 +228,21 @@ async function sendCsatSurvey(
   eventBus:  EventBus,
   ticket:    any,
   appUrl:    string,
+  csatExpiryDays: number = 7,   // Gap 4: configurable expiry
 ): Promise<void> {
   if (!ticket.reporter_email) return;
 
   const token = randomBytes(24).toString('hex'); // 48-char URL-safe token
   const surveyUrl = `${appUrl}/csat/${token}`;
+  const expiryLabel = csatExpiryDays === 1 ? '1 day' : `${csatExpiryDays} days`;
 
   await db.withSuperAdmin(async (c) => {
     await c.query(
       `INSERT INTO csat_surveys
-         (tenant_id, ticket_id, token, reporter_email, reporter_name)
-       VALUES ($1, $2, $3, $4, $5)
+         (tenant_id, ticket_id, token, reporter_email, reporter_name, expires_at)
+       VALUES ($1, $2, $3, $4, $5, NOW() + ($6 || ' days')::INTERVAL)
        ON CONFLICT (ticket_id) DO NOTHING`,
-      [ticket.tenant_id, ticket.id, token, ticket.reporter_email, ticket.reporter_name ?? null],
+      [ticket.tenant_id, ticket.id, token, ticket.reporter_email, ticket.reporter_name ?? null, csatExpiryDays],
     );
 
     // Audit log
@@ -264,7 +268,7 @@ async function sendCsatSurvey(
       <p style="text-align:center;margin-bottom:24px;">
         <a href="${surveyUrl}" style="background:#6366f1;color:#fff;padding:10px 28px;border-radius:8px;text-decoration:none;font-weight:600;">Rate Your Experience</a>
       </p>
-      <p style="color:#94a3b8;font-size:12px;">This survey link expires in 7 days.</p>
+      <p style="color:#94a3b8;font-size:12px;">This survey link expires in ${expiryLabel}.</p>
     </div>`,
     bodyText: `Hi ${ticket.reporter_name ?? 'Customer'},\n\nTicket ${ticket.ticket_number} has been resolved. Please rate your experience:\n${surveyUrl}\n\n(Link expires in 7 days)`,
     ticketId: ticket.id,
@@ -279,32 +283,108 @@ async function sendCsatSurvey(
 
 // ── Route factory ──────────────────────────────────────────────────────────
 
-// ── Push routing helper ───────────────────────────────────────────────────
+// ── Smart Push Routing Engine ────────────────────────────────────────────
+/**
+ * Routes a ticket to the best available agent using capacity-aware random selection.
+ *
+ * Algorithm:
+ * 1. Get all active agents who are members of the ticket's queue
+ *    (falls back to all active agents in tenant if queue has no members)
+ * 2. Filter out agents who currently have >= per_agent_ticket_limit pending tickets
+ *    (limit comes from tenant routing settings; default = no limit)
+ * 3. From the remaining capacity-available agents, pick one at random
+ *    (agents with 0 active tickets get 2× weight for fairness)
+ * 4. If NO agent has capacity, route to the agent with fewest active tickets (overflow)
+ */
 async function assignByPushRouting(
   db: DatabaseClient,
   ticket: any,
   tenantId: string,
   eventBus: EventBus,
 ): Promise<void> {
-  // Get all active agents in this queue
-  const agents = await db.withSuperAdmin(async (client) => {
+  // Read tenant routing config (per_agent_ticket_limit)
+  const tenantSettings = await db.withSuperAdmin(async (client) => {
+    const r = await client.query(`SELECT settings FROM tenants WHERE id = $1`, [tenantId]);
+    return r.rows[0]?.settings ?? {};
+  });
+  const perAgentLimit: number = tenantSettings?.routing?.per_agent_ticket_limit ?? 0; // 0 = no limit
+
+  // Get queue members — agents explicitly assigned to this queue
+  const queueId = ticket.queue_id;
+  let candidateIds: string[] = [];
+
+  if (queueId) {
+    const qm = await db.withSuperAdmin(async (client) => {
+      const r = await client.query(
+        `SELECT qm.user_id
+         FROM queue_members qm
+         JOIN users u ON u.id = qm.user_id
+         WHERE qm.queue_id = $1
+           AND u.is_active = true
+           AND u.role IN ('agent','manager')
+           AND u.id != $2`,
+        [queueId, ticket.assignee_id ?? '00000000-0000-0000-0000-000000000000'],
+      );
+      return r.rows.map((u: any) => u.user_id as string);
+    });
+    candidateIds = qm;
+  }
+
+  // Fallback: if queue has no members, use all active agents in tenant
+  if (candidateIds.length === 0) {
+    const all = await db.withSuperAdmin(async (client) => {
+      const r = await client.query(
+        `SELECT id FROM users
+         WHERE tenant_id = $1
+           AND is_active = true
+           AND role IN ('agent','manager')
+           AND id != $2`,
+        [tenantId, ticket.assignee_id ?? '00000000-0000-0000-0000-000000000000'],
+      );
+      return r.rows.map((u: any) => u.id as string);
+    });
+    candidateIds = all;
+  }
+
+  if (candidateIds.length === 0) return; // no agents available at all
+
+  // Get active ticket count per candidate
+  const loadMap = await db.withSuperAdmin(async (client) => {
     const r = await client.query(
-      `SELECT DISTINCT u.id
-       FROM users u
-       WHERE u.tenant_id = $1
-         AND u.is_active = true
-         AND u.role IN ('agent','manager','tenant_admin')
-         AND u.id != $2
-       ORDER BY u.id`,
-      [tenantId, ticket.assignee_id ?? '00000000-0000-0000-0000-000000000000'],
+      `SELECT assignee_id, COUNT(*) AS active_count
+       FROM tickets
+       WHERE assignee_id = ANY($1::uuid[])
+         AND tenant_id = $2
+         AND status NOT IN ('resolved','closed')
+       GROUP BY assignee_id`,
+      [candidateIds, tenantId],
     );
-    return r.rows.map((u: any) => u.id as string);
+    const map: Record<string, number> = {};
+    candidateIds.forEach(id => { map[id] = 0; }); // default 0
+    r.rows.forEach((row: any) => { map[row.assignee_id] = parseInt(row.active_count, 10); });
+    return map;
   });
 
-  if (agents.length === 0) return;
+  // Filter: only agents under the per-agent limit (if limit is set)
+  let available = candidateIds.filter(id =>
+    perAgentLimit === 0 || (loadMap[id] ?? 0) < perAgentLimit,
+  );
 
-  // Random selection (round-robin approximation)
-  const chosen = agents[Math.floor(Math.random() * agents.length)];
+  let chosen: string;
+  if (available.length > 0) {
+    // Weighted random: agents with 0 tickets get 2× chance
+    const weighted: string[] = [];
+    for (const id of available) {
+      weighted.push(id);
+      if ((loadMap[id] ?? 0) === 0) weighted.push(id); // double weight for free agents
+    }
+    chosen = weighted[Math.floor(Math.random() * weighted.length)];
+  } else {
+    // All agents at capacity — overflow to agent with fewest tickets
+    chosen = candidateIds.reduce((best, id) =>
+      (loadMap[id] ?? 0) < (loadMap[best] ?? 0) ? id : best,
+    );
+  }
 
   await db.withSuperAdmin(async (client) => {
     await client.query(
@@ -313,12 +393,19 @@ async function assignByPushRouting(
     );
   });
 
+  const atCapacity = perAgentLimit > 0 && available.length === 0;
+  const note = atCapacity
+    ? `Auto-routed (overflow — all agents at capacity limit of ${perAgentLimit})`
+    : `Auto-routed (${available.length} agent${available.length === 1 ? '' : 's'} available)`;
+
   await notify(db, tenantId, [chosen], 'ticket_assigned',
     `New ticket auto-assigned: ${ticket.ticket_number}`,
-    `"${ticket.subject}" has been automatically routed to you.`,
+    `"${ticket.subject}" has been automatically routed to you. ${note}`,
     ticket.id);
 
-  await eventBus.publish(tenantId, CRM_EVENTS.TICKET_ASSIGNED, { ticketId: ticket.id, assigneeId: chosen, source: 'push_routing' });
+  await eventBus.publish(tenantId, CRM_EVENTS.TICKET_ASSIGNED, {
+    ticketId: ticket.id, assigneeId: chosen, source: 'push_routing', note,
+  });
 }
 
 export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
@@ -418,6 +505,144 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
       await db.withTenant(req.tenant.id, async (client) => {
         await client.query('UPDATE tickets SET queue_id = NULL WHERE queue_id = $1', [id]);
         await client.query('DELETE FROM ticket_queues WHERE id = $1', [id]);
+      });
+      return reply.code(204).send();
+    });
+
+    // ── Queue member management (Gap 2) ───────────────────────────────────
+    // GET  /queues/:id/members  — list agents in queue
+    fastify.get('/queues/:id/members', { preHandler: requireScope('tickets:read') }, async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const members = await db.withTenant(req.tenant.id, async (client) => {
+        const r = await client.query(
+          `SELECT u.id, u.name, u.email, u.role, u.department, u.is_active,
+                  qm.added_at,
+                  COUNT(t.id) FILTER (WHERE t.status NOT IN ('resolved','closed')) AS active_tickets
+           FROM queue_members qm
+           JOIN users u ON u.id = qm.user_id
+           LEFT JOIN tickets t ON t.assignee_id = u.id AND t.tenant_id = $2
+           WHERE qm.queue_id = $1
+           GROUP BY u.id, u.name, u.email, u.role, u.department, u.is_active, qm.added_at
+           ORDER BY u.name`,
+          [id, req.tenant.id],
+        );
+        return r.rows;
+      });
+      return reply.send({ success: true, data: members });
+    });
+
+    // POST /queues/:id/members — add agent(s) to queue
+    fastify.post('/queues/:id/members', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const { userIds } = z.object({ userIds: z.array(z.string().uuid()).min(1) }).parse(req.body);
+      await db.withTenant(req.tenant.id, async (client) => {
+        for (const uid of userIds) {
+          await client.query(
+            `INSERT INTO queue_members (queue_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+            [id, uid],
+          );
+        }
+      });
+      return reply.send({ success: true, message: `${userIds.length} agent(s) added to queue` });
+    });
+
+    // DELETE /queues/:id/members/:userId — remove agent from queue
+    fastify.delete('/queues/:id/members/:userId', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
+      const { id, userId } = req.params as { id: string; userId: string };
+      await db.withTenant(req.tenant.id, async (client) => {
+        await client.query('DELETE FROM queue_members WHERE queue_id = $1 AND user_id = $2', [id, userId]);
+      });
+      return reply.code(204).send();
+    });
+
+    // ── Tag management (Gap 5) ────────────────────────────────────────────
+    // GET    /tags           — list all tenant tags
+    // POST   /tags           — create tag
+    // PATCH  /tags/:id       — rename / recolour tag
+    // DELETE /tags/:id       — delete tag (also removes from all tickets)
+    fastify.get('/tags', { preHandler: requireScope('tickets:read') }, async (req, reply) => {
+      const tags = await db.withTenant(req.tenant.id, async (client) => {
+        const r = await client.query(
+          `SELECT tt.id, tt.name, tt.color, tt.description, tt.created_at,
+                  (SELECT COUNT(*) FROM tickets WHERE tags @> ARRAY[tt.name] AND tenant_id = tt.tenant_id) AS usage_count
+           FROM ticket_tags tt
+           ORDER BY tt.name`,
+        );
+        return r.rows;
+      });
+      return reply.send({ success: true, data: tags });
+    });
+
+    fastify.post('/tags', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
+      const body = z.object({
+        name:        z.string().min(1).max(50),
+        color:       z.string().regex(/^#[0-9a-fA-F]{6}$/).default('#6b7280'),
+        description: z.string().max(200).optional(),
+      }).parse(req.body);
+
+      const [tag] = await db.withTenant(req.tenant.id, async (client) => {
+        const r = await client.query(
+          `INSERT INTO ticket_tags (tenant_id, name, color, description)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (tenant_id, name) DO NOTHING
+           RETURNING *`,
+          [req.tenant.id, body.name.toLowerCase().trim(), body.color, body.description ?? null],
+        );
+        return r.rows;
+      });
+      if (!tag) return reply.code(409).send({ success: false, error: { code: 'TAG_EXISTS', message: 'A tag with this name already exists' } });
+      return reply.code(201).send({ success: true, data: tag });
+    });
+
+    fastify.patch('/tags/:id', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const body   = z.object({
+        name:        z.string().min(1).max(50).optional(),
+        color:       z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+        description: z.string().max(200).nullable().optional(),
+      }).parse(req.body);
+
+      const [tag] = await db.withTenant(req.tenant.id, async (client) => {
+        // If renaming, also update all tickets that use the old tag name
+        const [current] = (await client.query('SELECT * FROM ticket_tags WHERE id = $1', [id])).rows;
+        if (!current) return [null];
+
+        const newName = body.name ? body.name.toLowerCase().trim() : current.name;
+        if (body.name && body.name !== current.name) {
+          // Rename tag across all tickets
+          await client.query(
+            `UPDATE tickets
+             SET tags = array_replace(tags, $1, $2)
+             WHERE $1 = ANY(tags)`,
+            [current.name, newName],
+          );
+        }
+        const r = await client.query(
+          `UPDATE ticket_tags SET
+             name        = $2,
+             color       = COALESCE($3, color),
+             description = COALESCE($4, description)
+           WHERE id = $1 RETURNING *`,
+          [id, newName, body.color ?? null, body.description ?? null],
+        );
+        return r.rows;
+      });
+      if (!tag) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Tag not found' } });
+      return reply.send({ success: true, data: tag });
+    });
+
+    fastify.delete('/tags/:id', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
+      const { id } = req.params as { id: string };
+      await db.withTenant(req.tenant.id, async (client) => {
+        const [tag] = (await client.query('SELECT * FROM ticket_tags WHERE id = $1', [id])).rows;
+        if (tag) {
+          // Remove this tag from all tickets first
+          await client.query(
+            `UPDATE tickets SET tags = array_remove(tags, $1) WHERE $1 = ANY(tags)`,
+            [tag.name],
+          );
+          await client.query('DELETE FROM ticket_tags WHERE id = $1', [id]);
+        }
       });
       return reply.code(204).send();
     });
@@ -697,8 +922,11 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
       const [ticket, comments, escalations, voiceBotCall] = await db.withTenant(req.tenant.id, async (client) => {
         const tr = await client.query(
           `SELECT t.*,
-             u.name  AS assignee_name,
+             u.name   AS assignee_name,
+             u.role   AS assignee_role,
              u.avatar AS assignee_avatar,
+             pu.name  AS prev_assignee_name,
+             mob.name AS manager_overridden_by_name,
              c.first_name || ' ' || COALESCE(c.last_name,'') AS contact_name,
              q.name  AS queue_name,
              q.color AS queue_color,
@@ -706,19 +934,33 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
              s.resolution_hours,
              CASE WHEN t.sla_due_at < NOW() AND t.status NOT IN ('resolved','closed')
                   THEN true ELSE false END AS is_overdue,
-             EXTRACT(EPOCH FROM (t.sla_due_at - NOW())) AS sla_seconds_remaining
+             EXTRACT(EPOCH FROM (t.sla_due_at - NOW())) AS sla_seconds_remaining,
+             EXTRACT(EPOCH FROM (NOW() - t.created_at)) AS age_seconds
            FROM tickets t
-           LEFT JOIN users u         ON t.assignee_id  = u.id
-           LEFT JOIN contacts c      ON t.contact_id   = c.id
-           LEFT JOIN ticket_queues q ON t.queue_id     = q.id
-           LEFT JOIN sla_policies s  ON t.sla_policy_id = s.id
+           LEFT JOIN users u         ON t.assignee_id          = u.id
+           LEFT JOIN users pu        ON t.prev_assignee_id      = pu.id
+           LEFT JOIN users mob       ON t.manager_overridden_by = mob.id
+           LEFT JOIN contacts c      ON t.contact_id            = c.id
+           LEFT JOIN ticket_queues q ON t.queue_id              = q.id
+           LEFT JOIN sla_policies s  ON t.sla_policy_id         = s.id
            WHERE t.id = $1`,
           [id],
         );
         const cr = await client.query(
-          `SELECT tc.*, u.name AS author_name_resolved, u.avatar AS author_avatar
+          `SELECT
+             tc.*,
+             u.name   AS author_name_resolved,
+             u.role   AS author_role,
+             u.avatar AS author_avatar,
+             -- Quoted (replied-to) remark preview
+             rt.id        AS reply_to_id,
+             rt.body      AS reply_to_body,
+             rt.created_at AS reply_to_created_at,
+             ru.name      AS reply_to_author_name
            FROM ticket_comments tc
-           LEFT JOIN users u ON tc.author_id = u.id
+           LEFT JOIN users u  ON tc.author_id   = u.id
+           LEFT JOIN ticket_comments rt ON tc.reply_to_id = rt.id
+           LEFT JOIN users ru ON rt.author_id   = ru.id
            WHERE tc.ticket_id = $1
            ORDER BY tc.created_at ASC`,
           [id],
@@ -794,49 +1036,114 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
     });
 
     // ── Assign ticket ─────────────────────────────────────────────────────
+    /**
+     * POST /:id/assign
+     * Assign (or reassign) a ticket to an agent.
+     * When a manager overrides a previous assignment:
+     *   - Previous assignee is notified their ticket was moved
+     *   - Override is recorded with manager name, timestamp, optional note
+     *   - Ticket shows "Reassigned by <manager> to <new agent>" in audit trail
+     */
     fastify.post('/:id/assign', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const { id } = req.params as { id: string };
-      const { assigneeId } = z.object({ assigneeId: z.string().uuid() }).parse(req.body);
-      const tenantId = req.tenant.id;
+      const body   = z.object({
+        assigneeId: z.string().uuid(),
+        note:       z.string().max(500).optional(),  // manager can add a note explaining the reassignment
+      }).parse(req.body);
+      const { assigneeId, note } = body;
+      const tenantId   = req.tenant.id;
+      const actorId    = (req as any).user?.sub as string;
+      const actorRole  = (req as any).user?.role as string;
+      const isManager  = ['manager','tenant_admin','super_admin'].includes(actorRole);
 
+      // Read current ticket to capture previous assignee
+      const [currentTicket] = await db.withTenant(tenantId, async (client) => {
+        const r = await client.query('SELECT * FROM tickets WHERE id = $1', [id]);
+        return r.rows;
+      });
+      if (!currentTicket) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Ticket not found' } });
+
+      const previousAssigneeId = currentTicket.assignee_id as string | null;
+      const isReassignment     = previousAssigneeId && previousAssigneeId !== assigneeId;
+      const isManagerOverride  = isReassignment && isManager;
+
+      // Perform the update — record override fields if manager is overriding
       const [ticket] = await db.withTenant(tenantId, async (client) => {
         const r = await client.query(
           `UPDATE tickets
-           SET assignee_id = $1,
-               status = CASE WHEN status = 'open' THEN 'assigned' ELSE status END,
-               updated_at = NOW()
+           SET assignee_id          = $1,
+               prev_assignee_id     = CASE WHEN $3 THEN assignee_id ELSE prev_assignee_id END,
+               manager_overridden_by= CASE WHEN $4 THEN $5::uuid ELSE manager_overridden_by END,
+               manager_overridden_at= CASE WHEN $4 THEN NOW()    ELSE manager_overridden_at END,
+               manager_override_note= CASE WHEN $4 THEN $6       ELSE manager_override_note END,
+               status               = CASE WHEN status = 'open' THEN 'assigned' ELSE status END,
+               updated_at           = NOW()
            WHERE id = $2 RETURNING *`,
-          [assigneeId, id],
+          [assigneeId, id, isReassignment, isManagerOverride, actorId, note ?? null],
         );
         return r.rows;
       });
 
-      if (!ticket) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Ticket not found' } });
+      // Fetch actor and both agents for notifications
+      const userIds = [assigneeId, ...(previousAssigneeId ? [previousAssigneeId] : []), actorId]
+        .filter((v, i, a) => a.indexOf(v) === i);
+      const users   = await db.withSuperAdmin(async (c) => {
+        const r = await c.query('SELECT id, email, name FROM users WHERE id = ANY($1::uuid[])', [userIds]);
+        return r.rows as Array<{ id: string; email: string; name: string }>;
+      });
+      const findUser = (uid: string) => users.find(u => u.id === uid);
 
+      const newAgent   = findUser(assigneeId);
+      const prevAgent  = previousAssigneeId ? findUser(previousAssigneeId) : null;
+      const actor      = findUser(actorId);
+
+      // ── Notify new assignee ───────────────────────────────────────────
       await notify(db, tenantId, [assigneeId], 'ticket_assigned',
         `Ticket ${ticket.ticket_number} assigned to you`,
-        `"${ticket.subject}" is awaiting your acceptance.`,
+        isManagerOverride
+          ? `"${ticket.subject}" has been assigned to you by ${actor?.name ?? 'a manager'}. ${note ? `Note: ${note}` : ''}`
+          : `"${ticket.subject}" is awaiting your acceptance.`,
         id);
 
-      // Also email the assigned agent
-      const [agent] = await db.withSuperAdmin(async (c) => {
-        const r = await c.query('SELECT email, name FROM users WHERE id = $1', [assigneeId]);
-        return r.rows;
-      });
-      if (agent?.email) {
+      if (newAgent?.email) {
         emailSvc.send(tenantId, {
-          to: agent.email,
-          toName: agent.name,
+          to: newAgent.email, toName: newAgent.name,
           subject: `Ticket ${ticket.ticket_number} assigned to you`,
-          bodyHtml: `<p>Hi ${agent.name},</p>
-<p>Ticket <strong>${ticket.ticket_number}</strong> — "<em>${ticket.subject}</em>" has been assigned to you.</p>
+          bodyHtml: `<p>Hi ${newAgent.name},</p>
+<p>Ticket <strong>${ticket.ticket_number}</strong> — "<em>${ticket.subject}</em>" has been assigned to you${isManagerOverride ? ` by ${actor?.name}` : ''}.</p>
+${note ? `<p><strong>Note:</strong> ${note}</p>` : ''}
 <p>Please log in to the CRM to review and accept this ticket.</p>`,
-          bodyText: `Hi ${agent.name},\n\nTicket ${ticket.ticket_number} ("${ticket.subject}") has been assigned to you.\n\nPlease log in to accept it.`,
+          bodyText: `Ticket ${ticket.ticket_number} ("${ticket.subject}") assigned to you. Please log in.`,
           ticketId: id,
-        }).catch(() => { /* non-fatal */ });
+        }).catch(() => {});
       }
 
-      await eventBus.publish(tenantId, CRM_EVENTS.TICKET_ASSIGNED, { ticketId: id, assigneeId });
+      // ── Notify PREVIOUS assignee if this is a reassignment ───────────
+      if (isReassignment && prevAgent) {
+        await notify(db, tenantId, [previousAssigneeId!], 'ticket_reassigned',
+          `Ticket ${ticket.ticket_number} has been reassigned`,
+          `"${ticket.subject}" was assigned to you but has now been ${isManagerOverride ? `reassigned by ${actor?.name}` : 'reassigned'} to ${newAgent?.name ?? 'another agent'}. ${note ? `Note: ${note}` : ''}`,
+          id);
+
+        emailSvc.send(tenantId, {
+          to: prevAgent.email, toName: prevAgent.name,
+          subject: `Ticket ${ticket.ticket_number} has been reassigned`,
+          bodyHtml: `<p>Hi ${prevAgent.name},</p>
+<p>Ticket <strong>${ticket.ticket_number}</strong> — "<em>${ticket.subject}</em>" that was assigned to you has been reassigned to <strong>${newAgent?.name ?? 'another agent'}</strong>${isManagerOverride ? ` by ${actor?.name}` : ''}.</p>
+${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
+<p>No further action is required from you on this ticket.</p>`,
+          bodyText: `Ticket ${ticket.ticket_number} reassigned to ${newAgent?.name ?? 'another agent'}. No action required from you.`,
+          ticketId: id,
+        }).catch(() => {});
+      }
+
+      await eventBus.publish(tenantId, CRM_EVENTS.TICKET_ASSIGNED, {
+        ticketId: id, assigneeId,
+        previousAssigneeId: previousAssigneeId ?? null,
+        assignedBy: actorId,
+        isManagerOverride,
+        note: note ?? null,
+      });
       return reply.send({ success: true, data: ticket });
     });
 
@@ -1075,8 +1382,9 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
         newValue:  { status: 'closed' },
       });
 
-      // CSAT survey — fire and forget
-      await sendCsatSurvey(db, emailSvc, eventBus, { ...ticket, tenant_id: tenantId }, APP_URL);
+      // CSAT survey — fire and forget (Gap 4: read configurable expiry from tenant settings)
+      const csatExpiry = (req.tenant as any)?.settings?.csat_expiry_days ?? 7;
+      await sendCsatSurvey(db, emailSvc, eventBus, { ...ticket, tenant_id: tenantId }, APP_URL, csatExpiry);
 
       return reply.send({ success: true, data: ticket });
     });
@@ -1169,6 +1477,64 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
       return reply.send({ success: true, data: rows });
     });
 
+    // ── Gap 6: Standalone comments endpoint ──────────────────────────────
+    // GET /tickets/:id/comments
+    //   ?since=<ISO timestamp>   — return only comments after this time (for polling)
+    //   ?type=reply|remark|note  — filter by comment type
+    //   ?page=1&pageSize=50
+    fastify.get('/:id/comments', { preHandler: requireScope('tickets:read') }, async (req, reply) => {
+      const { id }       = req.params as { id: string };
+      const tenantId     = req.tenant.id;
+      const { since, type, page = '1', pageSize = '50' } = req.query as {
+        since?: string; type?: string; page?: string; pageSize?: string;
+      };
+
+      const conditions: string[] = ['tc.ticket_id = $1'];
+      const vals: any[]          = [id];
+      let   idx                  = 2;
+
+      if (since) {
+        const sinceDate = new Date(since);
+        if (!isNaN(sinceDate.getTime())) {
+          conditions.push(`tc.created_at > $${idx++}`);
+          vals.push(sinceDate.toISOString());
+        }
+      }
+      if (type && ['reply','remark','note'].includes(type)) {
+        conditions.push(`tc.comment_type = $${idx++}`);
+        vals.push(type);
+      }
+
+      const limit  = Math.min(Math.max(1, Number(pageSize) || 50), 200);
+      const offset = (Math.max(1, Number(page) || 1) - 1) * limit;
+      conditions.push(`TRUE LIMIT $${idx++} OFFSET $${idx++}`);
+      vals.push(limit, offset);
+
+      const comments = await db.withTenant(tenantId, async (client) => {
+        const r = await client.query(
+          `SELECT
+             tc.*,
+             u.name   AS author_name_resolved,
+             u.role   AS author_role,
+             u.avatar AS author_avatar,
+             rt.id           AS reply_to_id,
+             rt.body         AS reply_to_body,
+             rt.created_at   AS reply_to_created_at,
+             ru.name         AS reply_to_author_name
+           FROM ticket_comments tc
+           LEFT JOIN users u  ON tc.author_id   = u.id
+           LEFT JOIN ticket_comments rt ON tc.reply_to_id = rt.id
+           LEFT JOIN users ru ON rt.author_id   = ru.id
+           WHERE ${conditions.join(' AND ')}
+           ORDER BY tc.created_at ASC`,
+          vals,
+        );
+        return r.rows;
+      });
+
+      return reply.send({ success: true, data: comments, meta: { page: Number(page), pageSize: limit } });
+    });
+
     // ── Add comment / internal note ───────────────────────────────────────
     fastify.post('/:id/comments', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const { id }   = req.params as { id: string };
@@ -1178,7 +1544,7 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
 
       const [comment] = await db.withTenant(tenantId, async (client) => {
         // If this is the first external reply, record first_response_at
-        if (!body.isInternal) {
+        if (!body.isInternal && body.commentType === 'reply') {
           await client.query(
             `UPDATE tickets SET first_response_at = COALESCE(first_response_at, NOW()) WHERE id = $1`,
             [id],
@@ -1190,10 +1556,35 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
            WHERE id = $1 AND status = 'accepted'`,
           [id],
         );
+        const inserted = await client.query(
+          `INSERT INTO ticket_comments
+             (tenant_id, ticket_id, author_id, body, is_internal, comment_type, reply_to_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)
+           RETURNING *`,
+          [
+            tenantId, id, userId, body.body,
+            body.commentType === 'remark' ? true : body.isInternal,
+            body.commentType,
+            body.replyToId ?? null,
+          ],
+        );
+        const newId = inserted.rows[0]?.id;
+        // Return enriched row (author name + role + reply_to preview)
         const r = await client.query(
-          `INSERT INTO ticket_comments (tenant_id, ticket_id, author_id, body, is_internal)
-           VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-          [tenantId, id, userId, body.body, body.isInternal],
+          `SELECT
+             tc.*,
+             u.name   AS author_name_resolved,
+             u.role   AS author_role,
+             rt.id        AS reply_to_id,
+             rt.body      AS reply_to_body,
+             rt.created_at AS reply_to_created_at,
+             ru.name      AS reply_to_author_name
+           FROM ticket_comments tc
+           LEFT JOIN users u  ON tc.author_id  = u.id
+           LEFT JOIN ticket_comments rt ON tc.reply_to_id = rt.id
+           LEFT JOIN users ru ON rt.author_id  = ru.id
+           WHERE tc.id = $1`,
+          [newId],
         );
         return r.rows;
       });
@@ -1264,6 +1655,103 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
 
 export async function runSlaWorker(db: DatabaseClient, eventBus: EventBus): Promise<void> {
   try {
+    // ════════════════════════════════════════════════════════════════════
+    // GAP 1: FIRST-RESPONSE SLA CHECK
+    // Runs for all open/assigned tickets that have not yet received a first
+    // response, where the SLA policy defines a first_response_hours limit.
+    // ════════════════════════════════════════════════════════════════════
+    const firstResponseTickets = await db.withSuperAdmin(async (client) => {
+      const r = await client.query(
+        `SELECT
+           t.id, t.tenant_id, t.ticket_number, t.subject, t.priority,
+           t.assignee_id, t.created_at, t.first_response_at,
+           t.first_response_breached, t.first_response_warned,
+           s.first_response_hours,
+           s.id AS sla_policy_id
+         FROM tickets t
+         LEFT JOIN sla_policies s ON t.sla_policy_id = s.id
+         WHERE t.status NOT IN ('resolved','closed')
+           AND t.first_response_at IS NULL
+           AND s.first_response_hours IS NOT NULL
+           AND s.first_response_hours > 0`,
+      );
+      return r.rows;
+    });
+
+    for (const ticket of firstResponseTickets) {
+      const now            = Date.now();
+      const createdMs      = new Date(ticket.created_at).getTime();
+      const deadlineMs     = createdMs + ticket.first_response_hours * 3_600_000;
+      const totalMs        = deadlineMs - createdMs;
+      const elapsedMs      = now - createdMs;
+      const elapsedPct     = totalMs > 0 ? (elapsedMs / totalMs) * 100 : 0;
+      const remaining      = Math.round((deadlineMs - now) / 60_000); // minutes
+
+      // Warning at 80% of first_response_hours
+      if (elapsedPct >= 80 && !ticket.first_response_warned) {
+        await db.withSuperAdmin(async (client) => {
+          await client.query(
+            `UPDATE tickets SET first_response_warned = true WHERE id = $1`,
+            [ticket.id],
+          );
+        });
+        const targets = ticket.assignee_id ? [ticket.assignee_id] : [];
+        await notify(db, ticket.tenant_id, targets,
+          'first_response_warning',
+          `⚠️ First response due soon: ${ticket.ticket_number}`,
+          `"${ticket.subject}" — First response required in ~${Math.max(0, remaining)} minutes. Please respond to the customer.`,
+          ticket.id);
+        await eventBus.publish(ticket.tenant_id, 'FIRST_RESPONSE_WARNING', {
+          ticketId: ticket.id, minutesRemaining: Math.max(0, remaining),
+        });
+      }
+
+      // Breach at 100%
+      if (elapsedPct >= 100 && !ticket.first_response_breached) {
+        const overMins = Math.round(-remaining);
+        await db.withSuperAdmin(async (client) => {
+          await client.query(
+            `UPDATE tickets
+             SET first_response_breached = true,
+                 first_response_breached_at = NOW()
+             WHERE id = $1`,
+            [ticket.id],
+          );
+          // Insert audit record
+          await client.query(
+            `INSERT INTO ticket_escalations (tenant_id, ticket_id, escalation_level, reason, notified_users)
+             VALUES ($1, $2, 0, 'first_response_breach', '[]')
+             ON CONFLICT DO NOTHING`,
+            [ticket.tenant_id, ticket.id],
+          );
+        });
+
+        // Notify assignee + managers
+        const managers = await db.withSuperAdmin(async (client) => {
+          const r = await client.query(
+            `SELECT id FROM users WHERE tenant_id = $1 AND role IN ('manager','tenant_admin') AND is_active = true`,
+            [ticket.tenant_id],
+          );
+          return r.rows.map((u: any) => u.id as string);
+        });
+        const notifyIds = [...(ticket.assignee_id ? [ticket.assignee_id] : []), ...managers];
+
+        await notify(db, ticket.tenant_id, notifyIds,
+          'first_response_breach',
+          `🚨 First response SLA breached: ${ticket.ticket_number}`,
+          `"${ticket.subject}" — No first response was sent within ${ticket.first_response_hours}h. SLA breached by ${overMins} minute${overMins === 1 ? '' : 's'}. Please respond immediately.`,
+          ticket.id);
+
+        await eventBus.publish(ticket.tenant_id, 'FIRST_RESPONSE_BREACH', {
+          ticketId: ticket.id, overMinutes: overMins,
+          slaPolicyId: ticket.sla_policy_id,
+        });
+      }
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // RESOLUTION SLA CHECK (existing logic — unchanged)
+    // ════════════════════════════════════════════════════════════════════
     // Find all active (non-resolved/closed) tickets that have been accepted
     const activeTickets = await db.withSuperAdmin(async (client) => {
       const r = await client.query(

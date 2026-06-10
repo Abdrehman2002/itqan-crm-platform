@@ -52,7 +52,7 @@ async function authenticateApiKey(
   db: DatabaseClient,
   rawKey: string,
 ): Promise<void> {
-  const prefix = rawKey.slice(0, 8);
+  const prefix = rawKey.slice(0, 12);
   const keyHash = crypto.createHash('sha256').update(rawKey).digest('hex');
 
   const [apiKey] = await db.withSuperAdmin(async (client) => {
@@ -124,6 +124,16 @@ const SCOPE_MIN_ROLE: Record<ApiScope, number> = {
   'admin:write':      ROLE_LEVEL.tenant_admin,
 };
 
+// Maps scope prefix → permissions map key
+const SCOPE_PERMISSION_KEY: Partial<Record<string, string>> = {
+  'deals':     'deals',
+  'tickets':   'tickets',
+  'voice':     'voice',
+  'contacts':  'contacts',
+  'activities':'activities',
+  'analytics': 'analytics',
+};
+
 // Scope guard — enforces for BOTH API key and JWT users.
 // Previously only checked API keys, allowing any JWT user (even viewer) to write.
 export function requireScope(...scopes: ApiScope[]) {
@@ -146,6 +156,25 @@ export function requireScope(...scopes: ApiScope[]) {
           success: false,
           error: { code: 'FORBIDDEN', message: 'Insufficient permissions for this operation' },
         });
+      }
+
+      // Per-module permission check: deny if the user's permissions map explicitly sets the
+      // module to "none". managers and above bypass this (they have cross-dept visibility).
+      if (userLevel < ROLE_LEVEL.manager) {
+        const perms = (req.user as any).permissions as Record<string, string> | undefined;
+        if (perms) {
+          const denied = scopes.every((s) => {
+            const module = s.split(':')[0];
+            const key = SCOPE_PERMISSION_KEY[module];
+            return key !== undefined && perms[key] === 'none';
+          });
+          if (denied) {
+            return reply.code(403).send({
+              success: false,
+              error: { code: 'FORBIDDEN', message: 'You do not have access to this module' },
+            });
+          }
+        }
       }
     }
   };
