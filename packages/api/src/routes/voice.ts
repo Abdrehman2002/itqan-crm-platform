@@ -8,6 +8,7 @@ import { requireFeature, requireScope } from '../middlewares/auth.middleware';
 import { TwilioAdapter } from '../../../../modules/connectors/src/twilio/adapter';
 import { VonageAdapter } from '../../../../modules/connectors/src/vonage/adapter';
 import type { VoiceProviderAdapter } from '../../../../modules/voice/src/provider.interface';
+import { AccessToken, AgentDispatchClient } from 'livekit-server-sdk';
 
 // Outcomes that automatically trigger a support ticket
 const TICKET_TRIGGERING_OUTCOMES = new Set([
@@ -105,6 +106,37 @@ function formatIntent(intent: string): string {
 
 export function voiceRoutes(db: DatabaseClient, eventBus: EventBus, tenantService: TenantService) {
   return async function (fastify: FastifyInstance) {
+
+    // ── Web call: dispatch the LiveKit agent (Nadia) into a fresh room and
+    //    return a browser join token. Powers the CRM "Call Nadia" button. ──────
+    fastify.post('/web-call', { preHandler: [requireScope('voice:read', 'voice:write')] }, async (req, reply) => {
+      const url = process.env.LIVEKIT_URL;
+      const apiKey = process.env.LIVEKIT_API_KEY;
+      const apiSecret = process.env.LIVEKIT_API_SECRET;
+      if (!url || !apiKey || !apiSecret) {
+        return reply.code(503).send({ success: false, error: { code: 'LIVEKIT_NOT_CONFIGURED', message: 'Voice calling is not configured yet.' } });
+      }
+      const agentName = process.env.LIVEKIT_AGENT_NAME || 'nadia';
+      const room = `crm-${req.tenant.id.slice(0, 8)}-${Date.now().toString(36)}`;
+      const httpUrl = url.replace(/^wss:/i, 'https:').replace(/^ws:/i, 'http:');
+
+      // Agents started with an agent_name require an explicit dispatch.
+      try {
+        const dispatchClient = new AgentDispatchClient(httpUrl, apiKey, apiSecret);
+        await dispatchClient.createDispatch(room, agentName, {
+          metadata: JSON.stringify({ tenantId: req.tenant.id, startedBy: req.user.sub }),
+        });
+      } catch (err: any) {
+        return reply.code(502).send({ success: false, error: { code: 'DISPATCH_FAILED', message: err?.message ?? 'agent dispatch failed' } });
+      }
+
+      // Mint a browser participant token (1h).
+      const at = new AccessToken(apiKey, apiSecret, { identity: `crm-${req.user.sub}`, name: 'CRM Agent', ttl: '1h' });
+      at.addGrant({ roomJoin: true, room, canPublish: true, canSubscribe: true, canPublishData: true });
+      const token = await at.toJwt();
+
+      return reply.send({ success: true, data: { url, token, room, agent: agentName } });
+    });
 
     // ── Outbound call initiation ──────────────────────────────
     fastify.post('/calls/initiate', {

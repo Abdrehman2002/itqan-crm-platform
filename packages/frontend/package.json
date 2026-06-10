@@ -18,6 +18,7 @@
     "@types/uuid": "^10.0.0",
     "axios": "^1.7.0",
     "clsx": "^2.1.0",
+    "livekit-client": "^2.6.2",
     "date-fns": "^3.6.0",
     "dompurify": "^3.4.8",
     "lucide-react": "^0.395.0",

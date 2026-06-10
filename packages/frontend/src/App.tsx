@@ -11,6 +11,7 @@ import { useIsSuperAdmin, useIsAdmin } from './hooks/useRole';
 import { useApplyAppearance } from './hooks/useApplyAppearance';
 import { api } from './services/api';
 import { NotificationBell } from './components/NotificationBell';
+import { CallWidget } from './components/CallWidget';
 import { Dashboard }    from './pages/Dashboard';
 import { VoiceCalls }   from './pages/VoiceCalls';
 import { Billing }      from './pages/Billing';
@@ -308,6 +309,7 @@ function AppLayout() {
           <Route path="*"            element={<Navigate to="/dashboard" replace />} />
         </Routes>
       </main>
+      <CallWidget />
     </div>
   );
 }
