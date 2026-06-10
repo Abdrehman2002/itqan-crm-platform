@@ -18,20 +18,27 @@ type EventHandler = (event: CRMEvent) => Promise<void>;
 // - Durable: BullMQ for cross-service / async handlers (reliable)
 export class EventBus {
   private emitter = new EventEmitter();
-  private publishQueue: Queue;
+  private publishQueue: Queue | null = null;
   private workers: Worker[] = [];
+  private durable: boolean;
 
-  constructor(private redis: Redis) {
+  // Pass a real ioredis client to enable durable cross-process delivery via
+  // BullMQ. Pass null (no Redis) to run purely in-process — handlers still fire
+  // synchronously within this process, which is correct for a single node.
+  constructor(private redis: Redis | null) {
     this.emitter.setMaxListeners(100);
-    this.publishQueue = new Queue('crm-events', {
-      connection: redis,
-      defaultJobOptions: {
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 1000 },
-        removeOnComplete: { count: 1000 },
-        removeOnFail: { count: 5000 },
-      },
-    });
+    this.durable = !!redis;
+    if (this.durable && redis) {
+      this.publishQueue = new Queue('crm-events', {
+        connection: redis,
+        defaultJobOptions: {
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 1000 },
+          removeOnComplete: { count: 1000 },
+          removeOnFail: { count: 5000 },
+        },
+      });
+    }
   }
 
   // Subscribe to events in-process
@@ -39,8 +46,18 @@ export class EventBus {
     this.emitter.on(eventType, handler);
   }
 
-  // Subscribe to events via durable queue (survives restarts)
+  // Subscribe to events. With Redis → durable BullMQ worker. Without Redis →
+  // in-process delivery so the same subscribers still run.
   subscribe(eventType: string, handler: EventHandler, concurrency = 5): void {
+    if (!this.durable || !this.redis) {
+      this.emitter.on(eventType, (event: CRMEvent) => {
+        handler(event).catch((err) =>
+          logger.error('Event handler failed', { event: eventType, error: err.message }),
+        );
+      });
+      return;
+    }
+
     const worker = new Worker(
       `crm-events:${eventType}`,
       async (job: Job<CRMEvent>) => {
@@ -73,15 +90,19 @@ export class EventBus {
     this.emitter.emit(type, event);
     this.emitter.emit('*', event); // catch-all listener
 
-    // Enqueue durably for async subscribers
-    await this.publishQueue.add(type, event, {
-      jobId: event.id,
-    });
+    // Enqueue durably for async subscribers (only when Redis is configured)
+    if (this.durable && this.publishQueue) {
+      try {
+        await this.publishQueue.add(type, event, { jobId: event.id });
+      } catch (err) {
+        logger.error('Durable event publish failed', { type, error: (err as Error).message });
+      }
+    }
   }
 
   async shutdown(): Promise<void> {
     await Promise.all(this.workers.map((w) => w.close()));
-    await this.publishQueue.close();
+    if (this.publishQueue) await this.publishQueue.close();
   }
 }
 

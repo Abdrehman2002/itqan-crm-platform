@@ -67,7 +67,11 @@ async function buildServer() {
   // ── Infrastructure ────────────────────────────────────────
   const db = new DatabaseClient(process.env.DATABASE_URL!);
   const redis = buildRedisClient(process.env.REDIS_URL!);
-  const eventBus = new EventBus(redis.native);
+  // Only use Redis-backed features (BullMQ event bus, distributed rate-limit)
+  // when a REAL ioredis client is present. The in-memory fallback lacks ioredis
+  // internals like defineCommand, so we pass null/undefined instead.
+  const hasRealRedis = !!(redis.native && typeof (redis.native as any).defineCommand === 'function');
+  const eventBus = new EventBus(hasRealRedis ? redis.native : null);
   const tenantService = new TenantService(db, redis);
 
   await db.connect();
@@ -135,7 +139,7 @@ async function buildServer() {
     global: true,
     max: 1000,
     timeWindow: '1 minute',
-    redis: redis.native,
+    redis: hasRealRedis ? redis.native : undefined,
     // Per-tenant rate limiting based on plan
     keyGenerator: (req) => {
       const tenantId = req.tenant?.id ?? req.ip;

@@ -10,17 +10,21 @@ export class ActivitiesModule implements CRMModule {
   requiredPlan = 'free' as const;
   dependencies = ['contacts'];
 
-  private reminderQueue!: Queue;
+  private reminderQueue?: Queue;
 
   async onLoad(ctx: ModuleContext): Promise<void> {
     const eventBus = ctx.eventBus as EventBus;
     const db = ctx.db as any;
     const redis = ctx.redis as any;
+    const hasRealRedis = !!(redis?.native && typeof redis.native.defineCommand === 'function');
 
-    // BullMQ queue for delayed task reminders
-    this.reminderQueue = new Queue('activity-reminders', {
-      connection: redis.native,
-    });
+    // BullMQ queue for delayed task reminders (only when a real Redis is present;
+    // otherwise BullMQ would endlessly try to reach localhost:6379)
+    if (hasRealRedis) {
+      this.reminderQueue = new Queue('activity-reminders', {
+        connection: redis.native,
+      });
+    }
 
     // Log voice call as a completed activity
     eventBus.on(CRM_EVENTS.VOICE_CALL_COMPLETED, async (event) => {
@@ -48,7 +52,7 @@ export class ActivitiesModule implements CRMModule {
     // Schedule reminders for due tasks
     eventBus.on(CRM_EVENTS.ACTIVITY_CREATED, async (event) => {
       const { activity } = event.payload as any;
-      if (activity?.due_at && activity.type === 'task') {
+      if (activity?.due_at && activity.type === 'task' && this.reminderQueue) {
         const delay = new Date(activity.due_at).getTime() - Date.now() - 15 * 60_000; // 15 min before
         if (delay > 0) {
           await this.reminderQueue.add(
