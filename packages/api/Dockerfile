@@ -20,10 +20,13 @@ RUN npm install --workspaces --include-workspace-root
 
 ENV NODE_ENV=production
 ENV HOST=0.0.0.0
+# Redis is optional — the app falls back to an in-memory client when disabled.
+ENV REDIS_URL=disabled
 EXPOSE 3000
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=40s --retries=3 \
   CMD wget -qO- "http://localhost:${PORT:-3000}/health" || exit 1
 
-# Run migrations (tsx) then start the server (tsx) — no tsc build needed
-CMD ["sh", "-c", "npx tsx packages/api/src/scripts/migrate.ts && npx tsx packages/api/src/server.ts"]
+# DB schema is migrated out-of-band on Supabase; the server connects as a
+# non-superuser role (crm_app) that cannot run DDL. So just run the server (tsx).
+CMD ["sh", "-c", "npx tsx packages/api/src/server.ts"]
