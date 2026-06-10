@@ -6,14 +6,17 @@ import { useAuthStore } from '../store/auth.store';
 export function LoginPage() {
   const navigate = useNavigate();
   const { login } = useAuthStore();
-  const [form, setForm] = useState({ email: '', password: '', tenantSlug: 'demo' });
+  const [form, setForm] = useState({ email: '', password: '', tenantSlug: 'vextria' });
   const [showPw, setShowPw] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  // Auto-detect slug from subdomain
-  const detectedSlug = window.location.hostname.split('.')[0];
-  const isSubdomain = detectedSlug !== 'localhost' && detectedSlug !== 'www';
+  // Auto-detect slug only from a real tenant subdomain (e.g. acme.yourcrm.com).
+  // On *.vercel.app, localhost, or a bare domain, show the Workspace field instead.
+  const host = window.location.hostname;
+  const detectedSlug = host.split('.')[0];
+  const isSubdomain = detectedSlug !== 'localhost' && detectedSlug !== 'www'
+    && !host.endsWith('.vercel.app') && host.split('.').length > 2;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
