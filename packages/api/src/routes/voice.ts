@@ -119,10 +119,12 @@ export function voiceRoutes(db: DatabaseClient, eventBus: EventBus, tenantServic
       const agentName = process.env.LIVEKIT_AGENT_NAME || 'nadia';
       const room = `crm-${req.tenant.id.slice(0, 8)}-${Date.now().toString(36)}`;
       const httpUrl = url.replace(/^wss:/i, 'https:').replace(/^ws:/i, 'http:');
+      // Server→LiveKit dispatch can hit the local server directly (no TLS hop).
+      const dispatchHost = process.env.LIVEKIT_DISPATCH_URL || httpUrl;
 
       // Agents started with an agent_name require an explicit dispatch.
       try {
-        const dispatchClient = new AgentDispatchClient(httpUrl, apiKey, apiSecret);
+        const dispatchClient = new AgentDispatchClient(dispatchHost, apiKey, apiSecret);
         await dispatchClient.createDispatch(room, agentName, {
           metadata: JSON.stringify({ tenantId: req.tenant.id, startedBy: req.user.sub }),
         });
