@@ -5,11 +5,16 @@ export class DatabaseClient {
   private pool: Pool;
 
   constructor(connectionString: string) {
+    // Managed Postgres (e.g. Supabase) requires TLS, but its pooler presents a
+    // certificate that isn't in the default CA chain. Encrypt without strict
+    // verification for Supabase; plain/local Postgres connects without SSL.
+    const useSsl = /supabase\.(co|com)/.test(connectionString) || process.env.DATABASE_SSL === 'require';
     this.pool = new Pool({
       connectionString,
+      ssl: useSsl ? { rejectUnauthorized: false } : undefined,
       max: 20,
       idleTimeoutMillis: 30_000,
-      connectionTimeoutMillis: 2_000,
+      connectionTimeoutMillis: 10_000,
     });
 
     this.pool.on('error', (err) => {
