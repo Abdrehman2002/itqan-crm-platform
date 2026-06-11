@@ -1,0 +1,207 @@
+{
+  "preTenantCount": 17,
+  "alphaBankId": "b4f402aa-a33b-4557-a569-71b5261e4e6b",
+  "alphaBankSlug": "sqa-alpha-bank",
+  "alphaBankAdminEmail": "admin@alpha-bank-sqa.com",
+  "alphaBankAdminPassword": "Admin@Alpha2026!",
+  "betaBankId": "ac6ca549-b054-4a99-985d-432d39421e09",
+  "betaBankSlug": "sqa-beta-bank",
+  "betaBankAdminEmail": "admin@beta-bank-sqa.com",
+  "betaBankAdminPassword": "Admin@Beta2026!",
+  "alphaUsers": {
+    "mgr.retail.alpha@sqa-vivid.com": {
+      "email": "mgr.retail.alpha@sqa-vivid.com",
+      "name": "Retail Manager (ALPHA)",
+      "role": "manager",
+      "department": "Retail Banking",
+      "departmentType": "sales",
+      "id": "284736a6-890f-4dad-be49-62f0438ce58e"
+    },
+    "am.retail.alpha@sqa-vivid.com": {
+      "email": "am.retail.alpha@sqa-vivid.com",
+      "name": "Retail Asst Mgr (ALPHA)",
+      "role": "agent",
+      "department": "Retail Banking",
+      "departmentType": "sales",
+      "id": "73c82887-8171-4ada-aab7-fcd7bee1a9ed"
+    },
+    "exec.retail.alpha@sqa-vivid.com": {
+      "email": "exec.retail.alpha@sqa-vivid.com",
+      "name": "Retail Executive (ALPHA)",
+      "role": "agent",
+      "department": "Retail Banking",
+      "departmentType": "sales",
+      "id": "ef4bb721-61cf-4f74-92c9-4a16536fcc39"
+    },
+    "mgr.loans.alpha@sqa-vivid.com": {
+      "email": "mgr.loans.alpha@sqa-vivid.com",
+      "name": "Loans Manager (ALPHA)",
+      "role": "manager",
+      "department": "Loans",
+      "departmentType": "sales",
+      "id": "1ffe2094-1790-4fc4-84b4-0df2dc15171f"
+    },
+    "am.loans.alpha@sqa-vivid.com": {
+      "email": "am.loans.alpha@sqa-vivid.com",
+      "name": "Loans Asst Mgr (ALPHA)",
+      "role": "agent",
+      "department": "Loans",
+      "departmentType": "sales",
+      "id": "c146393c-d281-4892-82d6-c8b4d8e705ba"
+    },
+    "exec.loans.alpha@sqa-vivid.com": {
+      "email": "exec.loans.alpha@sqa-vivid.com",
+      "name": "Loans Executive (ALPHA)",
+      "role": "agent",
+      "department": "Loans",
+      "departmentType": "sales",
+      "id": "c108b9b3-e528-43d5-954f-4c837e5ad69d"
+    },
+    "mgr.cards.alpha@sqa-vivid.com": {
+      "email": "mgr.cards.alpha@sqa-vivid.com",
+      "name": "Cards Manager (ALPHA)",
+      "role": "manager",
+      "department": "Cards",
+      "departmentType": "sales",
+      "id": "0d77f637-4012-4b5f-9ec2-095f68509bdc"
+    },
+    "exec.cards.alpha@sqa-vivid.com": {
+      "email": "exec.cards.alpha@sqa-vivid.com",
+      "name": "Cards Executive (ALPHA)",
+      "role": "agent",
+      "department": "Cards",
+      "departmentType": "sales",
+      "id": "6335f1d3-6d47-477e-bb93-188e188d1e85"
+    },
+    "mgr.support.alpha@sqa-vivid.com": {
+      "email": "mgr.support.alpha@sqa-vivid.com",
+      "name": "Support Manager (ALPHA)",
+      "role": "manager",
+      "department": "Customer Support",
+      "departmentType": "support",
+      "id": "37838e28-0ff5-49ed-96d1-717adf6006b6"
+    },
+    "agent1.support.alpha@sqa-vivid.com": {
+      "email": "agent1.support.alpha@sqa-vivid.com",
+      "name": "Support Agent 1 (ALPHA)",
+      "role": "agent",
+      "department": "Customer Support",
+      "departmentType": "support",
+      "id": "16f452bd-ff2b-4599-b346-53a5551d2e34"
+    },
+    "agent2.support.alpha@sqa-vivid.com": {
+      "email": "agent2.support.alpha@sqa-vivid.com",
+      "name": "Support Agent 2 (ALPHA)",
+      "role": "agent",
+      "department": "Customer Support",
+      "departmentType": "support",
+      "id": "180d5104-9f92-4202-8f21-3d16e39920e9"
+    },
+    "viewer.compliance.alpha@sqa-vivid.com": {
+      "email": "viewer.compliance.alpha@sqa-vivid.com",
+      "name": "Compliance Viewer (ALPHA)",
+      "role": "viewer",
+      "department": "Compliance",
+      "departmentType": "compliance_audit",
+      "id": "12d502b2-d84a-4a6f-9c4e-f76ab6ca7b47"
+    }
+  },
+  "betaUsers": {
+    "mgr.retail.beta@sqa-vivid.com": {
+      "email": "mgr.retail.beta@sqa-vivid.com",
+      "name": "Retail Manager (BETA)",
+      "role": "manager",
+      "department": "Retail Banking",
+      "departmentType": "sales",
+      "id": "cd09f8cc-0323-4dff-96f6-a702508c6a1c"
+    },
+    "am.retail.beta@sqa-vivid.com": {
+      "email": "am.retail.beta@sqa-vivid.com",
+      "name": "Retail Asst Mgr (BETA)",
+      "role": "agent",
+      "department": "Retail Banking",
+      "departmentType": "sales",
+      "id": "e6b59c3d-ae8a-4988-be4a-c19ec59127fc"
+    },
+    "exec.retail.beta@sqa-vivid.com": {
+      "email": "exec.retail.beta@sqa-vivid.com",
+      "name": "Retail Executive (BETA)",
+      "role": "agent",
+      "department": "Retail Banking",
+      "departmentType": "sales",
+      "id": "04b32bff-8c72-4400-afca-905f395c8c44"
+    },
+    "mgr.loans.beta@sqa-vivid.com": {
+      "email": "mgr.loans.beta@sqa-vivid.com",
+      "name": "Loans Manager (BETA)",
+      "role": "manager",
+      "department": "Loans",
+      "departmentType": "sales",
+      "id": "1cf29b45-d6e6-4e6f-9639-d9c496c00381"
+    },
+    "am.loans.beta@sqa-vivid.com": {
+      "email": "am.loans.beta@sqa-vivid.com",
+      "name": "Loans Asst Mgr (BETA)",
+      "role": "agent",
+      "department": "Loans",
+      "departmentType": "sales",
+      "id": "7f596e45-9bff-480b-a32c-0077406993db"
+    },
+    "exec.loans.beta@sqa-vivid.com": {
+      "email": "exec.loans.beta@sqa-vivid.com",
+      "name": "Loans Executive (BETA)",
+      "role": "agent",
+      "department": "Loans",
+      "departmentType": "sales",
+      "id": "2f9d04df-c732-4b80-8f26-270fe6ec5f12"
+    },
+    "mgr.cards.beta@sqa-vivid.com": {
+      "email": "mgr.cards.beta@sqa-vivid.com",
+      "name": "Cards Manager (BETA)",
+      "role": "manager",
+      "department": "Cards",
+      "departmentType": "sales",
+      "id": "4dffad33-b7c7-4df5-9dfb-4a57f7ff0ea9"
+    },
+    "exec.cards.beta@sqa-vivid.com": {
+      "email": "exec.cards.beta@sqa-vivid.com",
+      "name": "Cards Executive (BETA)",
+      "role": "agent",
+      "department": "Cards",
+      "departmentType": "sales",
+      "id": "3dc54ab8-8a16-4981-9d00-4ad89bd81b42"
+    },
+    "mgr.support.beta@sqa-vivid.com": {
+      "email": "mgr.support.beta@sqa-vivid.com",
+      "name": "Support Manager (BETA)",
+      "role": "manager",
+      "department": "Customer Support",
+      "departmentType": "support",
+      "id": "072b2e28-1d32-4fc8-94f9-1aeb4fd95150"
+    },
+    "agent1.support.beta@sqa-vivid.com": {
+      "email": "agent1.support.beta@sqa-vivid.com",
+      "name": "Support Agent 1 (BETA)",
+      "role": "agent",
+      "department": "Customer Support",
+      "departmentType": "support",
+      "id": "37f37ad1-b1ae-4b4c-bff6-7044d515eeba"
+    },
+    "agent2.support.beta@sqa-vivid.com": {
+      "email": "agent2.support.beta@sqa-vivid.com",
+      "name": "Support Agent 2 (BETA)",
+      "role": "agent",
+      "department": "Customer Support",
+      "departmentType": "support",
+      "id": "c2986da3-2bc1-49db-93d4-10c2c1c468ac"
+    },
+    "viewer.compliance.beta@sqa-vivid.com": {
+      "email": "viewer.compliance.beta@sqa-vivid.com",
+      "name": "Compliance Viewer (BETA)",
+      "role": "viewer",
+      "department": "Compliance",
+      "departmentType": "compliance_audit",
+      "id": "57baa4f3-f95c-4863-af27-5d9385bcd531"
+    }
+  }
+}
