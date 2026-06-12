@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "dev": "turbo run dev --parallel",
-    "build": "turbo run build",
+    "build": "npm install --prefix packages/frontend && npm run build --prefix packages/frontend",
     "test": "turbo run test",
     "lint": "turbo run lint",
     "db:migrate": "turbo run db:migrate --filter=@crm/api",
