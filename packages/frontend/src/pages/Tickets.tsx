@@ -1064,7 +1064,7 @@ export function Tickets() {
 
   // Derive API params
   const params = useMemo(() => {
-    const p: Record<string, string> = { pageSize: '50', channel: 'manual' };
+    const p: Record<string, string> = { pageSize: '50' };
     if (tab !== 'all') p.status = tab;
     if (search)   p.search   = search;
     if (priority) p.priority = priority;
@@ -1119,7 +1119,7 @@ export function Tickets() {
             </div>
             <div>
               <h1 className="text-lg font-bold text-gray-900">Support Tickets</h1>
-              <p className="text-xs text-gray-400">Manually created tickets</p>
+              <p className="text-xs text-gray-400">All tickets across every channel</p>
             </div>
           </div>
           {can.writeRecords && (
