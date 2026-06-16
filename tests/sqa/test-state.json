@@ -1,0 +1,13 @@
+{
+  "preTenantCount": 1,
+  "alphaBankId": "4a62a879-f069-4614-be4c-948260d7d7ab",
+  "alphaBankSlug": "sqa-alpha-bank",
+  "alphaBankAdminEmail": "admin@alpha-bank-sqa.com",
+  "alphaBankAdminPassword": "Admin@Alpha2026!",
+  "betaBankId": "b02c3edb-61fa-40fe-819a-43b8d18a7dcb",
+  "betaBankSlug": "sqa-beta-bank",
+  "betaBankAdminEmail": "admin@beta-bank-sqa.com",
+  "betaBankAdminPassword": "Admin@Beta2026!",
+  "alphaUsers": {},
+  "betaUsers": {}
+}

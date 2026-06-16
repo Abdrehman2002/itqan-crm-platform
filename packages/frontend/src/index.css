@@ -1,0 +1,66 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html { @apply antialiased; }
+  body { @apply bg-gray-50 text-gray-900; }
+  * { @apply box-border; }
+
+  /* ── Vivid brand CSS variables ─────────────────────────────────────── */
+  :root {
+    --brand-primary:   #29ABE2;   /* cyan blue  */
+    --brand-secondary: #4D8B3C;   /* forest green */
+    --brand-accent:    #F5C518;   /* gold yellow */
+    --brand-dark:      #0a4162;   /* deep navy  */
+
+    /* ── Appearance (overridden at runtime by useApplyAppearance) ──────── */
+    --app-font-family: system-ui, -apple-system, sans-serif;
+    --app-font-size:   14px;
+    --app-font-color:  #111827;
+  }
+
+  /* Apply user-chosen font settings globally */
+  body {
+    font-family: var(--app-font-family) !important;
+    font-size:   var(--app-font-size)   !important;
+    color:       var(--app-font-color)  !important;
+  }
+
+  /* ── Scrollbars ────────────────────────────────────────────────────── */
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { @apply bg-transparent; }
+  ::-webkit-scrollbar-thumb { background: #29ABE2; border-radius: 9999px; opacity: 0.4; }
+  ::-webkit-scrollbar-thumb:hover { background: #1a94c9; }
+}
+
+@layer components {
+  /* Sidebar nav active state */
+  .nav-active {
+    background: linear-gradient(135deg, rgba(41,171,226,0.20) 0%, rgba(77,139,60,0.12) 100%);
+    border-left: 2px solid #29ABE2;
+    color: #29ABE2;
+  }
+
+  /* Primary button */
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white transition-all;
+    background: linear-gradient(135deg, #29ABE2 0%, #1a94c9 100%);
+    box-shadow: 0 2px 12px rgba(41,171,226,0.25);
+  }
+  .btn-primary:hover {
+    background: linear-gradient(135deg, #1a94c9 0%, #1478a8 100%);
+    box-shadow: 0 4px 16px rgba(41,171,226,0.35);
+  }
+  .btn-primary:disabled { opacity: 0.45; box-shadow: none; }
+
+  /* Secondary / green button */
+  .btn-success {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white transition-all;
+    background: linear-gradient(135deg, #4D8B3C 0%, #3d7030 100%);
+    box-shadow: 0 2px 10px rgba(77,139,60,0.25);
+  }
+  .btn-success:hover {
+    background: linear-gradient(135deg, #3d7030 0%, #2e5524 100%);
+  }
+}

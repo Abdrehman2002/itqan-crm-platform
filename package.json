@@ -1,0 +1,29 @@
+{
+  "name": "crm-platform",
+  "version": "1.0.0",
+  "private": true,
+  "packageManager": "npm@11.12.1",
+  "workspaces": [
+    "packages/*",
+    "modules/*"
+  ],
+  "scripts": {
+    "dev": "turbo run dev --parallel",
+    "dev:local": "node scripts/local-dev.mjs",
+    "build": "npm install --prefix packages/frontend && npm run build --prefix packages/frontend",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "db:migrate": "turbo run db:migrate --filter=@crm/api",
+    "db:seed": "turbo run db:seed --filter=@crm/api",
+    "docker:dev": "docker-compose -f infra/docker/docker-compose.dev.yml up",
+    "docker:prod": "docker-compose -f infra/docker/docker-compose.prod.yml up -d"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "embedded-postgres": "^18.4.0-beta.17",
+    "eslint": "^8.57.0",
+    "prettier": "^3.2.0",
+    "turbo": "^2.0.0",
+    "typescript": "^5.4.0"
+  }
+}

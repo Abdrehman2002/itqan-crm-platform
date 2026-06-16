@@ -1,0 +1,32 @@
+-- Enforce RLS for all tenant-isolated tables.
+-- PostgreSQL table owners bypass RLS by default; FORCE ROW LEVEL SECURITY
+-- ensures the isolation policies apply even when connecting as the owner role.
+ALTER TABLE contacts                 FORCE ROW LEVEL SECURITY;
+ALTER TABLE users                    FORCE ROW LEVEL SECURITY;
+ALTER TABLE tickets                  FORCE ROW LEVEL SECURITY;
+ALTER TABLE deals                    FORCE ROW LEVEL SECURITY;
+ALTER TABLE companies                FORCE ROW LEVEL SECURITY;
+ALTER TABLE activities               FORCE ROW LEVEL SECURITY;
+ALTER TABLE api_keys                 FORCE ROW LEVEL SECURITY;
+ALTER TABLE emails                   FORCE ROW LEVEL SECURITY;
+ALTER TABLE invoices                 FORCE ROW LEVEL SECURITY;
+ALTER TABLE invoice_payments         FORCE ROW LEVEL SECURITY;
+ALTER TABLE payments                 FORCE ROW LEVEL SECURITY;
+ALTER TABLE pipelines                FORCE ROW LEVEL SECURITY;
+ALTER TABLE ticket_comments          FORCE ROW LEVEL SECURITY;
+ALTER TABLE ticket_queues            FORCE ROW LEVEL SECURITY;
+ALTER TABLE ticket_audit_log         FORCE ROW LEVEL SECURITY;
+ALTER TABLE ticket_escalations       FORCE ROW LEVEL SECURITY;
+ALTER TABLE webhooks                 FORCE ROW LEVEL SECURITY;
+ALTER TABLE webhook_deliveries       FORCE ROW LEVEL SECURITY;
+ALTER TABLE notifications            FORCE ROW LEVEL SECURITY;
+ALTER TABLE voice_calls              FORCE ROW LEVEL SECURITY;
+ALTER TABLE voice_bot_calls          FORCE ROW LEVEL SECURITY;
+ALTER TABLE voice_bot_configs        FORCE ROW LEVEL SECURITY;
+ALTER TABLE csat_surveys             FORCE ROW LEVEL SECURITY;
+ALTER TABLE subscriptions            FORCE ROW LEVEL SECURITY;
+ALTER TABLE billing_contacts         FORCE ROW LEVEL SECURITY;
+ALTER TABLE sla_policies             FORCE ROW LEVEL SECURITY;
+ALTER TABLE custom_field_definitions FORCE ROW LEVEL SECURITY;
+ALTER TABLE deal_history             FORCE ROW LEVEL SECURITY;
+ALTER TABLE email_templates          FORCE ROW LEVEL SECURITY;

@@ -1,0 +1,21 @@
+{
+  "name": "vivid-crm-sqa",
+  "version": "1.0.0",
+  "description": "Vivid CRM — SQA Test Suite (Banking Sector)",
+  "type": "module",
+  "scripts": {
+    "test":         "node run-all-agents.js",
+    "test:clean":   "node run-all-agents.js --clean",
+    "test:agent01": "node run-all-agents.js --agent 01",
+    "test:agent02": "node run-all-agents.js --agent 02",
+    "test:agent03": "node run-all-agents.js --agent 03",
+    "test:agent04": "node run-all-agents.js --agent 04",
+    "test:agent05": "node run-all-agents.js --agent 05",
+    "test:from03":  "node run-all-agents.js --from 03"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "pg": "^8.11.0"
+  },
+  "engines": { "node": ">=18.0.0" }
+}

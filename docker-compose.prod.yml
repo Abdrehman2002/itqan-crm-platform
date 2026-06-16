@@ -1,0 +1,57 @@
+##############################################################################
+# Production overrides
+#
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# This file disables port exposure for internal services and enables
+# production-grade logging and resource limits.
+##############################################################################
+
+version: '3.9'
+
+services:
+
+  postgres:
+    # In production, don't expose Postgres to the host — use only internal network
+    ports: []
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  redis:
+    ports: []
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  api:
+    # In production behind a reverse proxy, only the frontend exposes port 80/443
+    ports: []
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: warn
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "10"
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+        max_attempts: 5
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+
+  frontend:
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"

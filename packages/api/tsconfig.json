@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "outDir": "dist",
+    "rootDir": "src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "sourceMap": true,
+    "paths": {
+      "@crm/shared": ["../shared/src/index.ts"],
+      "@crm/core":   ["../core/src/index.ts"],
+      "@crm/core/*": ["../core/src/*"]
+    }
+  },
+  "include": ["src", "../../modules"],
+  "exclude": ["dist", "node_modules"]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "@crm/module-crm",
+  "version": "1.0.0",
+  "description": "CRM Platform Module — Contacts, Companies, Deals, Activities, Dashboard",
+  "main": "src/index.ts",
+  "scripts": {},
+  "dependencies": {
+    "@crm/shared": "*",
+    "@crm/core": "*"
+  }
+}

@@ -1,0 +1,198 @@
+##############################################################################
+# CRM Platform — Docker Compose
+#
+# Works for BOTH cloud and on-prem deployments.
+#
+# Usage:
+#   Development:   docker compose up
+#   Production:    docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# All configuration is driven by environment variables.
+# Copy .env.example to .env and fill in your values before starting.
+##############################################################################
+
+version: '3.9'
+
+services:
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER:-crm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-crm_dev_password}
+      POSTGRES_DB:       ${POSTGRES_DB:-crm_platform}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-crm}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ──────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD:-}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── DB Migration (runs once, exits) ───────────────────────────────────
+  # Runs all pending SQL migrations before the API starts.
+  # On first deploy this creates the full schema. On upgrades it applies
+  # only new migrations (tracked in the _migrations table).
+  migrate:
+    build:
+      context: .
+      dockerfile: packages/api/Dockerfile
+    command: ["node", "packages/api/dist/scripts/migrate.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-crm}:${POSTGRES_PASSWORD:-crm_dev_password}@postgres:5432/${POSTGRES_DB:-crm_platform}
+    restart: "no"   # run once and exit
+
+  # ── API (Fastify) ──────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: packages/api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV:        ${NODE_ENV:-production}
+      PORT:            3000
+      HOST:            0.0.0.0
+
+      # Database
+      DATABASE_URL:    postgresql://${POSTGRES_USER:-crm}:${POSTGRES_PASSWORD:-crm_dev_password}@postgres:5432/${POSTGRES_DB:-crm_platform}
+
+      # Redis
+      REDIS_URL:       redis://:${REDIS_PASSWORD:-}@redis:6379
+
+      # Security
+      JWT_SECRET:      ${JWT_SECRET}
+      CORS_ORIGINS:    ${CORS_ORIGINS:-http://localhost}
+
+      # Platform
+      PLATFORM_DOMAIN: ${PLATFORM_DOMAIN:-localhost}
+      APP_URL:         ${APP_URL:-http://localhost}
+
+      # Telephony (Twilio)
+      TWILIO_ACCOUNT_SID:  ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN:   ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_PHONE_NUMBER: ${TWILIO_PHONE_NUMBER:-}
+
+      # Telephony (Vonage / Nexmo)
+      VONAGE_API_KEY:    ${VONAGE_API_KEY:-}
+      VONAGE_API_SECRET: ${VONAGE_API_SECRET:-}
+
+      # Email (SMTP / Gmail / Outlook)
+      SMTP_HOST:     ${SMTP_HOST:-}
+      SMTP_PORT:     ${SMTP_PORT:-587}
+      SMTP_USER:     ${SMTP_USER:-}
+      SMTP_PASS:     ${SMTP_PASS:-}
+      SMTP_FROM:     ${SMTP_FROM:-noreply@example.com}
+
+      # Email OAuth (Gmail)
+      GMAIL_CLIENT_ID:     ${GMAIL_CLIENT_ID:-}
+      GMAIL_CLIENT_SECRET: ${GMAIL_CLIENT_SECRET:-}
+
+      # Email OAuth (Outlook / Microsoft 365)
+      OUTLOOK_CLIENT_ID:     ${OUTLOOK_CLIENT_ID:-}
+      OUTLOOK_CLIENT_SECRET: ${OUTLOOK_CLIENT_SECRET:-}
+      OUTLOOK_TENANT_ID:     ${OUTLOOK_TENANT_ID:-}
+
+      # Payments — Stripe (international)
+      STRIPE_SECRET_KEY:       ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET:   ${STRIPE_WEBHOOK_SECRET:-}
+
+      # Payments — JazzCash (Pakistan)
+      JAZZCASH_MERCHANT_ID:   ${JAZZCASH_MERCHANT_ID:-}
+      JAZZCASH_PASSWORD:      ${JAZZCASH_PASSWORD:-}
+      JAZZCASH_INTEGRITY_SALT: ${JAZZCASH_INTEGRITY_SALT:-}
+
+      # Payments — Easypaisa (Pakistan)
+      EASYPAISA_STORE_ID:  ${EASYPAISA_STORE_ID:-}
+      EASYPAISA_HASH_KEY:  ${EASYPAISA_HASH_KEY:-}
+
+      # Payments — Raast (Pakistan)
+      RAAST_CLIENT_ID:     ${RAAST_CLIENT_ID:-}
+      RAAST_CLIENT_SECRET: ${RAAST_CLIENT_SECRET:-}
+
+      # File storage (S3-compatible — AWS S3 or MinIO for on-prem)
+      S3_ENDPOINT:        ${S3_ENDPOINT:-}        # leave blank for AWS; set to MinIO URL for on-prem
+      S3_REGION:          ${S3_REGION:-us-east-1}
+      S3_BUCKET:          ${S3_BUCKET:-crm-uploads}
+      S3_ACCESS_KEY:      ${S3_ACCESS_KEY:-}
+      S3_SECRET_KEY:      ${S3_SECRET_KEY:-}
+
+    ports:
+      - "${API_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── Frontend (Vite → nginx) ────────────────────────────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: packages/frontend/Dockerfile
+      args:
+        VITE_API_URL: ${API_BASE_URL:-http://localhost:3000}
+        APP_URL:      ${APP_URL:-http://localhost}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── MinIO (optional — on-prem S3-compatible object storage) ────────────
+  # Uncomment if you want local file storage instead of AWS S3.
+  # minio:
+  #   image: minio/minio:latest
+  #   restart: unless-stopped
+  #   command: server /data --console-address ":9001"
+  #   environment:
+  #     MINIO_ROOT_USER:     ${S3_ACCESS_KEY:-minioadmin}
+  #     MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+  #   volumes:
+  #     - minio_data:/data
+  #   ports:
+  #     - "9000:9000"   # S3 API
+  #     - "9001:9001"   # MinIO Console
+
+volumes:
+  postgres_data:
+  redis_data:
+  # minio_data:
+
+networks:
+  default:
+    name: crm_network

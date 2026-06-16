@@ -1,0 +1,36 @@
+{
+  "name": "@crm/api",
+  "version": "1.0.0",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "db:migrate": "tsx src/scripts/migrate.ts",
+    "db:seed": "tsx src/scripts/seed.ts"
+  },
+  "dependencies": {
+    "@crm/core": "*",
+    "@crm/shared": "*",
+    "@fastify/cors": "^9.0.0",
+    "@fastify/helmet": "^11.1.1",
+    "@fastify/jwt": "^8.0.0",
+    "@fastify/multipart": "^8.1.0",
+    "@fastify/rate-limit": "^9.1.0",
+    "@fastify/swagger": "^8.14.0",
+    "@fastify/swagger-ui": "^4.0.0",
+    "dotenv": "^16.4.0",
+    "fastify": "^4.27.0",
+    "graphql": "^16.8.0",
+    "livekit-server-sdk": "^2.9.0",
+    "mercurius": "^14.0.0",
+    "nodemailer": "^6.9.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/nodemailer": "^6.4.0",
+    "tsx": "^4.11.0",
+    "typescript": "^5.4.0"
+  }
+}

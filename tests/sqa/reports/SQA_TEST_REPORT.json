@@ -1,0 +1,874 @@
+[
+  {
+    "tcId": "SA-01",
+    "description": "Super admin login succeeds",
+    "status": "PASS",
+    "detail": "JWT token received",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:23.454Z"
+  },
+  {
+    "tcId": "SA-02",
+    "description": "JWT role = super_admin",
+    "status": "PASS",
+    "detail": "role=super_admin",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:23.915Z"
+  },
+  {
+    "tcId": "SA-03",
+    "description": "JWT contains tenantId claim",
+    "status": "PASS",
+    "detail": "tenantId present",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:23.915Z"
+  },
+  {
+    "tcId": "SA-04",
+    "description": "Wrong password returns 401",
+    "status": "PASS",
+    "detail": "HTTP 401",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:24.320Z"
+  },
+  {
+    "tcId": "SA-05",
+    "description": "Login without tenantSlug rejected",
+    "status": "PASS",
+    "detail": "HTTP 400",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:24.323Z"
+  },
+  {
+    "tcId": "SA-06",
+    "description": "Super admin can list all tenants",
+    "status": "PASS",
+    "detail": "1 tenants found",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:24.339Z"
+  },
+  {
+    "tcId": "SA-07",
+    "description": "Tenant list includes meta (user_count)",
+    "status": "PASS",
+    "detail": "user_count present",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:24.339Z"
+  },
+  {
+    "tcId": "SA-08",
+    "description": "Module catalog returns all available modules",
+    "status": "PASS",
+    "detail": "7 modules",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:24.343Z"
+  },
+  {
+    "tcId": "SA-08b",
+    "description": "CRM module marked as always-included",
+    "status": "PASS",
+    "detail": "crm found",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:24.344Z"
+  },
+  {
+    "tcId": "SA-09",
+    "description": "Alpha Bank created via register (sector=banking)",
+    "status": "PASS",
+    "detail": "slug=sqa-alpha-bank",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:26.076Z"
+  },
+  {
+    "tcId": "SA-10",
+    "description": "Super admin upgrades Alpha Bank plan to professional",
+    "status": "PASS",
+    "detail": "plan=professional",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:26.089Z"
+  },
+  {
+    "tcId": "SA-11",
+    "description": "Super admin enables modules for Alpha Bank",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:26.098Z"
+  },
+  {
+    "tcId": "SA-12",
+    "description": "Beta Bank created via register (sector=banking)",
+    "status": "PASS",
+    "detail": "slug=sqa-beta-bank",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:27.749Z"
+  },
+  {
+    "tcId": "SA-13",
+    "description": "Super admin limits Beta Bank to starter modules (crm + ticketing)",
+    "status": "FAIL",
+    "detail": "HTTP 500",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:27.754Z"
+  },
+  {
+    "tcId": "SA-15",
+    "description": "Duplicate tenant slug rejected with 409",
+    "status": "PASS",
+    "detail": "HTTP 409",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:27.761Z"
+  },
+  {
+    "tcId": "SA-16",
+    "description": "Invalid slug format rejected (uppercase/spaces)",
+    "status": "PASS",
+    "detail": "HTTP 400",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:27.764Z"
+  },
+  {
+    "tcId": "SA-17",
+    "description": "Weak password rejected by enterprise policy",
+    "status": "PASS",
+    "detail": "HTTP 400",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:27.767Z"
+  },
+  {
+    "tcId": "SA-18",
+    "description": "Tenant count increased after creation",
+    "status": "PASS",
+    "detail": "now=3",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:27.775Z"
+  },
+  {
+    "tcId": "SA-19",
+    "description": "Super admin can fetch Alpha Bank detail",
+    "status": "PASS",
+    "detail": "sector=banking",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:27.781Z"
+  },
+  {
+    "tcId": "SA-19b",
+    "description": "Alpha Bank sector = banking",
+    "status": "PASS",
+    "detail": "sector=banking",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:27.781Z"
+  },
+  {
+    "tcId": "SA-20",
+    "description": "Super admin can suspend a tenant",
+    "status": "PASS",
+    "detail": "HTTP 200",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:27.790Z"
+  },
+  {
+    "tcId": "SA-21",
+    "description": "Login to suspended tenant returns 401/403",
+    "status": "PASS",
+    "detail": "HTTP 403",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:27.794Z"
+  },
+  {
+    "tcId": "SA-22",
+    "description": "Super admin can reactivate a suspended tenant",
+    "status": "PASS",
+    "detail": "HTTP 200",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:27.798Z"
+  },
+  {
+    "tcId": "SA-23",
+    "description": "Super admin gets 400/401/403 on tenant-scoped contact route",
+    "status": "PASS",
+    "detail": "HTTP 403 — correctly blocked",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:27.801Z"
+  },
+  {
+    "tcId": "SA-24",
+    "description": "Super admin gets 4xx on tenant-scoped ticket route",
+    "status": "PASS",
+    "detail": "HTTP 403",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:27.803Z"
+  },
+  {
+    "tcId": "SA-25",
+    "description": "Alpha Bank sector = banking confirmed via sector API",
+    "status": "PASS",
+    "detail": "sector=banking",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:29.488Z"
+  },
+  {
+    "tcId": "SA-26",
+    "description": "Banking sector has pre-built custom fields (min 5)",
+    "status": "PASS",
+    "detail": "20 fields seeded",
+    "agent": "Agent 01 — Super Admin",
+    "ts": "2026-06-15T10:19:29.488Z"
+  },
+  {
+    "tcId": "TA-01-ALPHA",
+    "description": "ALPHA admin login succeeds",
+    "status": "PASS",
+    "detail": "",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:31.995Z"
+  },
+  {
+    "tcId": "TA-02-ALPHA",
+    "description": "Tenant admin can access /settings",
+    "status": "PASS",
+    "detail": "HTTP 200",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:32.005Z"
+  },
+  {
+    "tcId": "TA-03-ALPHA",
+    "description": "Tenant admin can list team",
+    "status": "PASS",
+    "detail": "11 users",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:32.009Z"
+  },
+  {
+    "tcId": "TA-04-ALPHA",
+    "description": "Workspace sector = banking",
+    "status": "PASS",
+    "detail": "sector=banking",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:32.013Z"
+  },
+  {
+    "tcId": "TA-05-ALPHA",
+    "description": "Active modules include CRM",
+    "status": "FAIL",
+    "detail": "crm not in modules",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:32.020Z"
+  },
+  {
+    "tcId": "TA-ALPHA-MAN-Retail",
+    "description": "Failed to create manager in Retail Banking",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:32.435Z"
+  },
+  {
+    "tcId": "TA-ALPHA-AGE-Retail",
+    "description": "Failed to create agent in Retail Banking",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:32.439Z"
+  },
+  {
+    "tcId": "TA-ALPHA-AGE-Retail",
+    "description": "Failed to create agent in Retail Banking",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:32.443Z"
+  },
+  {
+    "tcId": "TA-ALPHA-MAN-Loans",
+    "description": "Failed to create manager in Loans",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:32.447Z"
+  },
+  {
+    "tcId": "TA-ALPHA-AGE-Loans",
+    "description": "Failed to create agent in Loans",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:32.453Z"
+  },
+  {
+    "tcId": "TA-ALPHA-AGE-Loans",
+    "description": "Failed to create agent in Loans",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:32.457Z"
+  },
+  {
+    "tcId": "TA-ALPHA-MAN-Cards",
+    "description": "Failed to create manager in Cards",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:32.461Z"
+  },
+  {
+    "tcId": "TA-ALPHA-AGE-Cards",
+    "description": "Failed to create agent in Cards",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:32.466Z"
+  },
+  {
+    "tcId": "TA-ALPHA-MAN-Custom",
+    "description": "Failed to create manager in Customer Support",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:32.470Z"
+  },
+  {
+    "tcId": "TA-ALPHA-AGE-Custom",
+    "description": "Failed to create agent in Customer Support",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:32.474Z"
+  },
+  {
+    "tcId": "TA-ALPHA-AGE-Custom",
+    "description": "Failed to create agent in Customer Support",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:32.478Z"
+  },
+  {
+    "tcId": "TA-ALPHA-VIE-Compli",
+    "description": "Failed to create viewer in Compliance",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:32.482Z"
+  },
+  {
+    "tcId": "TA-19-ALPHA",
+    "description": "Could not run agent boundary tests",
+    "status": "WARN",
+    "detail": "Login failed for exec.retail.alpha@sqa-vivid.com@sqa-alpha-bank: {\"code\":\"INVALID_CREDENTIALS\",\"message\":\"Invalid credentials\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:32.488Z"
+  },
+  {
+    "tcId": "TA-22-ALPHA",
+    "description": "Could not run viewer boundary test",
+    "status": "WARN",
+    "detail": "Login failed for viewer.compliance.alpha@sqa-vivid.com@sqa-alpha-bank: {\"code\":\"INVALID_CREDENTIALS\",\"message\":\"Invalid credentials\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:32.493Z"
+  },
+  {
+    "tcId": "TA-23-ALPHA",
+    "description": "Manager team list test",
+    "status": "WARN",
+    "detail": "Login failed for mgr.retail.alpha@sqa-vivid.com@sqa-alpha-bank: {\"code\":\"INVALID_CREDENTIALS\",\"message\":\"Invalid credentials\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:32.497Z"
+  },
+  {
+    "tcId": "TA-24-ALPHA",
+    "description": "Department types endpoint returns valid list",
+    "status": "PASS",
+    "detail": "types=[{\"value\":\"support\",\"label\":\"Support / Service Desk\"},{\"value\":\"sales\",\"label\":\"Sales / Commercial\"},{\"value\":\"compliance_audit\",\"label\":\"Compliance / Audit / Legal\"},{\"value\":\"finance_billing\",\"label\":\"Finance / Billing\"},{\"value\":\"technical_operations\",\"label\":\"Technical / IT / Operations\"},{\"value\":\"operations\",\"label\":\"Operations / Logistics\"}]",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:32.501Z"
+  },
+  {
+    "tcId": "TA-01-BETA",
+    "description": "BETA admin login succeeds",
+    "status": "PASS",
+    "detail": "",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:34.048Z"
+  },
+  {
+    "tcId": "TA-02-BETA",
+    "description": "Tenant admin can access /settings",
+    "status": "PASS",
+    "detail": "HTTP 200",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:34.053Z"
+  },
+  {
+    "tcId": "TA-03-BETA",
+    "description": "Tenant admin can list team",
+    "status": "PASS",
+    "detail": "11 users",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:34.056Z"
+  },
+  {
+    "tcId": "TA-04-BETA",
+    "description": "Workspace sector = banking",
+    "status": "PASS",
+    "detail": "sector=banking",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:34.059Z"
+  },
+  {
+    "tcId": "TA-05-BETA",
+    "description": "Active modules include CRM",
+    "status": "FAIL",
+    "detail": "crm not in modules",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:34.062Z"
+  },
+  {
+    "tcId": "TA-BETA-MAN-Retail",
+    "description": "Failed to create manager in Retail Banking",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:34.445Z"
+  },
+  {
+    "tcId": "TA-BETA-AGE-Retail",
+    "description": "Failed to create agent in Retail Banking",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:34.451Z"
+  },
+  {
+    "tcId": "TA-BETA-AGE-Retail",
+    "description": "Failed to create agent in Retail Banking",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:34.454Z"
+  },
+  {
+    "tcId": "TA-BETA-MAN-Loans",
+    "description": "Failed to create manager in Loans",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:34.458Z"
+  },
+  {
+    "tcId": "TA-BETA-AGE-Loans",
+    "description": "Failed to create agent in Loans",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:34.461Z"
+  },
+  {
+    "tcId": "TA-BETA-AGE-Loans",
+    "description": "Failed to create agent in Loans",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:34.465Z"
+  },
+  {
+    "tcId": "TA-BETA-MAN-Cards",
+    "description": "Failed to create manager in Cards",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:34.468Z"
+  },
+  {
+    "tcId": "TA-BETA-AGE-Cards",
+    "description": "Failed to create agent in Cards",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:34.471Z"
+  },
+  {
+    "tcId": "TA-BETA-MAN-Custom",
+    "description": "Failed to create manager in Customer Support",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:34.474Z"
+  },
+  {
+    "tcId": "TA-BETA-AGE-Custom",
+    "description": "Failed to create agent in Customer Support",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:34.477Z"
+  },
+  {
+    "tcId": "TA-BETA-AGE-Custom",
+    "description": "Failed to create agent in Customer Support",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:34.481Z"
+  },
+  {
+    "tcId": "TA-BETA-VIE-Compli",
+    "description": "Failed to create viewer in Compliance",
+    "status": "FAIL",
+    "detail": "HTTP 500 — {\"code\":\"INTERNAL_ERROR\",\"message\":\"An unexpected error occurred\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:34.485Z"
+  },
+  {
+    "tcId": "TA-19-BETA",
+    "description": "Could not run agent boundary tests",
+    "status": "WARN",
+    "detail": "Login failed for exec.retail.beta@sqa-vivid.com@sqa-beta-bank: {\"code\":\"INVALID_CREDENTIALS\",\"message\":\"Invalid credentials\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:34.489Z"
+  },
+  {
+    "tcId": "TA-22-BETA",
+    "description": "Could not run viewer boundary test",
+    "status": "WARN",
+    "detail": "Login failed for viewer.compliance.beta@sqa-vivid.com@sqa-beta-bank: {\"code\":\"INVALID_CREDENTIALS\",\"message\":\"Invalid credentials\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:34.493Z"
+  },
+  {
+    "tcId": "TA-23-BETA",
+    "description": "Manager team list test",
+    "status": "WARN",
+    "detail": "Login failed for mgr.retail.beta@sqa-vivid.com@sqa-beta-bank: {\"code\":\"INVALID_CREDENTIALS\",\"message\":\"Invalid credentials\"}",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:34.499Z"
+  },
+  {
+    "tcId": "TA-24-BETA",
+    "description": "Department types endpoint returns valid list",
+    "status": "PASS",
+    "detail": "types=[{\"value\":\"support\",\"label\":\"Support / Service Desk\"},{\"value\":\"sales\",\"label\":\"Sales / Commercial\"},{\"value\":\"compliance_audit\",\"label\":\"Compliance / Audit / Legal\"},{\"value\":\"finance_billing\",\"label\":\"Finance / Billing\"},{\"value\":\"technical_operations\",\"label\":\"Technical / IT / Operations\"},{\"value\":\"operations\",\"label\":\"Operations / Logistics\"}]",
+    "agent": "Agent 02 — Tenant Admin (Banking)",
+    "ts": "2026-06-15T10:19:34.500Z"
+  },
+  {
+    "tcId": "RB-01",
+    "description": "Could not get Alpha Bank token for cross-tenant test",
+    "status": "WARN",
+    "detail": "Login failed for mgr.retail.alpha@sqa-vivid.com@sqa-alpha-bank: {\"code\":\"INVALID_CREDENTIALS\",\"message\":\"Invalid credentials\"}",
+    "agent": "Agent 03 — RBAC & Visibility",
+    "ts": "2026-06-15T10:19:35.234Z"
+  },
+  {
+    "tcId": "RB-00-ALPHA",
+    "description": "Could not login as mgrRetail",
+    "status": "WARN",
+    "detail": "Login failed for mgr.retail.alpha@sqa-vivid.com@sqa-alpha-bank: {\"code\":\"INVALID_CREDENTIALS\",\"message\":\"Invalid credentials. 2 attempts remaining before lockout.\"}",
+    "agent": "Agent 03 — RBAC & Visibility",
+    "ts": "2026-06-15T10:19:35.245Z"
+  },
+  {
+    "tcId": "RB-00-ALPHA",
+    "description": "Could not login as agentRetail",
+    "status": "WARN",
+    "detail": "Login failed for exec.retail.alpha@sqa-vivid.com@sqa-alpha-bank: {\"code\":\"INVALID_CREDENTIALS\",\"message\":\"Invalid credentials. 2 attempts remaining before lockout.\"}",
+    "agent": "Agent 03 — RBAC & Visibility",
+    "ts": "2026-06-15T10:19:35.253Z"
+  },
+  {
+    "tcId": "RB-00-ALPHA",
+    "description": "Could not login as agentLoans",
+    "status": "WARN",
+    "detail": "Login failed for exec.loans.alpha@sqa-vivid.com@sqa-alpha-bank: {\"code\":\"INVALID_CREDENTIALS\",\"message\":\"Invalid credentials\"}",
+    "agent": "Agent 03 — RBAC & Visibility",
+    "ts": "2026-06-15T10:19:35.259Z"
+  },
+  {
+    "tcId": "RB-00-ALPHA",
+    "description": "Could not login as agentSupport",
+    "status": "WARN",
+    "detail": "Login failed for agent1.support.alpha@sqa-vivid.com@sqa-alpha-bank: {\"code\":\"INVALID_CREDENTIALS\",\"message\":\"Invalid credentials\"}",
+    "agent": "Agent 03 — RBAC & Visibility",
+    "ts": "2026-06-15T10:19:35.264Z"
+  },
+  {
+    "tcId": "RB-00-ALPHA",
+    "description": "Could not login as viewer",
+    "status": "WARN",
+    "detail": "Login failed for viewer.compliance.alpha@sqa-vivid.com@sqa-alpha-bank: {\"code\":\"INVALID_CREDENTIALS\",\"message\":\"Invalid credentials\"}",
+    "agent": "Agent 03 — RBAC & Visibility",
+    "ts": "2026-06-15T10:19:35.270Z"
+  },
+  {
+    "tcId": "RB-00-BETA",
+    "description": "Could not login as mgrRetail",
+    "status": "WARN",
+    "detail": "Login failed for mgr.retail.beta@sqa-vivid.com@sqa-beta-bank: {\"code\":\"INVALID_CREDENTIALS\",\"message\":\"Invalid credentials\"}",
+    "agent": "Agent 03 — RBAC & Visibility",
+    "ts": "2026-06-15T10:19:35.275Z"
+  },
+  {
+    "tcId": "RB-00-BETA",
+    "description": "Could not login as agentRetail",
+    "status": "WARN",
+    "detail": "Login failed for exec.retail.beta@sqa-vivid.com@sqa-beta-bank: {\"code\":\"INVALID_CREDENTIALS\",\"message\":\"Invalid credentials. 2 attempts remaining before lockout.\"}",
+    "agent": "Agent 03 — RBAC & Visibility",
+    "ts": "2026-06-15T10:19:35.280Z"
+  },
+  {
+    "tcId": "RB-00-BETA",
+    "description": "Could not login as agentLoans",
+    "status": "WARN",
+    "detail": "Login failed for exec.loans.beta@sqa-vivid.com@sqa-beta-bank: {\"code\":\"INVALID_CREDENTIALS\",\"message\":\"Invalid credentials\"}",
+    "agent": "Agent 03 — RBAC & Visibility",
+    "ts": "2026-06-15T10:19:35.288Z"
+  },
+  {
+    "tcId": "RB-00-BETA",
+    "description": "Could not login as agentSupport",
+    "status": "WARN",
+    "detail": "Login failed for agent1.support.beta@sqa-vivid.com@sqa-beta-bank: {\"code\":\"INVALID_CREDENTIALS\",\"message\":\"Invalid credentials\"}",
+    "agent": "Agent 03 — RBAC & Visibility",
+    "ts": "2026-06-15T10:19:35.293Z"
+  },
+  {
+    "tcId": "RB-00-BETA",
+    "description": "Could not login as viewer",
+    "status": "WARN",
+    "detail": "Login failed for viewer.compliance.beta@sqa-vivid.com@sqa-beta-bank: {\"code\":\"INVALID_CREDENTIALS\",\"message\":\"Invalid credentials\"}",
+    "agent": "Agent 03 — RBAC & Visibility",
+    "ts": "2026-06-15T10:19:35.299Z"
+  },
+  {
+    "tcId": "M00-ALPHA",
+    "description": "Login setup failed — skipping module tests for this bank",
+    "status": "WARN",
+    "detail": "Login failed for exec.retail.alpha@sqa-vivid.com@sqa-alpha-bank: {\"code\":\"INVALID_CREDENTIALS\",\"message\":\"Invalid credentials. 1 attempt remaining before lockout.\"}",
+    "agent": "Agent 04 — Module Functionality",
+    "ts": "2026-06-15T10:19:37.901Z"
+  },
+  {
+    "tcId": "M00-BETA",
+    "description": "Login setup failed — skipping module tests for this bank",
+    "status": "WARN",
+    "detail": "Login failed for exec.retail.beta@sqa-vivid.com@sqa-beta-bank: {\"code\":\"INVALID_CREDENTIALS\",\"message\":\"Invalid credentials. 1 attempt remaining before lockout.\"}",
+    "agent": "Agent 04 — Module Functionality",
+    "ts": "2026-06-15T10:19:39.540Z"
+  },
+  {
+    "tcId": "SEC-00",
+    "description": "Setup login failed — some tests may be skipped",
+    "status": "WARN",
+    "detail": "Login failed for exec.retail.alpha@sqa-vivid.com@sqa-alpha-bank: {\"code\":\"ACCOUNT_LOCKED\",\"message\":\"Too many failed attempts. Account locked for 15 minutes.\"}",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:42.003Z"
+  },
+  {
+    "tcId": "SEC-01",
+    "description": "Brute force triggers 429 lockout after 5 attempts",
+    "status": "PASS",
+    "detail": "Account locked after 5 failures",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:42.872Z"
+  },
+  {
+    "tcId": "SEC-04-/api/v1/contacts",
+    "description": "Unauthenticated request to /api/v1/contacts returns 401",
+    "status": "PASS",
+    "detail": "HTTP 401",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:42.875Z"
+  },
+  {
+    "tcId": "SEC-04-/api/v1/tickets",
+    "description": "Unauthenticated request to /api/v1/tickets returns 401",
+    "status": "PASS",
+    "detail": "HTTP 401",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:42.877Z"
+  },
+  {
+    "tcId": "SEC-04-/api/v1/deals",
+    "description": "Unauthenticated request to /api/v1/deals returns 401",
+    "status": "PASS",
+    "detail": "HTTP 401",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:42.881Z"
+  },
+  {
+    "tcId": "SEC-04-/api/v1/settings",
+    "description": "Unauthenticated request to /api/v1/settings returns 401",
+    "status": "PASS",
+    "detail": "HTTP 401",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:42.886Z"
+  },
+  {
+    "tcId": "SEC-06",
+    "description": "JWT carries tenant context — no header injection needed",
+    "status": "FAIL",
+    "detail": "HTTP 401",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:42.890Z"
+  },
+  {
+    "tcId": "SEC-07",
+    "description": "SQL injection in search param handled safely",
+    "status": "PASS",
+    "detail": "HTTP 401 — no server crash",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:42.892Z"
+  },
+  {
+    "tcId": "SEC-08",
+    "description": "XSS payload in contact name handled (no 500)",
+    "status": "PASS",
+    "detail": "HTTP 401 — handled",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:42.895Z"
+  },
+  {
+    "tcId": "SEC-10",
+    "description": "Empty required fields rejected with 400",
+    "status": "FAIL",
+    "detail": "HTTP 401 — should reject empty fields",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:42.903Z"
+  },
+  {
+    "tcId": "SEC-12",
+    "description": "Random UUID returns 404 (no info leakage)",
+    "status": "FAIL",
+    "detail": "HTTP 401",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:42.906Z"
+  },
+  {
+    "tcId": "SEC-14",
+    "description": "Oversized payload rejected (400/413, no 500)",
+    "status": "PASS",
+    "detail": "HTTP 401",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:44.624Z"
+  },
+  {
+    "tcId": "SEC-15",
+    "description": "Rate limiting active on API endpoints",
+    "status": "PASS",
+    "detail": "No rate limit hit in 30 req (may need higher threshold)",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:44.670Z"
+  },
+  {
+    "tcId": "SEC-19",
+    "description": "Password rejected: too short",
+    "status": "PASS",
+    "detail": "HTTP 400",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:44.673Z"
+  },
+  {
+    "tcId": "SEC-20",
+    "description": "Password rejected: no uppercase",
+    "status": "PASS",
+    "detail": "HTTP 400",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:44.674Z"
+  },
+  {
+    "tcId": "SEC-21",
+    "description": "Password rejected: no lowercase",
+    "status": "PASS",
+    "detail": "HTTP 400",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:44.676Z"
+  },
+  {
+    "tcId": "SEC-22",
+    "description": "Password rejected: no digits",
+    "status": "PASS",
+    "detail": "HTTP 400",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:44.678Z"
+  },
+  {
+    "tcId": "SEC-23",
+    "description": "Password rejected: no special char",
+    "status": "PASS",
+    "detail": "HTTP 400",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:44.680Z"
+  },
+  {
+    "tcId": "UX-01",
+    "description": "Dashboard data returns within 2000ms",
+    "status": "PASS",
+    "detail": "2ms",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:44.682Z"
+  },
+  {
+    "tcId": "UX-02",
+    "description": "Contact list returns paginated structure",
+    "status": "FAIL",
+    "detail": "no pagination meta",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:44.685Z"
+  },
+  {
+    "tcId": "UX-03",
+    "description": "Contact search returns 200 (even if 0 results)",
+    "status": "FAIL",
+    "detail": "HTTP 401",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:44.687Z"
+  },
+  {
+    "tcId": "UX-04",
+    "description": "Error responses follow consistent format {success:false, error:{code,message}}",
+    "status": "PASS",
+    "detail": "code=UNAUTHORIZED",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:44.688Z"
+  },
+  {
+    "tcId": "UX-05",
+    "description": "Error response does not leak stack trace",
+    "status": "PASS",
+    "detail": "no stack trace in response",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:44.689Z"
+  },
+  {
+    "tcId": "UX-06",
+    "description": "Swagger/OpenAPI docs accessible at /docs",
+    "status": "PASS",
+    "detail": "HTTP 200",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:44.692Z"
+  },
+  {
+    "tcId": "UX-07",
+    "description": "Health check endpoint responds",
+    "status": "PASS",
+    "detail": "HTTP 200",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:44.694Z"
+  },
+  {
+    "tcId": "UX-08",
+    "description": "Non-existent route returns 4xx (not 500)",
+    "status": "PASS",
+    "detail": "HTTP 401 — no server crash",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:44.695Z"
+  },
+  {
+    "tcId": "UX-10",
+    "description": "CORS configured (OPTIONS responds)",
+    "status": "PASS",
+    "detail": "HTTP 400",
+    "agent": "Agent 05 — Security & UI/UX",
+    "ts": "2026-06-15T10:19:44.700Z"
+  }
+]

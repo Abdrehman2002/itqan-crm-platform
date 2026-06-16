@@ -1,0 +1,11 @@
+{
+  "name": "@crm/module-voice",
+  "version": "1.0.0",
+  "description": "Voice Platform Module — Inbound/Outbound calls, AI voice bot, call analytics",
+  "main": "src/index.ts",
+  "scripts": {},
+  "dependencies": {
+    "@crm/shared": "*",
+    "@crm/core": "*"
+  }
+}

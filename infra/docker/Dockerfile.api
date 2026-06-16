@@ -1,0 +1,47 @@
+# ── Build stage ────────────────────────────────────────────────
+FROM node:20-alpine AS builder
+WORKDIR /app
+
+COPY package.json turbo.json ./
+COPY packages/shared/package.json  ./packages/shared/
+COPY packages/core/package.json    ./packages/core/
+COPY packages/api/package.json     ./packages/api/
+COPY modules/contacts/package.json  ./modules/contacts/ 2>/dev/null || true
+COPY modules/deals/package.json     ./modules/deals/    2>/dev/null || true
+COPY modules/activities/package.json ./modules/activities/ 2>/dev/null || true
+COPY modules/voice/package.json     ./modules/voice/    2>/dev/null || true
+COPY modules/analytics/package.json ./modules/analytics/ 2>/dev/null || true
+COPY modules/connectors/package.json ./modules/connectors/ 2>/dev/null || true
+COPY modules/billing/package.json   ./modules/billing/  2>/dev/null || true
+
+RUN npm install --frozen-lockfile
+
+COPY packages/shared ./packages/shared
+COPY packages/core   ./packages/core
+COPY packages/api    ./packages/api
+COPY modules         ./modules
+
+RUN npm run build --workspace=packages/shared && \
+    npm run build --workspace=packages/core   && \
+    npm run build --workspace=packages/api
+
+# ── Runtime stage ───────────────────────────────────────────────
+FROM node:20-alpine AS runtime
+WORKDIR /app
+
+RUN apk add --no-cache tini
+ENTRYPOINT ["/sbin/tini", "--"]
+
+COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
+COPY --from=builder /app/packages/core/dist   ./packages/core/dist
+COPY --from=builder /app/packages/api/dist    ./packages/api/dist
+COPY --from=builder /app/node_modules         ./node_modules
+COPY --from=builder /app/package.json          ./
+
+ENV NODE_ENV=production
+EXPOSE 3000
+
+HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
+  CMD wget -qO- http://localhost:3000/health || exit 1
+
+CMD ["node", "packages/api/dist/server.js"]

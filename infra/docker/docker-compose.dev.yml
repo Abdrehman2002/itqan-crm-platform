@@ -1,0 +1,101 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: crm_platform
+      POSTGRES_USER: crm
+      POSTGRES_PASSWORD: crm_dev_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../../packages/core/src/database/migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crm"]
+      interval: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.api
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      DATABASE_URL: postgresql://crm:crm_dev_password@postgres:5432/crm_platform
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: dev-secret-change-in-production
+      PLATFORM_DOMAIN: localhost
+      API_BASE_URL: http://localhost:3000
+      CORS_ORIGINS: http://localhost:5173
+      # Stripe (global cards)
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      # Wise (international transfers + PKR)
+      WISE_API_KEY: ${WISE_API_KEY:-}
+      WISE_PROFILE_ID: ${WISE_PROFILE_ID:-}
+      WISE_WEBHOOK_SECRET: ${WISE_WEBHOOK_SECRET:-}
+      WISE_SANDBOX: "true"
+      WISE_PKR_IBAN: ${WISE_PKR_IBAN:-}
+      WISE_USD_ACCOUNT_NUMBER: ${WISE_USD_ACCOUNT_NUMBER:-}
+      # JazzCash (Pakistan mobile wallet)
+      JAZZCASH_MERCHANT_ID: ${JAZZCASH_MERCHANT_ID:-}
+      JAZZCASH_PASSWORD: ${JAZZCASH_PASSWORD:-}
+      JAZZCASH_INTEGRITY_KEY: ${JAZZCASH_INTEGRITY_KEY:-}
+      JAZZCASH_SANDBOX: "true"
+      # Easypaisa (Pakistan mobile wallet)
+      EASYPAISA_STORE_ID: ${EASYPAISA_STORE_ID:-}
+      EASYPAISA_HASH_KEY: ${EASYPAISA_HASH_KEY:-}
+      EASYPAISA_USERNAME: ${EASYPAISA_USERNAME:-}
+      EASYPAISA_PASSWORD: ${EASYPAISA_PASSWORD:-}
+      EASYPAISA_SANDBOX: "true"
+      # Raast (SBP instant payment — via 1LINK PSP)
+      RAAST_CLIENT_ID: ${RAAST_CLIENT_ID:-}
+      RAAST_CLIENT_SECRET: ${RAAST_CLIENT_SECRET:-}
+      RAAST_MERCHANT_IBAN: ${RAAST_MERCHANT_IBAN:-}
+      RAAST_MERCHANT_ALIAS: ${RAAST_MERCHANT_ALIAS:-}
+      RAAST_ACCOUNT_TITLE: ${RAAST_ACCOUNT_TITLE:-}
+      RAAST_SANDBOX: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../../packages:/app/packages
+      - ../../modules:/app/modules
+    command: npm run dev
+
+  frontend:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.frontend
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_URL: http://localhost:3000
+      VITE_WS_URL: ws://localhost:3000
+    depends_on:
+      - api
+    volumes:
+      - ../../packages/frontend:/app/packages/frontend
+
+volumes:
+  postgres_data:
+  redis_data:

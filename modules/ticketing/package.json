@@ -1,0 +1,11 @@
+{
+  "name": "@crm/module-ticketing",
+  "version": "0.1.0",
+  "description": "Ticketing Platform Module — Support tickets, SLA management, customer portal (stub)",
+  "main": "src/index.ts",
+  "scripts": {},
+  "dependencies": {
+    "@crm/shared": "*",
+    "@crm/core": "*"
+  }
+}
