@@ -1,6 +1,8 @@
 {
   "framework": null,
   "outputDirectory": "dist",
+  "installCommand": "npm install --prefix=../..",
+  "buildCommand": "npx --prefix=../.. vite build",
   "rewrites": [
     { "source": "/api/:path*", "destination": "http://129.121.115.99:3000/api/:path*" },
     { "source": "/auth/:path*", "destination": "http://129.121.115.99:3000/auth/:path*" },
