@@ -313,33 +313,48 @@ async function assignByPushRouting(
   const queueId = ticket.queue_id;
   let candidateIds: string[] = [];
 
+  // Department-aware routing: map ticket_type → department_type so a complaints ticket
+  // only routes to agents/line_managers in the Complaints department, etc.
+  const TICKET_TYPE_TO_DEPT: Record<string, string> = {
+    complaint: 'complaint',
+    sales:     'sales',
+    inquiry:   'support',   // generic inquiries fall into Support by default
+    support:   'support',
+  };
+  const requiredDept = TICKET_TYPE_TO_DEPT[ticket.ticket_type ?? 'support'] ?? null;
+  const deptFilter = requiredDept ? ' AND (u.department_type = $3 OR u.role IN (\'tenant_admin\'))' : '';
+
   if (queueId) {
     const qm = await db.withSuperAdmin(async (client) => {
+      const params: unknown[] = [queueId, ticket.assignee_id ?? '00000000-0000-0000-0000-000000000000'];
+      if (requiredDept) params.push(requiredDept);
       const r = await client.query(
         `SELECT qm.user_id
          FROM queue_members qm
          JOIN users u ON u.id = qm.user_id
          WHERE qm.queue_id = $1
            AND u.is_active = true
-           AND u.role IN ('agent','manager')
-           AND u.id != $2`,
-        [queueId, ticket.assignee_id ?? '00000000-0000-0000-0000-000000000000'],
+           AND u.role IN ('agent','line_manager','manager')
+           AND u.id != $2${deptFilter}`,
+        params,
       );
       return r.rows.map((u: any) => u.user_id as string);
     });
     candidateIds = qm;
   }
 
-  // Fallback: if queue has no members, use all active agents in tenant
+  // Fallback: if queue has no members, use all active agents in the matching department
   if (candidateIds.length === 0) {
     const all = await db.withSuperAdmin(async (client) => {
+      const params: unknown[] = [tenantId, ticket.assignee_id ?? '00000000-0000-0000-0000-000000000000'];
+      if (requiredDept) params.push(requiredDept);
       const r = await client.query(
-        `SELECT id FROM users
+        `SELECT id FROM users u
          WHERE tenant_id = $1
            AND is_active = true
-           AND role IN ('agent','manager')
-           AND id != $2`,
-        [tenantId, ticket.assignee_id ?? '00000000-0000-0000-0000-000000000000'],
+           AND role IN ('agent','line_manager','manager')
+           AND id != $2${deptFilter.replace(/u\./g, '')}`,
+        params,
       );
       return r.rows.map((u: any) => u.id as string);
     });
@@ -1145,6 +1160,102 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
         note: note ?? null,
       });
       return reply.send({ success: true, data: ticket });
+    });
+
+    // ── Overview — everything an agent needs the moment they accept ──────
+    // GET /:id/overview returns: the ticket, full voice transcript (if any),
+    // prior tickets from the same reporter/contact, related resolved tickets
+    // (by category), and contact summary. One request, ready to render.
+    fastify.get('/:id/overview', { preHandler: requireScope('tickets:read') }, async (req, reply) => {
+      const { id }   = req.params as { id: string };
+      const tenantId = req.tenant.id;
+
+      const data = await db.withTenant(tenantId, async (client) => {
+        // 1. The ticket itself with all related fields
+        const [ticket] = (await client.query(
+          `SELECT t.*, q.name AS queue_name, q.color AS queue_color,
+                  s.name AS sla_name, s.resolution_hours,
+                  c.first_name || ' ' || COALESCE(c.last_name,'') AS contact_name,
+                  c.phone AS contact_phone, c.email AS contact_email,
+                  c.company_id, c.status AS contact_status, c.score AS contact_score,
+                  co.name AS company_name,
+                  ua.name AS assignee_name, ua.email AS assignee_email,
+                  uc.name AS creator_name
+           FROM tickets t
+           LEFT JOIN ticket_queues q ON q.id = t.queue_id
+           LEFT JOIN sla_policies s ON s.id = t.sla_policy_id
+           LEFT JOIN contacts c ON c.id = t.contact_id
+           LEFT JOIN companies co ON co.id = c.company_id
+           LEFT JOIN users ua ON ua.id = t.assignee_id
+           LEFT JOIN users uc ON uc.id = t.created_by
+           WHERE t.id = $1`,
+          [id],
+        )).rows;
+        if (!ticket) return null;
+
+        // 2. Linked voice call (if this ticket came from a call)
+        const [voiceCall] = (await client.query(
+          `SELECT id, transcript, summary, sentiment, duration_seconds,
+                  from_number, started_at, ended_at, recording_url,
+                  extracted_reporter_name, extracted_category, extracted_priority
+           FROM voice_bot_calls
+           WHERE ticket_id = $1
+           LIMIT 1`,
+          [id],
+        )).rows;
+
+        // 3. Prior tickets from the same contact (or same phone if no contact)
+        const priorTicketsParams: unknown[] = [id];
+        let priorWhere = 'id != $1 AND ';
+        if (ticket.contact_id) {
+          priorTicketsParams.push(ticket.contact_id);
+          priorWhere += `contact_id = $${priorTicketsParams.length}`;
+        } else if (ticket.reporter_phone) {
+          priorTicketsParams.push(ticket.reporter_phone);
+          priorWhere += `reporter_phone = $${priorTicketsParams.length}`;
+        } else {
+          priorWhere += 'false';
+        }
+        const priorTickets = (await client.query(
+          `SELECT id, ticket_number, subject, status, priority, ticket_type,
+                  channel, created_at, resolved_at
+           FROM tickets
+           WHERE ${priorWhere}
+           ORDER BY created_at DESC
+           LIMIT 10`,
+          priorTicketsParams,
+        )).rows;
+
+        // 4. Related resolved tickets — same ticket_type, similar subject keywords
+        // (cheap version: same type + status='resolved' or 'closed', recent first)
+        const related = (await client.query(
+          `SELECT id, ticket_number, subject, ticket_type, resolved_at
+           FROM tickets
+           WHERE ticket_type = COALESCE($1, ticket_type)
+             AND status IN ('resolved', 'closed')
+             AND id != $2
+           ORDER BY resolved_at DESC NULLS LAST
+           LIMIT 5`,
+          [ticket.ticket_type ?? null, id],
+        )).rows;
+
+        // 5. Recent comments
+        const comments = (await client.query(
+          `SELECT tc.id, tc.body, tc.is_internal, tc.created_at,
+                  u.name AS author_name, u.role AS author_role
+           FROM ticket_comments tc
+           LEFT JOIN users u ON u.id = tc.author_id
+           WHERE tc.ticket_id = $1
+           ORDER BY tc.created_at DESC
+           LIMIT 20`,
+          [id],
+        )).rows;
+
+        return { ticket, voiceCall, priorTickets, related, comments };
+      });
+
+      if (!data) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Ticket not found' } });
+      return reply.send({ success: true, data });
     });
 
     // ── Accept ticket (agent confirms they will work on it) ───────────────

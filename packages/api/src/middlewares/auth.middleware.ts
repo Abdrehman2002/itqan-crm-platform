@@ -101,6 +101,7 @@ const ROLE_LEVEL: Record<string, number> = {
   super_admin:  50,
   tenant_admin: 40,
   manager:      30,
+  line_manager: 25,   // department-scoped sub-manager — between manager and agent
   agent:        20,
   viewer:       10,
 };

@@ -407,6 +407,27 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
       }
     });
 
+    // Heartbeat — frontend pings every 30s while a tab is open.
+    // Updates users.last_active_at so manager dashboards can show online/idle/offline.
+    // Cheap upsert — no logging, no eventBus, just a single UPDATE.
+    fastify.post('/heartbeat', async (req, reply) => {
+      try {
+        await req.jwtVerify();
+        const userId = (req.user as any)?.sub;
+        const tenantId = (req.user as any)?.tenantId;
+        if (!userId || !tenantId) return reply.code(401).send({ success: false });
+        await db.withSuperAdmin(async (client) => {
+          await client.query(
+            `UPDATE users SET last_active_at = NOW() WHERE id = $1 AND tenant_id = $2`,
+            [userId, tenantId],
+          );
+        });
+        return reply.send({ success: true });
+      } catch {
+        return reply.code(401).send({ success: false });
+      }
+    });
+
     // Logout — revokes the current token's JTI in Redis
     fastify.post('/logout', async (req, reply) => {
       try {

@@ -10,6 +10,7 @@ import {
 import { useAuthStore } from './store/auth.store';
 import { useIsSuperAdmin, useIsAdmin } from './hooks/useRole';
 import { useApplyAppearance } from './hooks/useApplyAppearance';
+import { useHeartbeat } from './hooks/useHeartbeat';
 import { api } from './services/api';
 import { NotificationBell } from './components/NotificationBell';
 import { CallWidget } from './components/CallWidget';
@@ -43,6 +44,7 @@ const VoiceBotCalls   = lazy(() => import('./pages/VoiceBotCalls').then(m => ({ 
 const VoiceBotTickets = lazy(() => import('./pages/VoiceBotTickets').then(m => ({ default: m.VoiceBotTickets })));
 const ContactDetail   = lazy(() => import('./pages/ContactDetail').then(m => ({ default: m.ContactDetail })));
 const RolesPage       = lazy(() => import('./pages/Roles').then(m => ({ default: m.RolesPage })));
+const OrgChart        = lazy(() => import('./pages/OrgChart').then(m => ({ default: m.OrgChart })));
 // Sales & Invoicing module
 const SalesDashboard    = lazy(() => import('./pages/sales/SalesDashboard').then(m => ({ default: m.SalesDashboard })));
 const InvoiceList       = lazy(() => import('./pages/sales/InvoiceList').then(m => ({ default: m.InvoiceList })));
@@ -299,6 +301,7 @@ function prefetchCommonRoutes() {
 }
 
 function AppLayout() {
+  useHeartbeat();   // ping /auth/heartbeat every 30s while a tab is open (presence tracking)
   const { isAuthenticated } = useAuthStore();
   useApplyAppearance();
 
@@ -326,6 +329,7 @@ function AppLayout() {
           <Route path="/tickets"         element={<Tickets />} />
           <Route path="/tickets/queues"  element={<TicketQueues />} />
           <Route path="/tickets/sla"     element={<TicketSla />} />
+          <Route path="/organization"    element={<OrgChart />} />
           <Route path="/emails"          element={<Emails />} />
           <Route path="/voice-bot"         element={<VoiceBotConfig />} />
           <Route path="/voice-bot/calls"   element={<VoiceBotCalls />} />
