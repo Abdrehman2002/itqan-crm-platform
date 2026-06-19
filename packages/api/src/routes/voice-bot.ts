@@ -1198,5 +1198,78 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
 
       return reply.code(201).send({ success: true, ...result });
     });
+
+    // Support inquiry — Sara uses this when the caller needs human follow-up.
+    // Creates a voice_bot_calls record AND a ticket (channel=voice_bot, type=support)
+    // routed to the Support dept queue. Mirrors Nadia's complaint flow.
+    fastify.post('/livekit/support', async (req, reply) => {
+      const { tenantId } = req.query as { tenantId?: string };
+      if (!tenantId) return reply.code(400).send({ error: 'tenantId query param required' });
+      if (!checkSecret(req)) return reply.code(401).send({ error: 'unauthorized' });
+
+      const b = (req.body ?? {}) as {
+        agent?: string;
+        reporterName?: string; reporterPhone?: string | null; reporterEmail?: string | null;
+        subject?: string; description?: string;
+        category?: string;        // billing / technical / account / general
+        urgency?: string;         // low / medium / high
+      };
+
+      const urgency  = (b.urgency ?? 'medium').toLowerCase();
+      const priority = urgency === 'high' ? 'high' : urgency === 'low' ? 'low' : 'medium';
+      const subject  = b.subject ?? `Support inquiry — ${b.category ?? 'general'} (${b.reporterName ?? 'unknown'})`;
+      const description = [
+        `Caller: ${b.reporterName ?? '—'}`,
+        `Phone: ${b.reporterPhone ?? '—'}`,
+        `Email: ${b.reporterEmail ?? '—'}`,
+        `Category: ${b.category ?? 'general'}`,
+        `Urgency: ${urgency}`,
+        '',
+        b.description ?? '',
+      ].join('\n');
+
+      const result = await db.withSuperAdmin(async (c) => {
+        const [{ next_val }] = (await c.query(
+          `INSERT INTO ticket_counters (tenant_id, next_val) VALUES ($1, 2)
+           ON CONFLICT (tenant_id) DO UPDATE SET next_val = ticket_counters.next_val + 1
+           RETURNING next_val`, [tenantId])).rows;
+        const num = `TKT-${String(Number(next_val) - 1).padStart(5, '0')}`;
+
+        // Route to Support Queue (auto-created by migration 015) — fall back to default
+        const [queueRow] = (await c.query(
+          `SELECT id FROM ticket_queues
+            WHERE tenant_id = $1
+              AND (LOWER(name) IN ('support','support queue') OR is_default = true)
+            ORDER BY (LOWER(name) IN ('support','support queue')) DESC, is_default DESC
+            LIMIT 1`, [tenantId])).rows;
+
+        const [ticketRow] = (await c.query(
+          `INSERT INTO tickets
+             (tenant_id, ticket_number, subject, description, status, priority, channel,
+              ticket_type, queue_id, reporter_name, reporter_phone, reporter_email, tags, custom_fields)
+           VALUES ($1,$2,$3,$4,'open',$5,'voice_bot','support',$6,$7,$8,$9,'{}', $10::jsonb)
+           RETURNING id, ticket_number`,
+          [tenantId, num, subject, description, priority, queueRow?.id ?? null,
+           b.reporterName ?? null, b.reporterPhone ?? null, b.reporterEmail ?? null,
+           JSON.stringify({ category: b.category, urgency: b.urgency })],
+        )).rows;
+
+        const [callRow] = (await c.query(
+          `INSERT INTO voice_bot_calls
+             (tenant_id, provider, from_number, direction, status,
+              extracted_subject, extracted_priority, extracted_reporter_name,
+              ticket_id, raw_payload, started_at)
+           VALUES ($1, $2, $3, 'inbound', 'completed', $4, $5, $6, $7, $8::jsonb, NOW())
+           RETURNING id`,
+          [tenantId, b.agent ?? 'sara', b.reporterPhone ?? null,
+           subject, priority, b.reporterName ?? null, ticketRow.id,
+           JSON.stringify(b)],
+        )).rows;
+
+        return { ticketNumber: ticketRow.ticket_number, voiceCallId: callRow.id };
+      });
+
+      return reply.code(201).send({ success: true, ...result });
+    });
   };
 }
