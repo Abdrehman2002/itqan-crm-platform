@@ -434,6 +434,41 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
     fastify.get('/stats', { preHandler: requireScope('tickets:read') }, async (req, reply) => {
       const tenantId = req.tenant.id;
       const userId   = req.user.sub;
+      const role     = (req.user as any).role as string;
+      const deptType = (req.user as any).department_type as string | null;
+
+      // Build scope filter per role:
+      //   tenant_admin / super_admin → all tickets (whole tenant)
+      //   manager / line_manager     → tickets owned by anyone in their reporting subtree
+      //                                (recursive CTE down manager_id), OR sitting in their dept queue
+      //   agent / viewer             → tickets assigned to them OR sitting unassigned in their dept queue
+      //                                (so they see what they can pick up)
+      let scopeSql = '';
+      const scopeParams: any[] = [userId];
+
+      if (role === 'agent' || role === 'viewer') {
+        // Their work + the dept queue they could claim from
+        scopeSql = `WHERE (assignee_id = $1 OR (assignee_id IS NULL AND queue_id IN (
+                      SELECT id FROM ticket_queues WHERE LOWER(name) LIKE '%' || $2 || '%'
+                    )))`;
+        scopeParams.push((deptType ?? '').toLowerCase());
+      } else if (role === 'manager' || role === 'line_manager') {
+        // Recursive subtree of users reporting up to me + tickets in my dept queue
+        scopeSql = `WHERE (
+          assignee_id IN (
+            WITH RECURSIVE h AS (
+              SELECT id FROM users WHERE id = $1
+              UNION ALL
+              SELECT u.id FROM users u INNER JOIN h ON u.manager_id = h.id
+            ) SELECT id FROM h
+          )
+          OR queue_id IN (
+            SELECT id FROM ticket_queues WHERE LOWER(name) LIKE '%' || $2 || '%'
+          )
+        )`;
+        scopeParams.push((deptType ?? '').toLowerCase());
+      }
+      // tenant_admin/super_admin: no WHERE, sees everything
 
       const [stats] = await db.withTenant(tenantId, async (client) => {
         const r = await client.query(
@@ -454,8 +489,8 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
              COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24 hours') AS created_today,
              COUNT(*) FILTER (WHERE status IN ('accepted','in_progress')
                                AND assignee_id IS NOT NULL)                     AS claimed
-           FROM tickets`,
-          [userId],
+           FROM tickets ${scopeSql}`,
+          scopeParams,
         );
         return r.rows;
       });
