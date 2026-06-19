@@ -1081,7 +1081,8 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
           `INSERT INTO voice_bot_calls
              (tenant_id, provider, from_number, direction, status, duration_seconds,
               transcript, summary, sentiment, raw_payload, started_at, ended_at)
-           VALUES ($1, $2, $3, 'inbound', 'completed', $4, $5, $6, $7, $8, NOW() - ($4 || ' seconds')::interval, NOW())
+           VALUES ($1, $2, $3, 'inbound', 'completed', $4::int, $5, $6, $7, $8::jsonb,
+                   NOW() - make_interval(secs => $4::int), NOW())
            RETURNING id`,
           [
             tenantId,
