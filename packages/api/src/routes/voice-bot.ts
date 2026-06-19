@@ -496,8 +496,15 @@ async function createComplaintFromStructured(
          RETURNING next_val`, [tenantId])).rows);
     const ticketNumber = `TKT-${String(Number(next_val) - 1).padStart(5, '0')}`;
 
+    // Nadia handles complaints — route to the Complaints dept queue (auto-created
+    // by migration 015), fall back to default only if the Complaints queue is missing.
     const [queueRow] = await db.withSuperAdmin(async (c) =>
-      (await c.query(`SELECT id FROM ticket_queues WHERE tenant_id=$1 AND is_default=true LIMIT 1`, [tenantId])).rows);
+      (await c.query(
+        `SELECT id FROM ticket_queues
+          WHERE tenant_id = $1
+            AND (LOWER(name) IN ('complaints','complaint','complaints queue') OR is_default = true)
+          ORDER BY (LOWER(name) IN ('complaints','complaint','complaints queue')) DESC, is_default DESC
+          LIMIT 1`, [tenantId])).rows);
     const [slaRow] = await db.withSuperAdmin(async (c) =>
       (await c.query(`SELECT id FROM sla_policies WHERE tenant_id=$1 AND priority=$2 AND is_active=true LIMIT 1`, [tenantId, priority])).rows);
 
@@ -1145,8 +1152,14 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
         )).rows;
         const num = `TKT-${String(Number(next_val) - 1).padStart(5, '0')}`;
 
+        // Route to the SALES dept queue (auto-created by migration 015). Fall back to
+        // the tenant's default queue only if the Sales queue doesn't exist.
         const [queueRow] = (await c.query(
-          `SELECT id FROM ticket_queues WHERE tenant_id = $1 AND is_default = true LIMIT 1`,
+          `SELECT id FROM ticket_queues
+            WHERE tenant_id = $1
+              AND (LOWER(name) IN ('sales','sales queue') OR is_default = true)
+            ORDER BY (LOWER(name) IN ('sales','sales queue')) DESC, is_default DESC
+            LIMIT 1`,
           [tenantId],
         )).rows;
 
