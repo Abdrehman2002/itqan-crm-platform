@@ -194,34 +194,15 @@ function Sidebar() {
           </div>
         ))}
 
-        {modules.length > 0 && <div className="border-t border-white/10 mx-1" />}
-
-        <div className="space-y-0.5">
-          {BOTTOM_NAV.map(({ to, label, icon }) => {
-            const Icon = resolveIcon(icon);
-            return (
-              <NavLink
-                key={to}
-                to={to}
-                className={({ isActive }) =>
-                  `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${
-                    isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'
-                  }`
-                }
-                style={({ isActive }) => isActive ? {
-                  background: 'linear-gradient(135deg, rgba(41,171,226,0.25) 0%, rgba(77,139,60,0.15) 100%)',
-                  borderLeft: '2px solid #29ABE2',
-                } : {}}
-              >
-                <Icon className="w-4 h-4 shrink-0" />
-                {label}
-              </NavLink>
-            );
-          })}
-        </div>
+        {/*
+          Hardcoded bottom nav (Integrations, Billing) intentionally removed.
+          These items now flow through /api/v1/modules with role-based filtering
+          (tenant_admin sees them in their Admin module; nobody else does).
+        */}
       </nav>
 
-      {/* ── Footer: Super Admin + Settings + User ─────────────────── */}
+      {/* ── Footer: Settings + Super Admin (Settings/Roles moved into the
+           dynamic Admin module for tenant_admin — keep this minimal). ── */}
       <div className="px-2 py-3 border-t border-white/10 space-y-0.5">
         {isSuperAdmin && (
           <NavLink to="/super-admin"
@@ -238,23 +219,7 @@ function Sidebar() {
             Super Admin
           </NavLink>
         )}
-        {isAdmin && (
-          <NavLink to="/roles"
-            className={({ isActive }) =>
-              `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${
-                isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'
-              }`
-            }
-            style={({ isActive }) => isActive ? {
-              background: 'linear-gradient(135deg, rgba(41,171,226,0.25) 0%, rgba(77,139,60,0.15) 100%)',
-              borderLeft: '2px solid #29ABE2',
-            } : {}}
-          >
-            <Shield className="w-4 h-4" />
-            Roles
-          </NavLink>
-        )}
-        <NavLink to="/settings"
+        <NavLink to="/personal-settings"
           className={({ isActive }) =>
             `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${
               isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'
@@ -266,7 +231,7 @@ function Sidebar() {
           } : {}}
         >
           <SettingsIcon className="w-4 h-4" />
-          Settings
+          My Profile
         </NavLink>
 
         {/* User chip */}
@@ -345,6 +310,10 @@ function AppLayout() {
           <Route path="/integrations" element={<Integrations />} />
           <Route path="/settings"     element={<Settings />} />
           <Route path="/roles"        element={<RolesPage />} />
+          {/* Tenant-admin sidebar deep-links — all surface inside the Settings page tabs for now */}
+          <Route path="/users"        element={<Settings />} />
+          <Route path="/departments"  element={<Settings />} />
+          <Route path="/modules"      element={<Settings />} />
           <Route path="/super-admin" element={<SuperAdmin />} />
           {/* Sales & Invoicing module */}
           <Route path="/sales/dashboard"  element={<SalesDashboard />} />
