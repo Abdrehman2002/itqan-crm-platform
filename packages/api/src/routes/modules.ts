@@ -67,10 +67,13 @@ const PATH_ALLOWED_ROLES: Record<string, Role[]> = {
   '/voice-bot/calls':     ['manager', 'line_manager', 'agent', 'viewer'],
   '/voice-bot/tickets':   ['manager', 'line_manager', 'agent', 'viewer'],
   '/voice':               ['manager', 'line_manager', 'agent', 'viewer'],
+  '/voice/calls':         ['manager', 'line_manager', 'agent', 'viewer'],
   '/emails':              ['manager', 'line_manager', 'agent', 'viewer'],
-  '/sales/invoices':      ['manager', 'line_manager', 'agent', 'viewer'],
-  '/sales/contacts':      ['manager', 'line_manager', 'agent', 'viewer'],
-  '/sales/payments':      ['manager', 'line_manager', 'agent', 'viewer'],
+
+  // ── Sales Invoicing (Manager / Line Manager only — agents don't touch billing) ──
+  '/sales/invoices':      ['manager', 'line_manager'],
+  '/sales/contacts':      ['manager', 'line_manager'],
+  '/sales/payments':      ['manager', 'line_manager'],
 
   // Super-admin is platform-level — already gated in server.ts (blocked from /api/v1/*)
   '/super-admin':         ['super_admin'],
