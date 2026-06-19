@@ -150,7 +150,9 @@ function AgentDashboard({ d, department, deptType }: { d: any; department: strin
   const { data: tatData } = useQuery({
     queryKey: ['agent-tat-dashboard'],
     queryFn: () => api.get('/api/v1/tickets/dashboard/agent').then(r => r.data.data),
-    refetchInterval: 30_000,
+    refetchInterval: 60_000,
+    staleTime: 45_000,
+    placeholderData: (prev) => prev,
   });
 
   const callsToday     = Number(calls.calls_today     ?? 0);
@@ -551,7 +553,9 @@ function ManagerDashboard({ d, department, deptType }: { d: any; department: str
   const { data: teamData } = useQuery({
     queryKey: ['manager-team-dashboard'],
     queryFn: () => api.get('/api/v1/tickets/dashboard/team').then(r => r.data.data),
-    refetchInterval: 30_000,
+    refetchInterval: 60_000,
+    staleTime: 45_000,
+    placeholderData: (prev) => prev,
   });
   const hCalls   = human.calls      ?? {};
   const hTickets = human.tickets    ?? {};
@@ -1134,7 +1138,9 @@ export function Dashboard() {
   const { data, isLoading, dataUpdatedAt, refetch, isFetching } = useQuery({
     queryKey: ['ops-dashboard'],
     queryFn: () => api.get('/api/v1/analytics/ops-dashboard').then(r => r.data.data),
-    refetchInterval: 30_000,
+    refetchInterval: 60_000,         // poll every 60s instead of 30s — endpoint is heavy (~15 sequential queries)
+    staleTime: 45_000,               // treat data as fresh for 45s — no refetch on tab/nav within that window
+    placeholderData: (prev) => prev, // show last result instantly on navigation, refetch silently in background
   });
 
   const isTenantAdmin = role === 'tenant_admin';
