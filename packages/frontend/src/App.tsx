@@ -45,6 +45,8 @@ const VoiceBotTickets = lazy(() => import('./pages/VoiceBotTickets').then(m => (
 const ContactDetail   = lazy(() => import('./pages/ContactDetail').then(m => ({ default: m.ContactDetail })));
 const RolesPage       = lazy(() => import('./pages/Roles').then(m => ({ default: m.RolesPage })));
 const OrgChart        = lazy(() => import('./pages/OrgChart').then(m => ({ default: m.OrgChart })));
+const TeamReports     = lazy(() => import('./pages/TeamReports').then(m => ({ default: m.TeamReports })));
+const PersonalSettings = lazy(() => import('./pages/PersonalSettings').then(m => ({ default: m.PersonalSettings })));
 // Sales & Invoicing module
 const SalesDashboard    = lazy(() => import('./pages/sales/SalesDashboard').then(m => ({ default: m.SalesDashboard })));
 const InvoiceList       = lazy(() => import('./pages/sales/InvoiceList').then(m => ({ default: m.InvoiceList })));
@@ -330,6 +332,8 @@ function AppLayout() {
           <Route path="/tickets/queues"  element={<TicketQueues />} />
           <Route path="/tickets/sla"     element={<TicketSla />} />
           <Route path="/organization"    element={<OrgChart />} />
+          <Route path="/team-reports"    element={<TeamReports />} />
+          <Route path="/personal-settings" element={<PersonalSettings />} />
           <Route path="/emails"          element={<Emails />} />
           <Route path="/voice-bot"         element={<VoiceBotConfig />} />
           <Route path="/voice-bot/calls"   element={<VoiceBotCalls />} />

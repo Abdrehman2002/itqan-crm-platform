@@ -41,6 +41,11 @@ import { billingContactRoutes } from './routes/sales/billing-contacts';
 import { salesSettingsRoutes } from './routes/sales/sales-settings';
 import { salesDashboardRoutes } from './routes/sales/sales-dashboard';
 import { sectorRoutes } from './routes/sector';
+import { departmentRoutes } from './routes/departments';
+import { opportunityRoutes } from './routes/opportunities';
+import { invoiceTemplateRoutes } from './routes/sales/invoice-templates';
+import { startWebhookWorker } from './lib/webhook-worker';
+import { startAnalyticsRefreshWorker } from './lib/analytics-refresh-worker';
 
 // Feature modules (internal building blocks)
 import { ContactsModule } from '../../../modules/contacts/src';
@@ -97,6 +102,12 @@ async function buildServer() {
   const moduleCtx = { db, redis, queue: null, eventBus, config: process.env as any };
   await moduleRegistry.loadAll(moduleCtx);
   await moduleRegistry.loadAllPlatform(moduleCtx);
+
+  // ── Background workers ─────────────────────────────────────
+  // Webhook delivery worker: retries failed deliveries with exponential backoff.
+  // Analytics refresh worker: refreshes materialized views every hour.
+  const stopWebhookWorker     = startWebhookWorker(db);
+  const stopAnalyticsRefresh  = startAnalyticsRefreshWorker(db);
 
   // ── Fastify plugins ───────────────────────────────────────
 
@@ -264,6 +275,9 @@ async function buildServer() {
   await fastify.register(salesSettingsRoutes(db),  { prefix: '/api/v1/sales/settings' });
   await fastify.register(salesDashboardRoutes(db), { prefix: '/api/v1/sales/dashboard' });
   await fastify.register(sectorRoutes(db),         { prefix: '/api/v1/sector' });
+  await fastify.register(invoiceTemplateRoutes(db),{ prefix: '/api/v1/sales/templates' });
+  await fastify.register(departmentRoutes(db),     { prefix: '/api/v1/departments' });
+  await fastify.register(opportunityRoutes(db),    { prefix: '/api/v1/opportunities' });
 
   // Health check
   fastify.get('/health', async () => ({
@@ -275,6 +289,8 @@ async function buildServer() {
   // ── Graceful shutdown ─────────────────────────────────────
   const shutdown = async () => {
     logger.info('Shutting down...');
+    stopWebhookWorker();
+    stopAnalyticsRefresh();
     await moduleRegistry.unloadAll();
     await eventBus.shutdown();
     await db.end();
