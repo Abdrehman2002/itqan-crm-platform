@@ -927,8 +927,13 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
       }
 
       if (query.status) {
-        // Allow comma-separated multi-status: "open,assigned"
-        const statuses = query.status.split(',').map(s => s.trim());
+        // Allow comma-separated multi-status: "open,assigned".
+        // Expand 'in_progress' to match what /stats counts as in-progress
+        // (status IN ('accepted','in_progress')) — otherwise the "In Progress N"
+        // tab click filters out tickets that were accepted but not yet started,
+        // causing a count/list mismatch ("In Progress 1" but list shows empty).
+        const raw = query.status.split(',').map(s => s.trim());
+        const statuses = raw.flatMap(s => s === 'in_progress' ? ['accepted', 'in_progress'] : [s]);
         where.push(`t.status = ANY($${idx++}::text[])`);
         params.push(statuses);
       }
