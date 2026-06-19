@@ -83,7 +83,7 @@ export function opportunityRoutes(db: DatabaseClient) {
         client.query(
           `SELECT o.*,
                   u.name  AS assignee_name,
-                  c.name  AS contact_name,
+                  (c.first_name || ' ' || COALESCE(c.last_name,'')) AS contact_name,
                   co.name AS company_name
            FROM sales_opportunities o
            LEFT JOIN users     u  ON u.id  = o.assignee_id
@@ -110,7 +110,8 @@ export function opportunityRoutes(db: DatabaseClient) {
         client.query(
           `SELECT o.*,
                   u.name  AS assignee_name,
-                  c.name  AS contact_name, c.email AS contact_email,
+                  (c.first_name || ' ' || COALESCE(c.last_name,'')) AS contact_name,
+                  c.email AS contact_email,
                   co.name AS company_name
            FROM sales_opportunities o
            LEFT JOIN users     u  ON u.id  = o.assignee_id

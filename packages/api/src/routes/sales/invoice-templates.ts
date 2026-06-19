@@ -54,7 +54,7 @@ export function invoiceTemplateRoutes(db: DatabaseClient) {
     // List templates for tenant
     fastify.get('/', { preHandler: requireScope('billing:read') }, async (req, reply) => {
       const tenantId = req.tenant.id;
-      const rows = await db.withTenant(tenantId, (client) =>
+      const { rows } = await db.withTenant(tenantId, (client) =>
         client.query(
           `SELECT id, name, type, is_default, file_name, created_at, updated_at,
                   CASE WHEN type='builder' THEN layout ELSE NULL END as layout

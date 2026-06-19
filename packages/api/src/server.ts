@@ -197,6 +197,27 @@ async function buildServer() {
       }
     } catch { /* handler itself threw — fall through to defaults */ }
 
+    // Postgres errors that are actually caller faults → return 400 instead of 500
+    // 22P02 = invalid_text_representation (e.g. bad UUID, bad date in :id path)
+    // 22001 = string_data_right_truncation (oversize value)
+    // 23502 = not_null_violation (missing required field that schema didn't catch)
+    // 23503 = foreign_key_violation (referencing a row that doesn't exist)
+    // 23505 = unique_violation (duplicate)
+    const pgCode = (err as any).code;
+    const PG_USER_ERRORS: Record<string, string> = {
+      '22P02': 'Invalid identifier or value format',
+      '22001': 'Value too long',
+      '23502': 'Missing required field',
+      '23503': 'Referenced record does not exist',
+      '23505': 'Duplicate — record already exists',
+    };
+    if (pgCode && PG_USER_ERRORS[pgCode]) {
+      return reply.code(400).send({
+        success: false,
+        error: { code: pgCode, message: PG_USER_ERRORS[pgCode] },
+      });
+    }
+
     // Postgres / known errors with a statusCode
     const status = (err as any).statusCode ?? reply.statusCode;
     if (status >= 400 && status < 500) {
