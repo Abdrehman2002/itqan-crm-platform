@@ -292,7 +292,11 @@ export function analyticsRoutes(db: DatabaseClient) {
       const scopeLiteral = scopeIds
         ? `ARRAY[${scopeIds.map(id => `'${id}'::uuid`).join(',')}]`
         : 'NULL';
-      const scopeOwnerSql    = scopeIds ? `AND owner_id     = ANY(${scopeLiteral})` : '';
+      // NOTE: Qualified with `a.` because the activities recent-list query JOINs contacts,
+      // and contacts also has owner_id — unqualified would throw PG 42702 "ambiguous".
+      // The two unaliased usages (activityStats and humanStats acts) are FROM activities
+      // with no JOIN; the `a.` qualifier still works because we alias those FROM clauses below.
+      const scopeOwnerSql    = scopeIds ? `AND a.owner_id   = ANY(${scopeLiteral})` : '';
       const scopeAssigneeSql = scopeIds ? `AND (assignee_id = ANY(${scopeLiteral}) OR created_by = ANY(${scopeLiteral}))` : '';
       const scopeAgentSql    = scopeIds ? `AND agent_id     = ANY(${scopeLiteral})` : '';
 
@@ -465,7 +469,7 @@ export function analyticsRoutes(db: DatabaseClient) {
             COUNT(*) FILTER (WHERE type = 'meeting')                            AS meetings,
             COUNT(*) FILTER (WHERE type = 'task')                               AS tasks,
             COUNT(*) FILTER (WHERE type = 'note')                               AS notes
-          FROM activities
+          FROM activities a
           WHERE 1=1 ${scopeOwnerSql}
         `);
         return r.rows[0] ?? {};
@@ -575,7 +579,7 @@ export function analyticsRoutes(db: DatabaseClient) {
             COUNT(*) FILTER (WHERE type = 'email')   AS act_emails,
             COUNT(*) FILTER (WHERE type = 'meeting') AS act_meetings,
             COUNT(*) FILTER (WHERE type = 'task')    AS act_tasks
-          FROM activities
+          FROM activities a
           WHERE 1=1 ${scopeOwnerSql}
         `);
 
