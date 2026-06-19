@@ -123,6 +123,8 @@ const SCOPE_MIN_ROLE: Record<ApiScope, number> = {
   'webhooks:manage':  ROLE_LEVEL.manager,
   'admin:read':       ROLE_LEVEL.manager,
   'admin:write':      ROLE_LEVEL.tenant_admin,
+  'billing:read':     ROLE_LEVEL.agent,
+  'billing:manage':   ROLE_LEVEL.manager,
 };
 
 // Maps scope prefix → permissions map key

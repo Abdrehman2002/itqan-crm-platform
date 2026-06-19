@@ -1,20 +1,20 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
-  Shield, Plus, Edit2, Trash2, X, Check, Loader2,
-  Lock, Users, ChevronDown, ChevronUp, Info,
+  Shield, Plus, Edit2, Trash2, X, Loader2,
+  Lock, Users, ChevronUp, ChevronDown, AlertTriangle,
 } from 'lucide-react';
 import { api } from '../services/api';
 import { useCan } from '../hooks/useRole';
+import { useAuthStore } from '../store/auth.store';
+import { PermissionsMatrix, ACTION_STYLE } from '../components/PermissionsMatrix';
+import type { ActionType, ModuleDef } from '../components/PermissionsMatrix';
 
 // ── Types ──────────────────────────────────────────────────────────────────
-interface ModuleDef {
-  key: string; label: string; icon: string; levels: string[];
-}
 interface Role {
   id: string; name: string; description: string; color: string;
   is_system: boolean; base_role: string;
-  permissions: Record<string, string>; user_count: number;
+  permissions: Record<string, boolean>; user_count: number;
 }
 
 const BASE_ROLES = [
@@ -24,95 +24,10 @@ const BASE_ROLES = [
   { value: 'viewer',       label: 'Viewer',       desc: 'Read-only access' },
 ];
 
-const LEVEL_COLORS: Record<string, string> = {
-  none: 'bg-gray-100 text-gray-400',
-  view: 'bg-blue-50 text-blue-600',
-  full: 'bg-green-50 text-green-700',
-};
-
 const PRESET_COLORS = [
   '#6366f1','#7c3aed','#db2777','#dc2626','#ea580c',
   '#ca8a04','#16a34a','#059669','#0891b2','#2563eb','#64748b',
 ];
-
-// ── Permissions Matrix ─────────────────────────────────────────────────────
-function PermissionsMatrix({
-  modules, permissions, onChange, readOnly = false,
-}: {
-  modules: ModuleDef[];
-  permissions: Record<string, string>;
-  onChange?: (perms: Record<string, string>) => void;
-  readOnly?: boolean;
-}) {
-  return (
-    <div className="border border-gray-100 rounded-xl overflow-hidden">
-      {/* Header */}
-      <div className="grid bg-gray-50 border-b border-gray-100 px-4 py-2"
-           style={{ gridTemplateColumns: '1fr repeat(3, 80px)' }}>
-        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Module</span>
-        {['None', 'View', 'Full'].map((l) => (
-          <span key={l} className="text-xs font-semibold text-gray-500 uppercase tracking-wide text-center">{l}</span>
-        ))}
-      </div>
-
-      {modules.map((mod, idx) => {
-        const current = permissions[mod.key] ?? 'none';
-        return (
-          <div key={mod.key}
-               className={`grid items-center px-4 py-2.5 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}
-               style={{ gridTemplateColumns: '1fr repeat(3, 80px)' }}>
-            <div className="flex items-center gap-2">
-              <span className="text-base">{mod.icon}</span>
-              <span className="text-sm font-medium text-gray-700">{mod.label}</span>
-            </div>
-            {['none', 'view', 'full'].map((level) => {
-              const available = mod.levels.includes(level);
-              const selected  = current === level;
-              return (
-                <div key={level} className="flex justify-center">
-                  {available ? (
-                    <button
-                      type="button"
-                      disabled={readOnly}
-                      onClick={() => !readOnly && onChange?.({ ...permissions, [mod.key]: level })}
-                      className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all
-                        ${selected
-                          ? level === 'none' ? 'border-gray-400 bg-gray-400'
-                            : level === 'view' ? 'border-blue-500 bg-blue-500'
-                            : 'border-green-500 bg-green-500'
-                          : 'border-gray-200 bg-white hover:border-gray-400'}
-                        ${readOnly ? 'cursor-default' : 'cursor-pointer'}`}
-                    >
-                      {selected && <Check className="w-3 h-3 text-white" />}
-                    </button>
-                  ) : (
-                    <div className="w-6 h-6 flex items-center justify-center">
-                      <div className="w-1.5 h-1.5 rounded-full bg-gray-200" />
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        );
-      })}
-
-      {/* Legend */}
-      <div className="flex items-center gap-4 px-4 py-2.5 bg-gray-50 border-t border-gray-100">
-        {[
-          { level: 'none', label: 'Hidden — user cannot see this module' },
-          { level: 'view', label: 'View only — read access' },
-          { level: 'full', label: 'Full — create, edit & delete' },
-        ].map(({ level, label }) => (
-          <div key={level} className={`flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-full ${LEVEL_COLORS[level]}`}>
-            <span className="font-semibold capitalize">{level}</span>
-            <span className="hidden sm:inline text-gray-400">— {label.split('—')[1]?.trim()}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
 
 // ── Role Form Modal ────────────────────────────────────────────────────────
 function RoleModal({
@@ -129,24 +44,19 @@ function RoleModal({
   const [description, setDescription] = useState(role?.description ?? '');
   const [color,       setColor]       = useState(role?.color ?? '#6366f1');
   const [baseRole,    setBaseRole]    = useState(role?.base_role ?? 'agent');
-  const [permissions, setPermissions] = useState<Record<string, string>>(
-    role?.permissions ?? {},
+  const blankPermissions = Object.fromEntries(
+    modules.flatMap((m) => m.actions.map((a) => [a.key, false])),
+  );
+  const [permissions, setPermissions] = useState<Record<string, boolean>>(
+    role?.permissions ?? blankPermissions,
   );
   const [error, setError] = useState('');
 
-  // When base role changes, load defaults
   const loadDefaults = async (br: string) => {
     setBaseRole(br);
     try {
-      const res = await api.get(`/api/v1/roles/modules`);
-      const mods: ModuleDef[] = res.data.data;
-      const defaults: Record<string, string> = {};
-      // Use the defaults endpoint by creating a temp role
-      const defRes = await api.post('/api/v1/roles', { name: '__temp__', base_role: br, color: '#000' }).catch(() => null);
-      if (defRes) {
-        setPermissions(defRes.data.data.permissions);
-        await api.delete(`/api/v1/roles/${defRes.data.data.id}`).catch(() => {});
-      }
+      const res = await api.get(`/api/v1/roles/defaults/${br}`);
+      if (res.data?.data) setPermissions(res.data.data);
     } catch { /* ignore */ }
   };
 
@@ -159,6 +69,7 @@ function RoleModal({
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['roles'] });
+      qc.invalidateQueries({ queryKey: ['role-modules'] });
       onClose();
     },
     onError: (e: any) => setError(e.response?.data?.error?.message ?? 'Failed to save role'),
@@ -176,8 +87,8 @@ function RoleModal({
               <Shield className="w-4 h-4 text-white" />
             </div>
             <div>
-              <h2 className="font-semibold text-gray-900">{isEdit ? (isSystem ? 'Edit Permissions' : 'Edit Role') : 'Create Custom Role'}</h2>
-              {isSystem && <p className="text-xs text-amber-600 flex items-center gap-1"><Lock className="w-3 h-3" /> System role — only permissions can be changed</p>}
+              <h2 className="font-semibold text-gray-900">{isEdit ? 'Edit Role Permissions' : 'Create Custom Role'}</h2>
+              {isSystem && <p className="text-xs text-gray-400 flex items-center gap-1"><Lock className="w-3 h-3" /> System role — name &amp; color are fixed</p>}
             </div>
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-1"><X className="w-5 h-5" /></button>
@@ -188,7 +99,6 @@ function RoleModal({
             <div className="px-4 py-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">{error}</div>
           )}
 
-          {/* Name & Color */}
           {!isSystem && (
             <div className="grid grid-cols-[1fr_auto] gap-3">
               <div>
@@ -212,7 +122,6 @@ function RoleModal({
             </div>
           )}
 
-          {/* Description */}
           {!isSystem && (
             <div>
               <label className="text-xs font-medium text-gray-600 mb-1 block">Description</label>
@@ -222,36 +131,31 @@ function RoleModal({
             </div>
           )}
 
-          {/* Base Role (create only) */}
-          {!isEdit && (
+          {!isSystem && (
             <div>
-              <label className="text-xs font-medium text-gray-600 mb-1.5 block">
-                Start from template <span className="text-gray-400 font-normal">(sets default permissions below)</span>
-              </label>
+              <label className="text-xs font-medium text-gray-600 mb-1.5 block">Start from template <span className="text-gray-400">(sets default permissions below)</span></label>
               <div className="grid grid-cols-2 gap-2">
                 {BASE_ROLES.map((br) => (
                   <button key={br.value} type="button" onClick={() => loadDefaults(br.value)}
-                    className={`px-3 py-2 rounded-lg border text-left transition-all ${
-                      baseRole === br.value ? 'border-brand-400 bg-brand-50' : 'border-gray-100 hover:border-gray-200'
-                    }`}>
-                    <p className="text-sm font-medium text-gray-800">{br.label}</p>
-                    <p className="text-xs text-gray-400">{br.desc}</p>
+                    className={`text-left px-3 py-2 rounded-lg border text-sm transition-all
+                      ${baseRole === br.value ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-gray-200 hover:border-gray-300 text-gray-600'}`}>
+                    <span className="font-medium">{br.label}</span>
+                    <span className="text-xs block text-gray-400">{br.desc}</span>
                   </button>
                 ))}
               </div>
             </div>
           )}
 
-          {/* Permissions Matrix */}
           <div>
-            <label className="text-xs font-medium text-gray-600 mb-2 block flex items-center gap-1">
+            <label className="text-xs font-medium text-gray-600 mb-1.5 flex items-center gap-1 block">
               Module Permissions
-              <Info className="w-3 h-3 text-gray-400" />
             </label>
             <PermissionsMatrix
               modules={modules}
               permissions={permissions}
               onChange={setPermissions}
+              readOnly={false}
             />
           </div>
         </div>
@@ -279,10 +183,18 @@ function RoleCard({ role, modules, onEdit, onDelete, canManage }: {
 }) {
   const [expanded, setExpanded] = useState(false);
 
+  // Build per-module summary: which modules have at least 1 enabled action
+  const moduleSummary = modules
+    .filter((mod) => mod.actions?.length)
+    .map((mod) => {
+      const enabled = mod.actions.filter((a) => role.permissions[a.key]).length;
+      return { mod, enabled, total: mod.actions.length };
+    })
+    .filter(({ enabled }) => enabled > 0);
+
   return (
     <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
       <div className="flex items-center gap-3 p-4">
-        {/* Color dot */}
         <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0"
              style={{ background: role.color + '20', border: `2px solid ${role.color}` }}>
           <Shield className="w-4 h-4" style={{ color: role.color }} />
@@ -324,23 +236,24 @@ function RoleCard({ role, modules, onEdit, onDelete, canManage }: {
         </div>
       </div>
 
-      {/* Quick permission chips */}
+      {/* Module chips summary */}
       {!expanded && (
         <div className="flex flex-wrap gap-1.5 px-4 pb-3">
-          {modules.map((mod) => {
-            const level = role.permissions[mod.key] ?? 'none';
-            if (level === 'none') return null;
-            return (
-              <span key={mod.key} className={`text-xs px-2 py-0.5 rounded-full ${LEVEL_COLORS[level]}`}>
-                {mod.icon} {mod.label}
-                {level === 'view' ? ' (view)' : ''}
-              </span>
-            );
-          })}
+          {moduleSummary.map(({ mod, enabled, total }) => (
+            <span key={mod.key}
+              className={`text-xs px-2 py-0.5 rounded-full flex items-center gap-1
+                ${enabled === total ? 'bg-green-50 text-green-700' : 'bg-blue-50 text-blue-600'}`}>
+              {mod.icon} {mod.label}
+              <span className="opacity-60 text-[10px]">{enabled}/{total}</span>
+            </span>
+          ))}
+          {moduleSummary.length === 0 && (
+            <span className="text-xs text-gray-300 italic">No access granted</span>
+          )}
         </div>
       )}
 
-      {/* Expanded permissions matrix */}
+      {/* Expanded full matrix */}
       {expanded && (
         <div className="px-4 pb-4">
           <PermissionsMatrix modules={modules} permissions={role.permissions} readOnly />
@@ -354,9 +267,18 @@ function RoleCard({ role, modules, onEdit, onDelete, canManage }: {
 export function RolesPage() {
   const qc = useQueryClient();
   const can = useCan();
+  const { tenant } = useAuthStore();
   const [showCreate, setShowCreate] = useState(false);
   const [editing, setEditing]       = useState<Role | null>(null);
   const [deleting, setDeleting]     = useState<Role | null>(null);
+  const [bannerDismissed, setBannerDismissed] = useState(false);
+
+  const pendingReview = !bannerDismissed && (tenant as any)?.settings?.pending_role_review === true;
+
+  const dismissBanner = useMutation({
+    mutationFn: () => api.patch('/api/v1/settings/tenant', { pending_role_review: false }),
+    onSuccess: () => { setBannerDismissed(true); qc.invalidateQueries({ queryKey: ['tenant'] }); },
+  });
 
   const { data: roles = [], isLoading: rolesLoading } = useQuery<Role[]>({
     queryKey: ['roles'],
@@ -378,7 +300,6 @@ export function RolesPage() {
 
   return (
     <div className="flex flex-col h-full">
-      {/* Header */}
       <div className="px-6 py-4 border-b border-gray-100 shrink-0">
         <div className="flex items-center justify-between">
           <div>
@@ -397,11 +318,27 @@ export function RolesPage() {
       </div>
 
       <div className="flex-1 overflow-y-auto p-6 space-y-8">
+        {pendingReview && (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 flex items-start gap-3">
+            <span className="text-lg shrink-0">⚠️</span>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold text-amber-800">New permissions were added to the platform</p>
+              <p className="text-xs text-amber-700 mt-0.5">
+                Your roles have been automatically updated with default values for any new permission keys.
+                Please review each role to confirm the defaults are correct for your organisation.
+              </p>
+            </div>
+            <button onClick={() => dismissBanner.mutate()}
+              className="shrink-0 text-amber-500 hover:text-amber-700 p-0.5">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
         {rolesLoading && (
           <div className="flex justify-center py-16"><Loader2 className="w-6 h-6 text-brand-400 animate-spin" /></div>
         )}
 
-        {/* System Roles */}
         {systemRoles.length > 0 && (
           <div>
             <div className="flex items-center gap-2 mb-3">
@@ -420,7 +357,6 @@ export function RolesPage() {
           </div>
         )}
 
-        {/* Custom Roles */}
         <div>
           <div className="flex items-center gap-2 mb-3">
             <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Custom Roles</h2>
@@ -451,7 +387,6 @@ export function RolesPage() {
         </div>
       </div>
 
-      {/* Create / Edit Modal */}
       {(showCreate || editing) && (
         <RoleModal
           role={editing}
@@ -460,7 +395,6 @@ export function RolesPage() {
         />
       )}
 
-      {/* Delete Confirm */}
       {deleting && (
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6">

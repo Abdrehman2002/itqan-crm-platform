@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { DatabaseClient } from '@crm/core';
-import { requireFeature, requireScope } from '../middlewares/auth.middleware';
+import { requireFeature, requireScope, requireRole } from '../middlewares/auth.middleware';
 
 export function analyticsRoutes(db: DatabaseClient) {
   return async function (fastify: FastifyInstance) {
@@ -8,52 +8,116 @@ export function analyticsRoutes(db: DatabaseClient) {
 
     // Dashboard summary
     fastify.get('/dashboard', { preHandler }, async (req, reply) => {
-      const tenantId = req.tenant.id;
+      const tenantId  = req.tenant.id;
+      const userId    = req.user.sub;
+      const userRole  = req.user.role as string;
+      const isAdmin   = ['tenant_admin', 'super_admin'].includes(userRole);
+
+      // Resolve the set of user IDs this user may see:
+      // - tenant_admin/super_admin → all users (no filter)
+      // - user with reportees (line manager) → recursive hierarchy
+      // - plain user (no reportees) → only themselves
+      const scopedUserIds: string[] | null = await db.withTenant(tenantId, async (client) => {
+        if (isAdmin) return null; // null = no filter (all)
+        const hierarchy = await client.query(`
+          WITH RECURSIVE h AS (
+            SELECT id FROM users WHERE manager_id = $1
+            UNION ALL
+            SELECT u.id FROM users u INNER JOIN h ON u.manager_id = h.id
+          )
+          SELECT id FROM h
+        `, [userId]);
+        const ids: string[] = hierarchy.rows.map((r: any) => r.id);
+        // Include self so manager sees own data too
+        return [userId, ...ids];
+      });
+
+      // Build safe owner filter using parameterised IN clause
+      // We pass the ids array and use a subquery to avoid dynamic SQL with user data
+      const buildOwnerFilter = (alias = '') => {
+        const col = alias ? `${alias}.owner_id` : 'owner_id';
+        if (scopedUserIds === null) return { sql: '', params: [] as string[] };
+        return {
+          sql: `AND ${col} = ANY($1::uuid[])`,
+          params: [scopedUserIds],
+        };
+      };
+      const buildAssigneeFilter = (alias = '') => {
+        const assigneeCol = alias ? `${alias}.assignee_id` : 'assignee_id';
+        const createdCol  = alias ? `${alias}.created_by`  : 'created_by';
+        if (scopedUserIds === null) return { sql: '', params: [] as string[] };
+        return {
+          sql: `AND (${assigneeCol} = ANY($1::uuid[]) OR ${createdCol} = ANY($1::uuid[]))`,
+          params: [scopedUserIds],
+        };
+      };
+
+      const of  = buildOwnerFilter();
+      const af  = buildAssigneeFilter();
+      // For the aggregate query we inline the filter as a literal UUID array — safe because
+      // scopedUserIds comes from our own DB query, never from user input.
+      const idsLiteral = scopedUserIds
+        ? `ARRAY[${scopedUserIds.map(id => `'${id}'::uuid`).join(',')}]`
+        : 'NULL';
+      const ownerSql    = scopedUserIds ? `AND owner_id    = ANY(${idsLiteral})` : '';
+      const assigneeSql = scopedUserIds ? `AND (assignee_id = ANY(${idsLiteral}) OR created_by = ANY(${idsLiteral}))` : '';
+
       const [stats] = await db.withTenant(tenantId, async (client) => {
         const result = await client.query(`
           SELECT
             -- CRM
-            (SELECT COUNT(*) FROM contacts) AS total_contacts,
-            (SELECT COUNT(*) FROM contacts WHERE created_at > NOW() - INTERVAL '30 days') AS new_contacts_30d,
-            (SELECT COUNT(*) FROM companies) AS total_companies,
-            (SELECT COUNT(*) FROM deals WHERE status = 'open') AS open_deals,
-            (SELECT COALESCE(SUM(amount),0)::float8 FROM deals WHERE status = 'open') AS pipeline_value,
-            (SELECT COUNT(*) FROM deals WHERE status = 'won' AND won_at > NOW() - INTERVAL '30 days') AS deals_won_30d,
-            (SELECT COALESCE(SUM(amount),0)::float8 FROM deals WHERE status = 'won' AND won_at > NOW() - INTERVAL '30 days') AS revenue_30d,
-            (SELECT COALESCE(SUM(amount),0)::float8 FROM deals WHERE status = 'won' AND won_at > NOW() - INTERVAL '7 days') AS revenue_7d,
+            (SELECT COUNT(*) FROM contacts WHERE 1=1 ${ownerSql}) AS total_contacts,
+            (SELECT COUNT(*) FROM contacts WHERE created_at > NOW() - INTERVAL '30 days' ${ownerSql}) AS new_contacts_30d,
+            (SELECT COUNT(*) FROM companies WHERE 1=1 ${ownerSql}) AS total_companies,
+            (SELECT COUNT(*) FROM deals WHERE status = 'open' ${ownerSql}) AS open_deals,
+            (SELECT COALESCE(SUM(amount),0)::float8 FROM deals WHERE status = 'open' ${ownerSql}) AS pipeline_value,
+            (SELECT COUNT(*) FROM deals WHERE status = 'won' AND won_at > NOW() - INTERVAL '30 days' ${ownerSql}) AS deals_won_30d,
+            (SELECT COALESCE(SUM(amount),0)::float8 FROM deals WHERE status = 'won' AND won_at > NOW() - INTERVAL '30 days' ${ownerSql}) AS revenue_30d,
+            (SELECT COALESCE(SUM(amount),0)::float8 FROM deals WHERE status = 'won' AND won_at > NOW() - INTERVAL '7 days' ${ownerSql}) AS revenue_7d,
             -- Activities
-            (SELECT COUNT(*) FROM activities WHERE status = 'pending' AND due_at < NOW()) AS overdue_tasks,
-            (SELECT COUNT(*) FROM activities WHERE status = 'pending' AND due_at::date = CURRENT_DATE) AS due_today,
-            -- Voice
+            (SELECT COUNT(*) FROM activities WHERE status = 'pending' AND due_at < NOW() ${ownerSql}) AS overdue_tasks,
+            (SELECT COUNT(*) FROM activities WHERE status = 'pending' AND due_at::date = CURRENT_DATE ${ownerSql}) AS due_today,
+            -- Voice (always tenant-wide — calls don't have owner_id)
             (SELECT COUNT(*) FROM voice_calls WHERE started_at > NOW() - INTERVAL '30 days') AS calls_30d,
             (SELECT COUNT(*) FROM voice_calls WHERE started_at > NOW() - INTERVAL '7 days')  AS calls_7d,
             -- Tickets
-            (SELECT COUNT(*) FROM tickets WHERE status NOT IN ('resolved','closed')) AS open_tickets,
-            (SELECT COUNT(*) FROM tickets WHERE status = 'open')                    AS unassigned_tickets,
-            (SELECT COUNT(*) FROM tickets WHERE sla_due_at < NOW() AND status NOT IN ('resolved','closed')) AS sla_breached,
-            (SELECT COUNT(*) FROM tickets WHERE escalation_level >= 2)             AS escalated_l2,
-            (SELECT COUNT(*) FROM tickets WHERE created_at > NOW() - INTERVAL '30 days') AS tickets_30d,
-            -- Emails
+            (SELECT COUNT(*) FROM tickets WHERE status NOT IN ('resolved','closed') ${assigneeSql}) AS open_tickets,
+            (SELECT COUNT(*) FROM tickets WHERE status = 'open' ${assigneeSql})                    AS unassigned_tickets,
+            (SELECT COUNT(*) FROM tickets WHERE sla_due_at < NOW() AND status NOT IN ('resolved','closed') ${assigneeSql}) AS sla_breached,
+            (SELECT COUNT(*) FROM tickets WHERE escalation_level >= 2 ${assigneeSql})              AS escalated_l2,
+            (SELECT COUNT(*) FROM tickets WHERE created_at > NOW() - INTERVAL '30 days' ${assigneeSql}) AS tickets_30d,
+            -- Emails (always tenant-wide)
             (SELECT COUNT(*) FROM emails WHERE status = 'delivered' AND created_at > NOW() - INTERVAL '30 days') AS emails_sent_30d,
             (SELECT COUNT(*) FROM emails WHERE status = 'failed'    AND created_at > NOW() - INTERVAL '30 days') AS emails_failed_30d,
-            -- Voice bot
+            -- Voice bot (always tenant-wide)
             (SELECT COUNT(*) FROM voice_bot_calls WHERE created_at > NOW() - INTERVAL '30 days') AS bot_calls_30d,
             (SELECT COUNT(*) FROM voice_bot_calls WHERE ticket_id IS NULL AND created_at > NOW() - INTERVAL '30 days') AS bot_untriaged_30d
         `);
         return result.rows;
       });
 
-      // Recent activities feed
+      // Recent activities feed — scoped to hierarchy
       const recentActivity = await db.withTenant(tenantId, async (client) => {
-        const r = await client.query(`
-          SELECT a.id, a.type, a.subject, a.status, a.created_at,
-                 c.first_name || ' ' || COALESCE(c.last_name,'') AS contact_name,
-                 u.name AS owner_name
-          FROM activities a
-          LEFT JOIN contacts c ON a.contact_id = c.id
-          LEFT JOIN users u ON a.owner_id = u.id
-          ORDER BY a.created_at DESC LIMIT 8
-        `);
+        const r = scopedUserIds
+          ? await client.query(`
+              SELECT a.id, a.type, a.subject, a.status, a.created_at,
+                     c.first_name || ' ' || COALESCE(c.last_name,'') AS contact_name,
+                     u.name AS owner_name
+              FROM activities a
+              LEFT JOIN contacts c ON a.contact_id = c.id
+              LEFT JOIN users u ON a.owner_id = u.id
+              WHERE a.owner_id = ANY($1::uuid[])
+              ORDER BY a.created_at DESC LIMIT 8
+            `, [scopedUserIds])
+          : await client.query(`
+              SELECT a.id, a.type, a.subject, a.status, a.created_at,
+                     c.first_name || ' ' || COALESCE(c.last_name,'') AS contact_name,
+                     u.name AS owner_name
+              FROM activities a
+              LEFT JOIN contacts c ON a.contact_id = c.id
+              LEFT JOIN users u ON a.owner_id = u.id
+              ORDER BY a.created_at DESC LIMIT 8
+            `);
         return r.rows;
       });
 
@@ -79,38 +143,38 @@ export function analyticsRoutes(db: DatabaseClient) {
     // Revenue over time — always returns every period slot (0 revenue for empty months)
     fastify.get('/revenue', { preHandler }, async (req, reply) => {
       const { period = 'month', months = 12 } = req.query as any;
-      const data = await db.withTenant(req.tenant.id, async (client) => {
-        const result = await client.query(`
-          WITH periods AS (
-            SELECT generate_series(
-              DATE_TRUNC($1, NOW() - ($2 || ' months')::INTERVAL + INTERVAL '1 month'),
-              DATE_TRUNC($1, NOW()),
-              ('1 ' || $1)::INTERVAL
-            ) AS period
-          ),
-          actuals AS (
-            SELECT
-              DATE_TRUNC($1, won_at) AS period,
-              COUNT(*)              AS deals_won,
-              COALESCE(SUM(amount),0)::float8 AS revenue,
-              COUNT(*) FILTER (WHERE status = 'lost') AS deals_lost
-            FROM deals
-            WHERE won_at > NOW() - ($2 || ' months')::INTERVAL
-            GROUP BY 1
-          )
+      const tenantId = req.tenant.id;
+      // Read from materialized view — refreshed hourly by analytics-refresh-worker
+      const data = await db.query(`
+        WITH periods AS (
+          SELECT generate_series(
+            DATE_TRUNC($2, NOW() - ($3 || ' months')::INTERVAL + INTERVAL '1 month'),
+            DATE_TRUNC($2, NOW()),
+            ('1 ' || $2)::INTERVAL
+          ) AS period
+        ),
+        actuals AS (
           SELECT
-            p.period,
-            COALESCE(a.deals_won, 0)  AS deals_won,
-            COALESCE(a.revenue,   0)  AS revenue,
-            COALESCE(a.deals_lost,0)  AS deals_lost
-          FROM periods p
-          LEFT JOIN actuals a USING (period)
-          ORDER BY p.period`,
-          [period, months],
-        );
-        return result.rows;
-      });
-      return reply.send({ success: true, data });
+            DATE_TRUNC($2, day)      AS period,
+            SUM(deals_won)::int      AS deals_won,
+            SUM(deals_lost)::int     AS deals_lost,
+            SUM(revenue_won)::float8 AS revenue
+          FROM mv_daily_deal_stats
+          WHERE tenant_id = $1
+            AND day >= (NOW() - ($3 || ' months')::INTERVAL)::date
+          GROUP BY 1
+        )
+        SELECT
+          p.period,
+          COALESCE(a.deals_won,  0) AS deals_won,
+          COALESCE(a.revenue,    0) AS revenue,
+          COALESCE(a.deals_lost, 0) AS deals_lost
+        FROM periods p
+        LEFT JOIN actuals a USING (period)
+        ORDER BY p.period`,
+        [tenantId, period, months],
+      );
+      return reply.send({ success: true, data: data.rows });
     });
 
     // Pipeline funnel
@@ -129,42 +193,69 @@ export function analyticsRoutes(db: DatabaseClient) {
       return reply.send({ success: true, data });
     });
 
-    // Agent leaderboard
+    // Agent leaderboard — reads from MV for deal+activity stats, live for voice calls
     fastify.get('/leaderboard', { preHandler }, async (req, reply) => {
       const { from, to } = req.query as any;
-      const data = await db.withTenant(req.tenant.id, async (client) => {
-        const result = await client.query(`
-          SELECT u.id, u.name, u.avatar,
-            COUNT(d.*) FILTER (WHERE d.status = 'won') as deals_won,
-            COALESCE(SUM(d.amount) FILTER (WHERE d.status = 'won'), 0)::float8 as revenue,
-            COUNT(a.*) as activities_completed,
-            COUNT(vc.*) as calls_made
-          FROM users u
-          LEFT JOIN deals d ON d.owner_id = u.id AND d.won_at BETWEEN $1 AND $2
-          LEFT JOIN activities a ON a.owner_id = u.id AND a.completed_at BETWEEN $1 AND $2
-          LEFT JOIN voice_calls vc ON vc.agent_id = u.id AND vc.started_at BETWEEN $1 AND $2
-          WHERE u.is_active = true
-          GROUP BY u.id, u.name, u.avatar
-          ORDER BY revenue DESC`,
-          [from ?? new Date(Date.now() - 30 * 86_400_000), to ?? new Date()],
-        );
-        return result.rows;
-      });
-      return reply.send({ success: true, data });
+      const tenantId = req.tenant.id;
+      const fromDate = from ?? new Date(Date.now() - 30 * 86_400_000).toISOString();
+      const toDate   = to   ?? new Date().toISOString();
+
+      const result = await db.query(`
+        SELECT
+          u.id, u.name, u.avatar,
+          COALESCE(d.deals_won,            0)::int     AS deals_won,
+          COALESCE(d.revenue,              0)::float8  AS revenue,
+          COALESCE(a.activities_completed, 0)::int     AS activities_completed,
+          COALESCE(vc.calls_made,          0)::int     AS calls_made
+        FROM users u
+        LEFT JOIN (
+          SELECT owner_id,
+                 SUM(deals_won)::int      AS deals_won,
+                 SUM(revenue_won)::float8 AS revenue
+          FROM mv_daily_deal_stats
+          WHERE tenant_id = $1 AND day BETWEEN $2::date AND $3::date
+          GROUP BY owner_id
+        ) d ON d.owner_id = u.id
+        LEFT JOIN (
+          SELECT owner_id,
+                 SUM(activities_completed)::int AS activities_completed
+          FROM mv_daily_activity_stats
+          WHERE tenant_id = $1 AND day BETWEEN $2::date AND $3::date
+          GROUP BY owner_id
+        ) a ON a.owner_id = u.id
+        LEFT JOIN (
+          SELECT agent_id, COUNT(*) AS calls_made
+          FROM voice_calls
+          WHERE tenant_id = $1 AND started_at BETWEEN $2 AND $3
+          GROUP BY agent_id
+        ) vc ON vc.agent_id = u.id
+        WHERE u.tenant_id = $1 AND u.is_active = true
+        ORDER BY revenue DESC`,
+        [tenantId, fromDate, toDate],
+      );
+      return reply.send({ success: true, data: result.rows });
     });
 
-    // Contact source breakdown
+    // Contact source breakdown — reads from MV
     fastify.get('/contact-sources', { preHandler }, async (req, reply) => {
-      const data = await db.withTenant(req.tenant.id, async (client) => {
-        const result = await client.query(`
-          SELECT source, COUNT(*) as count,
-                 COUNT(*) FILTER (WHERE status = 'customer') as converted
-          FROM contacts
-          GROUP BY source ORDER BY count DESC`);
-        return result.rows;
-      });
-      return reply.send({ success: true, data });
+      const result = await db.query(
+        `SELECT source, total AS count, converted
+         FROM mv_contact_source_stats
+         WHERE tenant_id = $1
+         ORDER BY total DESC`,
+        [req.tenant.id],
+      );
+      return reply.send({ success: true, data: result.rows });
     });
+
+    // MV refresh status — shows when each view was last refreshed and how long it took
+    fastify.get('/refresh-status', { preHandler: [requireScope('admin:read')] }, async (_req, reply) => {
+      const result = await db.query(
+        `SELECT view_name, refreshed_at, duration_ms FROM analytics_refresh_log ORDER BY view_name`,
+      );
+      return reply.send({ success: true, data: result.rows });
+    });
+
     // ── Backward-compat aliases ──────────────────────────────────────────
     // /overview → same data as /dashboard
     fastify.get('/overview', { preHandler }, async (req, reply) => {
@@ -176,10 +267,34 @@ export function analyticsRoutes(db: DatabaseClient) {
     // Manager/Admin → team-level aggregates + per-agent breakdown
     fastify.get('/ops-dashboard', { preHandler }, async (req, reply) => {
       const tenantId   = req.tenant.id;
-      const userId     = (req as any).user?.id as string;
-      const role       = (req as any).user?.role as string ?? 'agent';
+      const userId     = req.user.sub;
+      const role       = req.user.role as string ?? 'agent';
       const rawDept    = (req as any).user?.department as string | null ?? null;
-      const isManager  = ['manager','tenant_admin','super_admin'].includes(role);
+      const isAdmin    = ['tenant_admin','super_admin'].includes(role);
+
+      // Build the hierarchy user-ID set for this user (recursive — all levels deep)
+      // null = no filter (tenant_admin sees everything)
+      const scopeIds: string[] | null = await db.withTenant(tenantId, async (client) => {
+        if (isAdmin) return null;
+        const hier = await client.query(`
+          WITH RECURSIVE h AS (
+            SELECT id FROM users WHERE manager_id = $1
+            UNION ALL
+            SELECT u.id FROM users u INNER JOIN h ON u.manager_id = h.id
+          )
+          SELECT id FROM h
+        `, [userId]);
+        return [userId, ...hier.rows.map((r: any) => r.id)];
+      });
+
+      const isManager = isAdmin || (scopeIds !== null && scopeIds.length > 1);
+      // Build safe SQL fragment for filtering by hierarchy (owner/assignee)
+      const scopeLiteral = scopeIds
+        ? `ARRAY[${scopeIds.map(id => `'${id}'::uuid`).join(',')}]`
+        : 'NULL';
+      const scopeOwnerSql    = scopeIds ? `AND owner_id     = ANY(${scopeLiteral})` : '';
+      const scopeAssigneeSql = scopeIds ? `AND (assignee_id = ANY(${scopeLiteral}) OR created_by = ANY(${scopeLiteral}))` : '';
+      const scopeAgentSql    = scopeIds ? `AND agent_id     = ANY(${scopeLiteral})` : '';
 
       // Map user department → ticket_type value used in DB.
       // NULL department = no filter (all ticket types).
@@ -215,11 +330,7 @@ export function analyticsRoutes(db: DatabaseClient) {
       // Agent queries use $1 = userId; manager queries have no params.
 
       // ── Ticket type breakdown ────────────────────────────────────────────
-      // Agent: tickets assigned to OR created by the agent
-      // Manager: all tenant tickets
       const ticketBreakdown = await db.withTenant(tenantId, async (client) => {
-        const agentFilter = isManager ? '' : 'AND (assignee_id = $1 OR created_by = $1)';
-        const baseParams: any[] = isManager ? [] : [userId];
         const [sql, params] = resolveDept(`
           SELECT
             COALESCE(ticket_type,'support')                 AS ticket_type,
@@ -231,18 +342,16 @@ export function analyticsRoutes(db: DatabaseClient) {
             COUNT(*) FILTER (WHERE status = 'resolved')    AS resolved,
             COUNT(*) FILTER (WHERE status = 'closed')      AS closed
           FROM tickets
-          WHERE 1=1 ${agentFilter} ${deptTicketFilter}
+          WHERE 1=1 ${scopeAssigneeSql} ${deptTicketFilter}
           GROUP BY ticket_type
           ORDER BY total DESC
-        `, baseParams);
+        `, []);
         const r = await client.query(sql, params);
         return r.rows;
       });
 
-      // ── Call stats (agent's own calls only) ──────────────────────────────
+      // ── Call stats ───────────────────────────────────────────────────────
       const callStats = await db.withTenant(tenantId, async (client) => {
-        const agentFilter = isManager ? '' : 'AND agent_id = $1';
-        const params: any[] = isManager ? [] : [userId];
         const r = await client.query(`
           SELECT
             COUNT(*) FILTER (WHERE status = 'completed')                          AS completed_calls,
@@ -255,16 +364,13 @@ export function analyticsRoutes(db: DatabaseClient) {
             ROUND(AVG(duration) FILTER (WHERE status='completed' AND started_at::date = CURRENT_DATE))::int AS avg_duration_today,
             COUNT(*) FILTER (WHERE bot_handled = true AND started_at::date = CURRENT_DATE) AS bot_calls_today
           FROM voice_calls
-          WHERE 1=1 ${agentFilter}
-        `, params);
+          WHERE 1=1 ${scopeAgentSql}
+        `);
         return r.rows[0] ?? {};
       });
 
       // ── Ticket summary totals ────────────────────────────────────────────
-      // Agent: tickets assigned to OR created by the agent
       const myTickets = await db.withTenant(tenantId, async (client) => {
-        const agentFilter = isManager ? '' : 'AND (assignee_id = $1 OR created_by = $1)';
-        const baseParams: any[] = isManager ? [] : [userId];
         const [sql1, params1] = resolveDept(`
           SELECT
             COUNT(*)                                                              AS total,
@@ -275,31 +381,25 @@ export function analyticsRoutes(db: DatabaseClient) {
             COUNT(*) FILTER (WHERE status = 'resolved' AND updated_at::date = CURRENT_DATE) AS resolved_today,
             COUNT(*) FILTER (WHERE sla_due_at < NOW() AND status NOT IN ('resolved','closed')) AS sla_breached
           FROM tickets
-          WHERE 1=1 ${agentFilter} ${deptTicketFilter}
-        `, baseParams);
+          WHERE 1=1 ${scopeAssigneeSql} ${deptTicketFilter}
+        `, []);
         const r = await client.query(sql1, params1);
 
-        // For agents: break down assigned-to-me vs created-by-me
-        let ownership = { assigned_to_me: 0, created_by_me: 0 };
-        if (!isManager) {
-          const [sql2, params2] = resolveDept(`
-            SELECT
-              COUNT(*) FILTER (WHERE assignee_id = $1 AND status NOT IN ('resolved','closed')) AS assigned_to_me,
-              COUNT(*) FILTER (WHERE created_by  = $1)                                          AS created_by_me
-            FROM tickets
-            WHERE (assignee_id = $1 OR created_by = $1) ${deptTicketFilter}
-          `, [userId]);
-          const o = await client.query(sql2, params2);
-          ownership = o.rows[0] ?? ownership;
-        }
+        // Per-user breakdown: assigned-to-me vs created-by-me (always useful regardless of scope)
+        const [sql2, params2] = resolveDept(`
+          SELECT
+            COUNT(*) FILTER (WHERE assignee_id = $1 AND status NOT IN ('resolved','closed')) AS assigned_to_me,
+            COUNT(*) FILTER (WHERE created_by  = $1)                                          AS created_by_me
+          FROM tickets
+          WHERE (assignee_id = $1 OR created_by = $1) ${deptTicketFilter}
+        `, [userId]);
+        const o = await client.query(sql2, params2);
 
-        return { ...r.rows[0], ...ownership };
+        return { ...r.rows[0], ...o.rows[0] };
       });
 
       // ── Sentiment / ratings ──────────────────────────────────────────────
       const sentiment = await db.withTenant(tenantId, async (client) => {
-        const agentFilter = isManager ? '' : 'AND agent_id = $1';
-        const params: any[] = isManager ? [] : [userId];
         const r = await client.query(`
           SELECT
             ROUND(AVG((sentiment->>'score')::numeric) FILTER (WHERE sentiment IS NOT NULL))::int AS avg_sentiment,
@@ -307,27 +407,28 @@ export function analyticsRoutes(db: DatabaseClient) {
             COUNT(*) FILTER (WHERE (sentiment->>'label') = 'negative')  AS negative_calls,
             COUNT(*) FILTER (WHERE (sentiment->>'label') = 'neutral')   AS neutral_calls
           FROM voice_calls
-          WHERE status = 'completed' ${agentFilter}
-        `, params);
+          WHERE status = 'completed' ${scopeAgentSql}
+        `);
 
         let avgRating = null;
         try {
-          const assigneeJoin = isManager ? '' : 'JOIN tickets t2 ON tr.ticket_id = t2.id AND t2.assignee_id = $1';
-          const ratingParams: any[] = isManager ? [] : [userId];
+          // Scope ratings to tickets assigned within the hierarchy
+          const ratingFilter = scopeIds
+            ? `JOIN tickets t2 ON tr.ticket_id = t2.id AND t2.assignee_id = ANY(${scopeLiteral})`
+            : '';
           const rr = await client.query(`
             SELECT ROUND(AVG(rating)::numeric, 1) AS avg_rating,
                    COUNT(*) AS total_ratings
-            FROM ticket_ratings tr
-            ${assigneeJoin}
-          `, ratingParams);
+            FROM ticket_ratings tr ${ratingFilter}
+          `);
           avgRating = rr.rows[0] ?? null;
         } catch (_) { /* table may not exist */ }
 
         return { ...r.rows[0], ...avgRating };
       });
 
-      // ── Recent tickets (agent scope) ─────────────────────────────────────
-      const recentTickets = !isManager ? await db.withTenant(tenantId, async (client) => {
+      // ── Recent tickets (hierarchy-scoped) ───────────────────────────────
+      const recentTickets = await db.withTenant(tenantId, async (client) => {
         const [sql, params] = resolveDept(`
           SELECT t.id, t.ticket_number, t.subject, t.status, t.priority,
                  t.ticket_type, t.created_at, t.sla_due_at, t.assignee_id,
@@ -338,7 +439,7 @@ export function analyticsRoutes(db: DatabaseClient) {
           LEFT JOIN users u  ON t.assignee_id = u.id
           LEFT JOIN users cb ON t.created_by  = cb.id
           WHERE t.status NOT IN ('resolved','closed')
-            AND (t.assignee_id = $1 OR t.created_by = $1)
+            ${scopeAssigneeSql}
             ${deptTicketFilter}
           ORDER BY
             CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
@@ -347,10 +448,10 @@ export function analyticsRoutes(db: DatabaseClient) {
         `, [userId]);
         const r = await client.query(sql, params);
         return r.rows;
-      }) : [];
+      });
 
-      // ── CRM Activities (agent only) ───────────────────────────────────────
-      const activityStats = !isManager ? await db.withTenant(tenantId, async (client) => {
+      // ── CRM Activities (hierarchy-scoped) ────────────────────────────────
+      const activityStats = await db.withTenant(tenantId, async (client) => {
         const r = await client.query(`
           SELECT
             COUNT(*)                                                             AS total,
@@ -365,22 +466,24 @@ export function analyticsRoutes(db: DatabaseClient) {
             COUNT(*) FILTER (WHERE type = 'task')                               AS tasks,
             COUNT(*) FILTER (WHERE type = 'note')                               AS notes
           FROM activities
-          WHERE owner_id = $1
-        `, [userId]);
+          WHERE 1=1 ${scopeOwnerSql}
+        `);
         return r.rows[0] ?? {};
-      }) : {};
+      });
 
-      const recentActivities = !isManager ? await db.withTenant(tenantId, async (client) => {
+      const recentActivities = await db.withTenant(tenantId, async (client) => {
         const r = await client.query(`
           SELECT a.id, a.type, a.subject, a.status, a.due_at, a.created_at,
+                 u.name AS owner_name,
                  c.first_name || ' ' || COALESCE(c.last_name,'') AS contact_name
           FROM activities a
           LEFT JOIN contacts c ON a.contact_id = c.id
-          WHERE a.owner_id = $1
+          LEFT JOIN users u ON a.owner_id = u.id
+          WHERE 1=1 ${scopeOwnerSql}
           ORDER BY a.created_at DESC LIMIT 8
-        `, [userId]);
+        `);
         return r.rows;
-      }) : [];
+      });
 
       // ════════════════════════════════════════════════════════════════════
       // MANAGER-ONLY BLOCKS
@@ -430,9 +533,8 @@ export function analyticsRoutes(db: DatabaseClient) {
         return { ...r.rows[0], categories: cats.rows, config: cfg.rows[0] ?? null };
       }) : null;
 
-      // ── Human agent stats ─────────────────────────────────────────────────
+      // ── Human agent stats (hierarchy-scoped for managers) ────────────────
       const humanStats = isManager ? await db.withTenant(tenantId, async (client) => {
-        // Team-wide human call totals
         const calls = await client.query(`
           SELECT
             COUNT(*) FILTER (WHERE status = 'completed')                         AS completed_calls,
@@ -443,9 +545,9 @@ export function analyticsRoutes(db: DatabaseClient) {
             ROUND(AVG(duration) FILTER (WHERE status='completed' AND duration>0))::int AS avg_duration_secs,
             COUNT(*) FILTER (WHERE bot_handled = false)                          AS manual_calls
           FROM voice_calls
+          WHERE 1=1 ${scopeAgentSql}
         `);
 
-        // Team ticket totals — filtered by department when set
         const [tktSql, tktParams] = resolveDept(`
           SELECT
             COUNT(*)                                                             AS total,
@@ -459,11 +561,10 @@ export function analyticsRoutes(db: DatabaseClient) {
             COUNT(*) FILTER (WHERE COALESCE(ticket_type,'support') = 'support')    AS support_tickets,
             COUNT(*) FILTER (WHERE COALESCE(ticket_type,'support') = 'complaint')  AS complaint_tickets
           FROM tickets
-          WHERE 1=1 ${deptTicketFilter}
+          WHERE 1=1 ${scopeAssigneeSql} ${deptTicketFilter}
         `, []);
         const tickets = await client.query(tktSql, tktParams);
 
-        // Team activity totals
         const acts = await client.query(`
           SELECT
             COUNT(*)                                                             AS total,
@@ -475,9 +576,13 @@ export function analyticsRoutes(db: DatabaseClient) {
             COUNT(*) FILTER (WHERE type = 'meeting') AS act_meetings,
             COUNT(*) FILTER (WHERE type = 'task')    AS act_tasks
           FROM activities
+          WHERE 1=1 ${scopeOwnerSql}
         `);
 
-        // Per-agent leaderboard — ticket join respects department filter
+        // Leaderboard scoped to hierarchy members only
+        const hierarchyFilter = scopeIds
+          ? `AND u.id = ANY(${scopeLiteral})`
+          : `AND u.role IN ('agent','manager')`;
         const [lbSql, lbParams] = resolveDept(`
           SELECT
             u.id, u.name, u.role, u.email, u.is_active,
@@ -498,7 +603,7 @@ export function analyticsRoutes(db: DatabaseClient) {
           LEFT JOIN voice_calls vc ON vc.agent_id  = u.id
           LEFT JOIN activities  a  ON a.owner_id   = u.id
           WHERE u.tenant_id = $1
-            AND u.role IN ('agent','manager')
+            ${hierarchyFilter}
           GROUP BY u.id, u.name, u.role, u.email, u.is_active
           ORDER BY calls_today DESC, tickets_active DESC
         `, [tenantId]);
@@ -512,6 +617,7 @@ export function analyticsRoutes(db: DatabaseClient) {
           FROM tickets t
           LEFT JOIN users u ON t.assignee_id = u.id
           WHERE t.status NOT IN ('resolved','closed')
+            ${scopeAssigneeSql}
             ${deptTicketFilter}
           ORDER BY
             CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
@@ -625,6 +731,229 @@ export function analyticsRoutes(db: DatabaseClient) {
           tenantAdminStats,
         },
       });
+    });
+
+    // ── Shared helper: get all users in the reporting hierarchy under a manager ─
+    // Uses a recursive CTE to traverse direct + indirect reports at any depth.
+    // tenant_admin / super_admin get ALL tenant users (no hierarchy restriction).
+    async function getHierarchyUserIds(
+      client: any,
+      userId: string,
+      role: string,
+    ): Promise<string[]> {
+      if (role === 'tenant_admin' || role === 'super_admin') {
+        const r = await client.query(`SELECT id FROM users WHERE role != 'super_admin'`);
+        return r.rows.map((row: any) => row.id);
+      }
+      // Recursive CTE: start from the manager, collect everyone below
+      const r = await client.query(`
+        WITH RECURSIVE hierarchy AS (
+          SELECT id FROM users WHERE manager_id = $1
+          UNION ALL
+          SELECT u.id FROM users u
+          INNER JOIN hierarchy h ON u.manager_id = h.id
+        )
+        SELECT id FROM hierarchy
+      `, [userId]);
+      return r.rows.map((row: any) => row.id);
+    }
+
+    // ── Team (manager) analytics ─────────────────────────────────────────
+    // GET /analytics/team-summary
+    // Query params:
+    //   period   = 7d | 30d | 90d | ytd | custom   (default: 30d)
+    //   from     = ISO date string (required when period=custom)
+    //   to       = ISO date string (required when period=custom)
+    //   reporteeId = UUID — drill-down to a single user
+    // Access: any user who has reportees OR tenant_admin / super_admin
+    const teamPreHandler = [requireRole('super_admin', 'tenant_admin', 'manager', 'agent', 'viewer')];
+    fastify.get('/team-summary', { preHandler: teamPreHandler }, async (req, reply) => {
+      const { period = '30d', reporteeId, from: fromDate, to: toDate } =
+        req.query as { period?: string; reporteeId?: string; from?: string; to?: string };
+      const userId = req.user.sub;
+      const role   = req.user.role as string;
+
+      const data = await db.withTenant(req.tenant.id, async (client) => {
+        // Resolve date range
+        let dateFrom: string;
+        let dateTo: string;
+        if (period === 'custom' && fromDate && toDate) {
+          dateFrom = fromDate;
+          dateTo   = toDate;
+        } else {
+          dateTo = new Date().toISOString();
+          const days = period === '7d' ? 7 : period === '90d' ? 90 : period === 'ytd'
+            ? Math.floor((Date.now() - new Date(new Date().getFullYear(), 0, 1).getTime()) / 86400000)
+            : 30;
+          dateFrom = new Date(Date.now() - days * 86400000).toISOString();
+        }
+
+        // Determine the set of user IDs:
+        // - reporteeId supplied → drill into a single user
+        // - admin → full tenant
+        // - user with reportees → full hierarchy
+        // - user with no reportees → just themselves (personal view)
+        let userIds: string[];
+        if (reporteeId) {
+          userIds = [reporteeId];
+        } else {
+          const hierarchyIds = await getHierarchyUserIds(client, userId, role);
+          // For non-admins, hierarchyIds only contains reports; add self so they always see own data
+          const isAdmin = ['tenant_admin', 'super_admin'].includes(role);
+          userIds = isAdmin ? hierarchyIds : [userId, ...hierarchyIds.filter(id => id !== userId)];
+        }
+
+        if (userIds.length === 0) return { stats: [], activities: [], trend: [], period, dateFrom, dateTo };
+
+        const ph = (arr: any[], offset = 0) => arr.map((_: any, i: number) => `$${i + 1 + offset}`).join(', ');
+        const ids = userIds;
+
+        // Per-user stats
+        const statsResult = await client.query(`
+          SELECT
+            u.id, u.name, u.email, u.role,
+            r.name  AS role_name, r.color AS role_color,
+            m.name  AS manager_name,
+            (SELECT COUNT(*) FROM contacts   WHERE owner_id = u.id AND created_at BETWEEN $${ids.length+1} AND $${ids.length+2}) AS contacts_created,
+            (SELECT COUNT(*) FROM deals      WHERE owner_id = u.id AND created_at BETWEEN $${ids.length+1} AND $${ids.length+2}) AS deals_created,
+            (SELECT COUNT(*) FROM deals      WHERE owner_id = u.id AND status = 'won' AND won_at BETWEEN $${ids.length+1} AND $${ids.length+2}) AS deals_won,
+            (SELECT COALESCE(SUM(amount),0)::float8 FROM deals WHERE owner_id = u.id AND status = 'won' AND won_at BETWEEN $${ids.length+1} AND $${ids.length+2}) AS revenue,
+            (SELECT COUNT(*) FROM activities WHERE owner_id = u.id AND created_at BETWEEN $${ids.length+1} AND $${ids.length+2}) AS activities_total,
+            (SELECT COUNT(*) FROM activities WHERE owner_id = u.id AND status = 'completed' AND created_at BETWEEN $${ids.length+1} AND $${ids.length+2}) AS activities_done,
+            (SELECT COUNT(*) FROM activities WHERE owner_id = u.id AND status = 'pending' AND due_at < NOW()) AS overdue,
+            (SELECT COUNT(*) FROM tickets    WHERE assignee_id = u.id AND created_at BETWEEN $${ids.length+1} AND $${ids.length+2}) AS tickets_handled
+          FROM users u
+          LEFT JOIN roles r ON r.id = u.custom_role_id
+          LEFT JOIN users m ON m.id = u.manager_id
+          WHERE u.id IN (${ph(ids)})
+          ORDER BY u.name ASC
+        `, [...ids, dateFrom, dateTo]);
+
+        // Recent activities
+        const actResult = await client.query(`
+          SELECT a.id, a.type, a.subject, a.status, a.due_at, a.created_at,
+                 u.name AS owner_name,
+                 c.first_name || ' ' || COALESCE(c.last_name,'') AS contact_name
+          FROM activities a
+          LEFT JOIN users u ON a.owner_id = u.id
+          LEFT JOIN contacts c ON a.contact_id = c.id
+          WHERE a.owner_id IN (${ph(ids)})
+            AND a.created_at BETWEEN $${ids.length+1} AND $${ids.length+2}
+          ORDER BY a.created_at DESC LIMIT 20
+        `, [...ids, dateFrom, dateTo]);
+
+        // Daily trend
+        const trendResult = await client.query(`
+          SELECT date_trunc('day', created_at)::date AS day, COUNT(*) AS count
+          FROM activities
+          WHERE owner_id IN (${ph(ids)})
+            AND created_at BETWEEN $${ids.length+1} AND $${ids.length+2}
+          GROUP BY 1 ORDER BY 1
+        `, [...ids, dateFrom, dateTo]);
+
+        return { stats: statsResult.rows, activities: actResult.rows, trend: trendResult.rows, period, dateFrom, dateTo };
+      });
+
+      if (data === null) {
+        return reply.code(403).send({ success: false, error: { code: 'FORBIDDEN', message: 'No team members report to you' } });
+      }
+      return reply.send({ success: true, data });
+    });
+
+    // GET /analytics/team-reportees — flat list of full hierarchy (for filter UI)
+    fastify.get('/team-reportees', { preHandler: teamPreHandler }, async (req, reply) => {
+      const userId = req.user.sub;
+      const role   = req.user.role as string;
+
+      const reportees = await db.withTenant(req.tenant.id, async (client) => {
+        const isAdmin = ['tenant_admin', 'super_admin'].includes(role);
+        const hierarchyIds = await getHierarchyUserIds(client, userId, role);
+        // Always include self; for non-admins prepend userId
+        const ids = isAdmin ? hierarchyIds : [userId, ...hierarchyIds.filter((id: string) => id !== userId)];
+        if (ids.length === 0) return [];
+        const ph = ids.map((_: any, i: number) => `$${i + 1}`).join(', ');
+        const r = await client.query(
+          `SELECT u.id, u.name, u.email, r.name AS role_name, m.name AS manager_name
+           FROM users u
+           LEFT JOIN roles r ON r.id = u.custom_role_id
+           LEFT JOIN users m ON m.id = u.manager_id
+           WHERE u.id IN (${ph}) ORDER BY u.name`,
+          ids,
+        );
+        return r.rows;
+      });
+
+      return reply.send({ success: true, data: reportees });
+    });
+
+    // GET /analytics/team-export — download CSV or JSON
+    // Supports same params as team-summary plus format=csv|json
+    fastify.get('/team-export', { preHandler: teamPreHandler }, async (req, reply) => {
+      const { period = '30d', reporteeId, from: fromDate, to: toDate, format = 'csv' } =
+        req.query as { period?: string; reporteeId?: string; from?: string; to?: string; format?: string };
+      const userId = req.user.sub;
+      const role   = req.user.role as string;
+
+      const rows = await db.withTenant(req.tenant.id, async (client) => {
+        const isAdmin = ['tenant_admin', 'super_admin'].includes(role);
+
+        let dateFrom: string;
+        let dateTo: string;
+        if (period === 'custom' && fromDate && toDate) {
+          dateFrom = fromDate; dateTo = toDate;
+        } else {
+          dateTo = new Date().toISOString();
+          const days = period === '7d' ? 7 : period === '90d' ? 90 : period === 'ytd'
+            ? Math.floor((Date.now() - new Date(new Date().getFullYear(), 0, 1).getTime()) / 86400000) : 30;
+          dateFrom = new Date(Date.now() - days * 86400000).toISOString();
+        }
+
+        let ids: string[];
+        if (reporteeId) {
+          ids = [reporteeId];
+        } else {
+          const hierarchyIds = await getHierarchyUserIds(client, userId, role);
+          ids = isAdmin ? hierarchyIds : [userId, ...hierarchyIds.filter((id: string) => id !== userId)];
+        }
+        if (ids.length === 0) return [];
+        const ph = (arr: any[], offset = 0) => arr.map((_: any, i: number) => `$${i + 1 + offset}`).join(', ');
+
+        const result = await client.query(`
+          SELECT
+            u.name AS "Name", u.email AS "Email", u.role AS "Role",
+            r.name AS "Custom Role", m.name AS "Line Manager",
+            (SELECT COUNT(*) FROM contacts   WHERE owner_id = u.id AND created_at BETWEEN $${ids.length+1} AND $${ids.length+2}) AS "Contacts Created",
+            (SELECT COUNT(*) FROM deals      WHERE owner_id = u.id AND created_at BETWEEN $${ids.length+1} AND $${ids.length+2}) AS "Deals Created",
+            (SELECT COUNT(*) FROM deals      WHERE owner_id = u.id AND status = 'won' AND won_at BETWEEN $${ids.length+1} AND $${ids.length+2}) AS "Deals Won",
+            (SELECT COALESCE(SUM(amount),0)::numeric(12,2) FROM deals WHERE owner_id = u.id AND status = 'won' AND won_at BETWEEN $${ids.length+1} AND $${ids.length+2}) AS "Revenue",
+            (SELECT COUNT(*) FROM activities WHERE owner_id = u.id AND created_at BETWEEN $${ids.length+1} AND $${ids.length+2}) AS "Activities Total",
+            (SELECT COUNT(*) FROM activities WHERE owner_id = u.id AND status = 'completed' AND created_at BETWEEN $${ids.length+1} AND $${ids.length+2}) AS "Activities Completed",
+            (SELECT COUNT(*) FROM activities WHERE owner_id = u.id AND status = 'pending' AND due_at < NOW()) AS "Overdue Activities",
+            (SELECT COUNT(*) FROM tickets    WHERE assignee_id = u.id AND created_at BETWEEN $${ids.length+1} AND $${ids.length+2}) AS "Tickets Handled"
+          FROM users u
+          LEFT JOIN roles r ON r.id = u.custom_role_id
+          LEFT JOIN users m ON m.id = u.manager_id
+          WHERE u.id IN (${ph(ids)})
+          ORDER BY u.name ASC
+        `, [...ids, dateFrom, dateTo]);
+        return result.rows;
+      });
+
+      if (rows === null) return reply.code(403).send({ success: false, error: { code: 'FORBIDDEN', message: 'Access denied' } });
+
+      if (format === 'csv') {
+        if (rows.length === 0) {
+          reply.header('Content-Type', 'text/csv').header('Content-Disposition', 'attachment; filename="team-report.csv"');
+          return reply.send('No data');
+        }
+        const headers = Object.keys(rows[0]);
+        const escape  = (v: any) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+        const csv = [headers.map(escape).join(','), ...rows.map((r: any) => headers.map(h => escape(r[h])).join(','))].join('\n');
+        reply.header('Content-Type', 'text/csv').header('Content-Disposition', 'attachment; filename="team-report.csv"');
+        return reply.send(csv);
+      }
+
+      return reply.send({ success: true, data: rows });
     });
 
   };

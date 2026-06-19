@@ -864,11 +864,32 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
       const query    = ListQuerySchema.parse(req.query);
       const tenantId = req.tenant.id;
       const userId   = req.user.sub;
+      const role     = (req.user as any).role as string;
+      const deptType = (req.user as any).department_type as string | null;
       const offset   = (query.page - 1) * query.pageSize;
 
       const params: unknown[] = [];
       const where: string[] = ['1=1'];
       let idx = 1;
+
+      // ── Department-isolation rules ─────────────────────────────────────
+      // super_admin / tenant_admin → see all tickets in tenant
+      // manager → only tickets in queues for their department, OR assigned to them, OR created by them
+      // line_manager → same as manager
+      // agent → only tickets assigned to them, OR in queues for their department
+      // viewer → only tickets assigned to them
+      if (role === 'agent' || role === 'viewer') {
+        where.push(`(t.assignee_id = $${idx} OR (t.queue_id IN
+          (SELECT id FROM ticket_queues WHERE department_type = $${idx + 1})))`);
+        params.push(userId, deptType ?? null);
+        idx += 2;
+      } else if ((role === 'manager' || role === 'line_manager') && deptType) {
+        where.push(`(t.queue_id IN (SELECT id FROM ticket_queues WHERE department_type = $${idx})
+                    OR t.assignee_id = $${idx + 1}
+                    OR t.created_by = $${idx + 1})`);
+        params.push(deptType, userId);
+        idx += 2;
+      }
 
       if (query.status) {
         // Allow comma-separated multi-status: "open,assigned"

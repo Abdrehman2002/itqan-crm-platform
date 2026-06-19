@@ -37,71 +37,108 @@ export function ticketAnalyticsRoutes(db: DatabaseClient) {
     const preHandler = [requireScope('tickets:read')];
 
     // ── GET /trends ────────────────────────────────────────────────────────
-    // Returns: volume of tickets created per period, with breakdown by status
+    // Reads from mv_daily_ticket_stats (refreshed hourly).
+    // Falls back to live query only when optional filters (queueId) are
+    // requested that are not captured in the MV.
     fastify.get('/trends', { preHandler }, async (req, reply) => {
       const q = TrendsQuerySchema.parse(req.query);
       const tenantId = req.tenant.id;
 
-      // Build optional WHERE clauses
-      const filters: string[] = [];
-      const params: any[]     = [q.period, q.days, tenantId];
-      let p = 4;
+      // queueId can't be pre-aggregated in the MV — fall back to live query
+      if (q.queueId) {
+        const filters: string[] = [];
+        const params: any[] = [q.period, q.days, tenantId];
+        let p = 4;
+        if (q.priority)    { filters.push(`priority = $${p++}`);    params.push(q.priority); }
+        if (q.channel)     { filters.push(`channel = $${p++}`);     params.push(q.channel); }
+        if (q.ticketType)  { filters.push(`ticket_type = $${p++}`); params.push(q.ticketType); }
+        filters.push(`queue_id = $${p++}`); params.push(q.queueId);
+        const filterSql = 'AND ' + filters.join(' AND ');
 
-      if (q.priority)   { filters.push(`priority = $${p++}`);    params.push(q.priority); }
-      if (q.channel)    { filters.push(`channel = $${p++}`);     params.push(q.channel); }
-      if (q.ticketType) { filters.push(`ticket_type = $${p++}`); params.push(q.ticketType); }
-      if (q.queueId)    { filters.push(`queue_id = $${p++}`);    params.push(q.queueId); }
-      const filterSql = filters.length ? 'AND ' + filters.join(' AND ') : '';
+        const rows = await db.withTenant(tenantId, async (c) => {
+          const r = await c.query(`
+            WITH periods AS (
+              SELECT generate_series(
+                DATE_TRUNC($1, NOW() - ($2 || ' days')::INTERVAL),
+                DATE_TRUNC($1, NOW()),
+                ('1 ' || $1)::INTERVAL
+              ) AS period
+            ),
+            actuals AS (
+              SELECT DATE_TRUNC($1, created_at) AS period,
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE status IN ('resolved','closed')) AS resolved,
+                COUNT(*) FILTER (WHERE sla_due_at < NOW() AND status NOT IN ('resolved','closed')) AS sla_breached,
+                COUNT(*) FILTER (WHERE priority='urgent') AS urgent,
+                COUNT(*) FILTER (WHERE priority='high')   AS high,
+                COUNT(*) FILTER (WHERE priority='medium') AS medium,
+                COUNT(*) FILTER (WHERE priority='low')    AS low,
+                COUNT(*) FILTER (WHERE channel='voice_bot') AS via_voice,
+                COUNT(*) FILTER (WHERE channel='email')     AS via_email,
+                COUNT(*) FILTER (WHERE channel='manual')    AS via_manual
+              FROM tickets
+              WHERE tenant_id=$3 AND created_at >= NOW() - ($2 || ' days')::INTERVAL ${filterSql}
+              GROUP BY 1
+            )
+            SELECT p.period,
+              COALESCE(a.total,0) AS total, COALESCE(a.resolved,0) AS resolved,
+              COALESCE(a.sla_breached,0) AS sla_breached,
+              COALESCE(a.urgent,0) AS urgent, COALESCE(a.high,0) AS high,
+              COALESCE(a.medium,0) AS medium, COALESCE(a.low,0) AS low,
+              COALESCE(a.via_voice,0) AS via_voice, COALESCE(a.via_email,0) AS via_email,
+              COALESCE(a.via_manual,0) AS via_manual
+            FROM periods p LEFT JOIN actuals a USING (period) ORDER BY p.period`, params);
+          return r.rows;
+        });
+        return reply.send({ success: true, data: rows });
+      }
 
-      const rows = await db.withTenant(tenantId, async (c) => {
-        const r = await c.query(`
-          WITH periods AS (
-            SELECT generate_series(
-              DATE_TRUNC($1, NOW() - ($2 || ' days')::INTERVAL),
-              DATE_TRUNC($1, NOW()),
-              ('1 ' || $1)::INTERVAL
-            ) AS period
-          ),
-          actuals AS (
-            SELECT
-              DATE_TRUNC($1, created_at)                                           AS period,
-              COUNT(*)                                                              AS total,
-              COUNT(*) FILTER (WHERE status IN ('resolved','closed'))              AS resolved,
-              COUNT(*) FILTER (WHERE sla_due_at < NOW()
-                               AND status NOT IN ('resolved','closed'))            AS sla_breached,
-              COUNT(*) FILTER (WHERE priority = 'urgent')                         AS urgent,
-              COUNT(*) FILTER (WHERE priority = 'high')                           AS high,
-              COUNT(*) FILTER (WHERE priority = 'medium')                         AS medium,
-              COUNT(*) FILTER (WHERE priority = 'low')                            AS low,
-              COUNT(*) FILTER (WHERE channel = 'voice_bot')                       AS via_voice,
-              COUNT(*) FILTER (WHERE channel = 'email')                           AS via_email,
-              COUNT(*) FILTER (WHERE channel = 'manual')                          AS via_manual
-            FROM tickets
-            WHERE tenant_id = $3
-              AND created_at >= NOW() - ($2 || ' days')::INTERVAL
-              ${filterSql}
-            GROUP BY 1
-          )
+      // Fast path: read from materialized view
+      const mvFilters: string[] = ['tenant_id = $1', 'day >= (NOW() - ($2 || \' days\')::INTERVAL)::date'];
+      const mvParams: any[] = [tenantId, q.days];
+      let p = 3;
+      if (q.priority)   { mvFilters.push(`priority = $${p++}`);    mvParams.push(q.priority); }
+      if (q.channel)    { mvFilters.push(`channel = $${p++}`);     mvParams.push(q.channel); }
+      if (q.ticketType) { mvFilters.push(`ticket_type = $${p++}`); mvParams.push(q.ticketType); }
+
+      const result = await db.query(`
+        WITH periods AS (
+          SELECT generate_series(
+            DATE_TRUNC($3_period, NOW() - ($2 || ' days')::INTERVAL),
+            DATE_TRUNC($3_period, NOW()),
+            ('1 ' || $3_period)::INTERVAL
+          ) AS period
+        ),
+        actuals AS (
           SELECT
-            p.period,
-            COALESCE(a.total,        0) AS total,
-            COALESCE(a.resolved,     0) AS resolved,
-            COALESCE(a.sla_breached, 0) AS sla_breached,
-            COALESCE(a.urgent,       0) AS urgent,
-            COALESCE(a.high,         0) AS high,
-            COALESCE(a.medium,       0) AS medium,
-            COALESCE(a.low,          0) AS low,
-            COALESCE(a.via_voice,    0) AS via_voice,
-            COALESCE(a.via_email,    0) AS via_email,
-            COALESCE(a.via_manual,   0) AS via_manual
-          FROM periods p
-          LEFT JOIN actuals a USING (period)
-          ORDER BY p.period ASC
-        `, params);
-        return r.rows;
-      });
-
-      return reply.send({ success: true, data: rows });
+            DATE_TRUNC('${q.period}', day)   AS period,
+            SUM(total)::int                  AS total,
+            SUM(resolved)::int               AS resolved,
+            SUM(sla_breached)::int           AS sla_breached,
+            SUM(CASE WHEN priority='urgent' THEN total ELSE 0 END)::int AS urgent,
+            SUM(CASE WHEN priority='high'   THEN total ELSE 0 END)::int AS high,
+            SUM(CASE WHEN priority='medium' THEN total ELSE 0 END)::int AS medium,
+            SUM(CASE WHEN priority='low'    THEN total ELSE 0 END)::int AS low,
+            SUM(CASE WHEN channel='voice_bot' THEN total ELSE 0 END)::int AS via_voice,
+            SUM(CASE WHEN channel='email'     THEN total ELSE 0 END)::int AS via_email,
+            SUM(CASE WHEN channel='manual'    THEN total ELSE 0 END)::int AS via_manual
+          FROM mv_daily_ticket_stats
+          WHERE ${mvFilters.join(' AND ')}
+          GROUP BY 1
+        )
+        SELECT p.period,
+          COALESCE(a.total,0) AS total, COALESCE(a.resolved,0) AS resolved,
+          COALESCE(a.sla_breached,0) AS sla_breached,
+          COALESCE(a.urgent,0) AS urgent, COALESCE(a.high,0) AS high,
+          COALESCE(a.medium,0) AS medium, COALESCE(a.low,0) AS low,
+          COALESCE(a.via_voice,0) AS via_voice, COALESCE(a.via_email,0) AS via_email,
+          COALESCE(a.via_manual,0) AS via_manual
+        FROM periods p LEFT JOIN actuals a USING (period) ORDER BY p.period`
+        .replace('$3_period', `'${q.period}'`)
+        .replace('$3_period', `'${q.period}'`),
+        mvParams,
+      );
+      return reply.send({ success: true, data: result.rows });
     });
 
     // ── GET /heatmap ───────────────────────────────────────────────────────

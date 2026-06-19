@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { api } from '../../services/api';
 import { formatCurrency, CURRENCIES, DEFAULT_SETTINGS, type LineItem, type SalesSettings, type BillingContact } from './types';
@@ -18,6 +18,13 @@ function mkLine(defaultTaxRate = 0): LineItem {
 
 export function InvoiceCreate() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const preselectedTemplate = searchParams.get('template') ?? '';
+
+  const { data: savedTemplates } = useQuery<{ id: string; name: string; type: string }[]>({
+    queryKey: ['invoice-templates'],
+    queryFn: () => api.get('/api/v1/sales/templates').then(r => r.data.data ?? []),
+  });
 
   const { data: settings } = useQuery<SalesSettings>({
     queryKey: ['sales-settings'],
@@ -31,6 +38,7 @@ export function InvoiceCreate() {
   const s = settings ?? DEFAULT_SETTINGS;
   const defaultTax = s.taxRates.find(t => t.isDefault)?.rate ?? 0;
 
+  const [templateId, setTemplateId] = useState(preselectedTemplate || 'tpl-classic');
   const [contactId, setContactId] = useState('');
   const [issueDate, setIssueDate] = useState(new Date().toISOString().split('T')[0]);
   const [payTerms, setPayTerms] = useState(String(s.defaultPaymentTerms ?? 30));
@@ -63,7 +71,7 @@ export function InvoiceCreate() {
     mutationFn: (status: 'draft' | 'sent') => api.post('/api/v1/sales/invoices', {
       billingContactId: contactId || undefined,
       issueDate, dueDate: dueDateStr, currency, poReference: poRef || undefined,
-      templateId: 'tpl-classic', lineItems: lines, subtotal, totalTax, total,
+      templateId, lineItems: lines, subtotal, totalTax, total,
       notes: notes || undefined, terms: terms || undefined, status,
     }),
     onSuccess: (res) => navigate(`/sales/invoices/${res.data.data.id}`),
@@ -93,6 +101,24 @@ export function InvoiceCreate() {
             { label: 'Issue Date', el: <input type="date" value={issueDate} onChange={e => setIssueDate(e.target.value)} className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500" /> },
             { label: 'Payment Terms', el: <select value={payTerms} onChange={e => setPayTerms(e.target.value)} className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">{TERMS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select> },
             { label: 'Due Date', el: <input type="date" value={dueDateStr} readOnly className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 bg-gray-50 text-gray-500" /> },
+            { label: 'Template', el: (
+              <select value={templateId} onChange={e => setTemplateId(e.target.value)}
+                className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <optgroup label="Preset Themes">
+                  <option value="tpl-classic">Classic Professional</option>
+                  <option value="tpl-minimal">Minimal Modern</option>
+                  <option value="tpl-consulting">Consulting Statement</option>
+                  <option value="tpl-retail">Retail / Product</option>
+                </optgroup>
+                {(savedTemplates ?? []).length > 0 && (
+                  <optgroup label="My Saved Templates">
+                    {(savedTemplates ?? []).map(t => (
+                      <option key={t.id} value={t.id}>{t.name} ({t.type})</option>
+                    ))}
+                  </optgroup>
+                )}
+              </select>
+            )},
           ].map(({ label, el }) => (
             <div key={label} className="flex flex-col gap-1">
               <label className="text-xs font-medium text-gray-700">{label}</label>

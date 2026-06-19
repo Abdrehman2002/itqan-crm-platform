@@ -1,33 +1,24 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  Save, Loader2, Building2, Bell, Shield, Users, Palette, Clock,
+  Save, Loader2, Building2, Users, Clock,
   UserPlus, Trash2, Edit2, Check, X, Search, Crown,
-  ShieldCheck, UserCheck, Eye, RotateCcw, Type, Pipette,
+  ShieldCheck, UserCheck, Eye,
   Route, Tag, Plus, AlertCircle, Layers, ToggleLeft, ToggleRight,
 } from 'lucide-react';
 import { api } from '../services/api';
 import { MilestoneSettings } from './MilestoneSettings';
 import { useAuthStore } from '../store/auth.store';
 import { useIsAdmin } from '../hooks/useRole';
-import {
-  useAppearanceStore,
-  FONT_OPTIONS,
-  FONT_SIZE_OPTIONS,
-  FONT_COLOR_PRESETS,
-} from '../store/appearance.store';
 
-type Tab = 'workspace' | 'modules' | 'team' | 'routing' | 'tags' | 'notifications' | 'security' | 'appearance';
+type Tab = 'workspace' | 'modules' | 'team' | 'routing' | 'tags';
 
 const TABS: { id: Tab; label: string; icon: any }[] = [
-  { id: 'workspace',     label: 'Workspace',     icon: Building2 },
-  { id: 'modules',       label: 'Modules',        icon: Layers },
-  { id: 'team',          label: 'Team',           icon: Users },
-  { id: 'routing',       label: 'Routing & SLA',  icon: Route },
-  { id: 'tags',          label: 'Tags',           icon: Tag },
-  { id: 'notifications', label: 'Notifications',  icon: Bell },
-  { id: 'security',      label: 'Security',       icon: Shield },
-  { id: 'appearance',    label: 'Appearance',     icon: Palette },
+  { id: 'workspace', label: 'Workspace',    icon: Building2 },
+  { id: 'modules',   label: 'Modules',      icon: Layers    },
+  { id: 'team',      label: 'Team',         icon: Users     },
+  { id: 'routing',   label: 'Routing & SLA',icon: Route     },
+  { id: 'tags',      label: 'Tags',         icon: Tag       },
 ];
 
 function WorkspaceSettings() {
@@ -152,6 +143,7 @@ function InviteModal({ onClose }: { onClose: () => void }) {
   const [department,      setDepartment]     = useState('');
   const [departmentType,  setDepartmentType] = useState('');
   const [selectedRoleId,  setSelectedRoleId] = useState('');
+  const [managerId,       setManagerId]      = useState('');
   const [error,           setError]          = useState('');
 
   // Fetch all roles (system + custom)
@@ -164,6 +156,12 @@ function InviteModal({ onClose }: { onClose: () => void }) {
   const { data: deptTypes = [] } = useQuery<Array<{ value: string; label: string }>>({
     queryKey: ['dept-types'],
     queryFn: () => api.get('/api/v1/settings/team/department-types').then(r => r.data.data ?? []),
+  });
+
+  // Fetch team members for line manager dropdown
+  const { data: allMembers = [] } = useQuery<any[]>({
+    queryKey: ['team-members'],
+    queryFn: () => api.get('/api/v1/settings/team').then((r) => r.data.data ?? []),
   });
 
   // Default to first non-admin system role
@@ -179,6 +177,7 @@ function InviteModal({ onClose }: { onClose: () => void }) {
       permissions: selectedRole?.permissions,
       department:     department || undefined,
       departmentType: departmentType || undefined,
+      manager_id:     managerId || undefined,
     }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['team-members'] }); onClose(); },
     onError:   (e: any) => setError(e.response?.data?.error?.message ?? 'Failed to invite user'),
@@ -237,6 +236,18 @@ function InviteModal({ onClose }: { onClose: () => void }) {
                 <p className="text-[11px] text-gray-400 mt-1">Selecting a type auto-configures which modules this user can access based on their department's responsibilities.</p>
               </>
             )}
+          </div>
+
+          {/* Line Manager */}
+          <div>
+            <label className="text-xs font-medium text-gray-600 mb-1 block">Line Manager <span className="text-gray-400 font-normal">(optional)</span></label>
+            <select value={managerId} onChange={(e) => setManagerId(e.target.value)}
+              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400">
+              <option value="">— No line manager —</option>
+              {allMembers.filter((m: any) => m.role !== 'super_admin').map((m: any) => (
+                <option key={m.id} value={m.id}>{m.name} ({m.role_name ?? m.role})</option>
+              ))}
+            </select>
           </div>
 
           {/* Role selection */}
@@ -308,20 +319,27 @@ function InviteModal({ onClose }: { onClose: () => void }) {
 
 // ── Member row ────────────────────────────────────────────────────────────────
 
-function MemberRow({ member, currentUserId, isAdmin }: {
+function MemberRow({ member, currentUserId, isAdmin, allMembers }: {
   member: any;
   currentUserId: string;
   isAdmin: boolean;
+  allMembers: any[];
 }) {
   const qc = useQueryClient();
-  const [editingRole, setEditingRole] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [editingRole,    setEditingRole]    = useState(false);
+  const [editingManager, setEditingManager] = useState(false);
+  const [confirmDelete,  setConfirmDelete]  = useState(false);
   const isSelf = member.id === currentUserId;
   const isSuperAdmin = member.role === 'super_admin';
 
   const roleMutation = useMutation({
     mutationFn: (role: string) => api.patch(`/api/v1/settings/team/${member.id}`, { role }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['team-members'] }); setEditingRole(false); },
+  });
+
+  const managerMutation = useMutation({
+    mutationFn: (mgr_id: string | null) => api.patch(`/api/v1/settings/team/${member.id}`, { manager_id: mgr_id }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['team-members'] }); setEditingManager(false); },
   });
 
   const deleteMutation = useMutation({
@@ -347,6 +365,9 @@ function MemberRow({ member, currentUserId, isAdmin }: {
           {isSelf && <span className="text-xs px-1.5 py-0.5 bg-brand-100 text-brand-700 rounded-full font-medium">You</span>}
         </div>
         <p className="text-xs text-gray-400 truncate">{member.email}</p>
+        {member.manager_name && (
+          <p className="text-xs text-gray-400 truncate mt-0.5">Reports to: <span className="text-gray-600">{member.manager_name}</span></p>
+        )}
       </div>
 
       {/* Last login */}
@@ -380,6 +401,35 @@ function MemberRow({ member, currentUserId, isAdmin }: {
           </button>
         )}
       </div>
+
+      {/* Line Manager — editable */}
+      {isAdmin && !isSelf && !isSuperAdmin && (
+        <div className="shrink-0">
+          {editingManager ? (
+            <select
+              autoFocus
+              defaultValue={member.manager_id ?? ''}
+              onChange={(e) => managerMutation.mutate(e.target.value || null)}
+              onBlur={() => setEditingManager(false)}
+              className="text-xs border border-brand-300 rounded-lg px-2 py-1 outline-none focus:border-brand-500 bg-white max-w-[140px]"
+            >
+              <option value="">No manager</option>
+              {allMembers.filter((m: any) => m.id !== member.id && m.role !== 'super_admin').map((m: any) => (
+                <option key={m.id} value={m.id}>{m.name}</option>
+              ))}
+            </select>
+          ) : (
+            <button
+              onClick={() => setEditingManager(true)}
+              className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 cursor-pointer"
+              title="Set line manager"
+            >
+              <UserCheck className="w-3 h-3" />
+              <span className="hidden lg:inline max-w-[80px] truncate">{member.manager_name ?? 'Set manager'}</span>
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Remove button */}
       {isAdmin && !isSelf && !isSuperAdmin && (
@@ -519,323 +569,12 @@ function TeamSettings() {
           </div>
         ) : (
           filtered.map((m: any) => (
-            <MemberRow key={m.id} member={m} currentUserId={user?.id ?? ''} isAdmin={isAdmin} />
+            <MemberRow key={m.id} member={m} currentUserId={user?.id ?? ''} isAdmin={isAdmin} allMembers={members} />
           ))
         )}
       </div>
 
       {showInvite && <InviteModal onClose={() => setShowInvite(false)} />}
-    </div>
-  );
-}
-
-function NotificationSettings() {
-  const [prefs, setPrefs] = useState({
-    dealWon: true, dealLost: false, newContact: true, voiceCall: true,
-    weeklyReport: true, monthlyReport: false, systemAlerts: true,
-  });
-
-  const toggles: { key: keyof typeof prefs; label: string; desc: string }[] = [
-    { key: 'dealWon',       label: 'Deal won',           desc: 'When a deal is marked as won' },
-    { key: 'dealLost',      label: 'Deal lost',          desc: 'When a deal is marked as lost' },
-    { key: 'newContact',    label: 'New contact',        desc: 'When a new contact is created' },
-    { key: 'voiceCall',     label: 'Voice call ended',   desc: 'When a voice call completes' },
-    { key: 'weeklyReport',  label: 'Weekly report',      desc: 'Emailed every Monday at 9 AM' },
-    { key: 'monthlyReport', label: 'Monthly report',     desc: 'Emailed on the 1st of each month' },
-    { key: 'systemAlerts',  label: 'System alerts',      desc: 'Critical system and billing alerts' },
-  ];
-
-  return (
-    <div className="space-y-6 max-w-lg">
-      <div>
-        <h2 className="text-base font-semibold text-gray-900">Notifications</h2>
-        <p className="text-sm text-gray-500 mt-0.5">Choose what you want to be notified about.</p>
-      </div>
-      <div className="space-y-3">
-        {toggles.map(({ key, label, desc }) => (
-          <div key={key} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-            <div>
-              <p className="text-sm font-medium text-gray-900">{label}</p>
-              <p className="text-xs text-gray-400">{desc}</p>
-            </div>
-            <button onClick={() => setPrefs({ ...prefs, [key]: !prefs[key] })}
-              className={`w-10 h-6 rounded-full transition-colors relative ${prefs[key] ? 'bg-brand-500' : 'bg-gray-300'}`}>
-              <span className={`absolute top-1 w-4 h-4 bg-white rounded-full shadow transition-transform ${prefs[key] ? 'translate-x-5' : 'translate-x-1'}`} />
-            </button>
-          </div>
-        ))}
-      </div>
-      <button className="flex items-center gap-2 px-4 py-2 bg-brand-600 text-white text-sm rounded-lg hover:bg-brand-700">
-        <Save className="w-3.5 h-3.5" /> Save Preferences
-      </button>
-    </div>
-  );
-}
-
-function SecuritySettings() {
-  const [currentPw, setCurrentPw] = useState('');
-  const [newPw, setNewPw] = useState('');
-  const [confirmPw, setConfirmPw] = useState('');
-
-  return (
-    <div className="space-y-6 max-w-lg">
-      <div>
-        <h2 className="text-base font-semibold text-gray-900">Security</h2>
-        <p className="text-sm text-gray-500 mt-0.5">Manage your password and session settings.</p>
-      </div>
-      <div className="space-y-4">
-        <h3 className="text-sm font-medium text-gray-700">Change Password</h3>
-        {[
-          { label: 'Current Password', value: currentPw, set: setCurrentPw },
-          { label: 'New Password',     value: newPw,     set: setNewPw },
-          { label: 'Confirm Password', value: confirmPw, set: setConfirmPw },
-        ].map(({ label, value, set }) => (
-          <div key={label}>
-            <label className="text-xs font-medium text-gray-600 mb-1 block">{label}</label>
-            <input type="password" value={value} onChange={(e) => set(e.target.value)}
-              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400" />
-          </div>
-        ))}
-        <button disabled={!currentPw || !newPw || newPw !== confirmPw}
-          className="flex items-center gap-2 px-4 py-2 bg-brand-600 text-white text-sm rounded-lg hover:bg-brand-700 disabled:opacity-50">
-          <Save className="w-3.5 h-3.5" /> Update Password
-        </button>
-      </div>
-      <div className="border-t border-gray-100 pt-6 space-y-4">
-        <h3 className="text-sm font-medium text-gray-700">Active Sessions</h3>
-        <div className="space-y-2">
-          {[{ device: 'Chrome on macOS', location: 'Karachi, PK', current: true },
-            { device: 'Mobile Safari',  location: 'Karachi, PK', current: false }].map((s, i) => (
-            <div key={i} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-              <div>
-                <p className="text-sm font-medium text-gray-900">{s.device}</p>
-                <p className="text-xs text-gray-400">{s.location}</p>
-              </div>
-              {s.current ? (
-                <span className="text-xs text-emerald-600 font-medium">Current</span>
-              ) : (
-                <button className="text-xs text-red-500 hover:text-red-700">Revoke</button>
-              )}
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function AppearanceSettings() {
-  const {
-    theme, setTheme,
-    density, setDensity,
-    fontFamily, setFontFamily,
-    fontSize, setFontSize,
-    fontColor, setFontColor,
-    reset,
-  } = useAppearanceStore();
-
-  const [saved, setSaved] = useState(false);
-  const [customColor, setCustomColor] = useState(fontColor);
-
-  function handleSave() {
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
-  }
-
-  const selectedFont = FONT_OPTIONS.find(f => f.value === fontFamily) ?? FONT_OPTIONS[0];
-
-  return (
-    <div className="space-y-8 max-w-lg">
-      {/* Header */}
-      <div className="flex items-start justify-between">
-        <div>
-          <h2 className="text-base font-semibold text-gray-900">Appearance</h2>
-          <p className="text-sm text-gray-500 mt-0.5">Customize fonts, colours, and layout density. Changes apply instantly.</p>
-        </div>
-        <button onClick={reset} className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-600 transition-colors pt-1">
-          <RotateCcw className="w-3 h-3" /> Reset defaults
-        </button>
-      </div>
-
-      {/* Live Preview */}
-      <div className="rounded-xl border border-gray-200 bg-gray-50 p-5">
-        <p className="text-[10px] font-semibold uppercase tracking-widest text-gray-400 mb-3">Live Preview</p>
-        <div
-          className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm space-y-2"
-          style={{ fontFamily, fontSize, color: fontColor }}
-        >
-          <p className="font-semibold" style={{ fontSize: `calc(${fontSize} + 2px)` }}>Sample Heading</p>
-          <p>This is how your workspace text will look. Adjust the settings below to personalise your experience.</p>
-          <p className="opacity-60 text-[0.85em]">Secondary / muted text appears like this.</p>
-          <div className="flex gap-2 pt-1">
-            <span className="px-2 py-0.5 rounded-full text-[0.8em] font-medium bg-blue-50 text-blue-700">Tag</span>
-            <span className="px-2 py-0.5 rounded-full text-[0.8em] font-medium bg-green-50 text-green-700">Active</span>
-            <span className="px-2 py-0.5 rounded-full text-[0.8em] font-medium bg-amber-50 text-amber-700">Pending</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Theme */}
-      <div>
-        <p className="text-sm font-medium text-gray-700 mb-3">Theme</p>
-        <div className="grid grid-cols-3 gap-3">
-          {([
-            { value: 'light',  label: '☀️  Light'  },
-            { value: 'dark',   label: '🌙  Dark'   },
-            { value: 'system', label: '💻  System' },
-          ] as const).map((t) => (
-            <button key={t.value} onClick={() => setTheme(t.value)}
-              className={`py-3 rounded-xl border-2 text-sm font-medium transition-all ${
-                theme === t.value
-                  ? 'border-[#29ABE2] text-[#29ABE2] bg-blue-50 shadow-sm'
-                  : 'border-gray-200 text-gray-500 hover:border-gray-300 bg-white'
-              }`}>
-              {t.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Density */}
-      <div>
-        <p className="text-sm font-medium text-gray-700 mb-3">Layout Density</p>
-        <div className="grid grid-cols-3 gap-3">
-          {([
-            { value: 'compact',     label: 'Compact',      desc: 'More content' },
-            { value: 'default',     label: 'Default',      desc: 'Balanced'     },
-            { value: 'comfortable', label: 'Comfortable',  desc: 'More space'   },
-          ] as const).map((d) => (
-            <button key={d.value} onClick={() => setDensity(d.value)}
-              className={`py-3 px-2 rounded-xl border-2 text-sm font-medium transition-all text-center ${
-                density === d.value
-                  ? 'border-[#29ABE2] text-[#29ABE2] bg-blue-50 shadow-sm'
-                  : 'border-gray-200 text-gray-500 hover:border-gray-300 bg-white'
-              }`}>
-              <span className="block">{d.label}</span>
-              <span className="block text-[11px] font-normal opacity-60">{d.desc}</span>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Font Family */}
-      <div>
-        <p className="text-sm font-medium text-gray-700 mb-3 flex items-center gap-1.5">
-          <Type className="w-3.5 h-3.5 text-gray-400" /> Font Family
-        </p>
-        <div className="grid grid-cols-1 gap-2">
-          {FONT_OPTIONS.map((f) => (
-            <button
-              key={f.value}
-              onClick={() => setFontFamily(f.value)}
-              className={`py-2.5 px-3 rounded-xl border-2 text-sm transition-all text-left ${
-                fontFamily === f.value
-                  ? 'border-[#29ABE2] bg-blue-50 shadow-sm'
-                  : 'border-gray-200 bg-white hover:border-gray-300'
-              }`}
-            >
-              <span
-                className={`block font-medium ${fontFamily === f.value ? 'text-[#29ABE2]' : 'text-gray-700'}`}
-                style={{ fontFamily: f.value }}
-              >
-                {f.label}
-              </span>
-              <span
-                className="block text-[11px] text-gray-400 mt-0.5"
-                style={{ fontFamily: f.value }}
-              >
-                The quick brown fox
-              </span>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Font Size */}
-      <div>
-        <p className="text-sm font-medium text-gray-700 mb-3 flex items-center gap-1.5">
-          <Type className="w-3.5 h-3.5 text-gray-400" /> Font Size
-        </p>
-        <div className="grid grid-cols-5 gap-2">
-          {FONT_SIZE_OPTIONS.map((s) => (
-            <button
-              key={s.value}
-              onClick={() => setFontSize(s.value)}
-              className={`py-2 px-2 rounded-xl border-2 text-xs font-medium transition-all text-center ${
-                fontSize === s.value
-                  ? 'border-[#29ABE2] text-[#29ABE2] bg-blue-50 shadow-sm'
-                  : 'border-gray-200 text-gray-500 hover:border-gray-300 bg-white'
-              }`}
-            >
-              <span className="block" style={{ fontSize: s.value, fontFamily, color: fontColor }}>{s.value}</span>
-              <span className="block text-[10px] mt-0.5 opacity-60">{s.label.split('—')[0].trim()}</span>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Font Color */}
-      <div>
-        <p className="text-sm font-medium text-gray-700 mb-3 flex items-center gap-1.5">
-          <Pipette className="w-3.5 h-3.5 text-gray-400" /> Font Color
-        </p>
-
-        {/* Preset swatches */}
-        <div className="flex flex-wrap gap-2 mb-3">
-          {FONT_COLOR_PRESETS.map((c) => (
-            <button
-              key={c.value}
-              onClick={() => { setFontColor(c.value); setCustomColor(c.value); }}
-              title={c.label}
-              className={`w-8 h-8 rounded-lg border-2 transition-all shadow-sm ${
-                fontColor === c.value ? 'border-[#29ABE2] scale-110' : 'border-transparent hover:border-gray-300'
-              }`}
-              style={{ backgroundColor: c.value }}
-            />
-          ))}
-        </div>
-
-        {/* Custom color picker */}
-        <div className="flex items-center gap-3">
-          <div className="relative flex items-center">
-            <input
-              type="color"
-              value={customColor}
-              onChange={(e) => { setCustomColor(e.target.value); setFontColor(e.target.value); }}
-              className="w-10 h-10 rounded-lg border border-gray-200 cursor-pointer p-0.5 bg-white"
-            />
-          </div>
-          <div className="flex-1">
-            <input
-              type="text"
-              value={customColor}
-              maxLength={7}
-              onChange={(e) => {
-                const v = e.target.value;
-                setCustomColor(v);
-                if (/^#[0-9a-fA-F]{6}$/.test(v)) setFontColor(v);
-              }}
-              placeholder="#111827"
-              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-[#29ABE2]/30 focus:border-[#29ABE2]"
-            />
-          </div>
-          <span className="text-sm font-medium" style={{ color: fontColor, fontFamily, fontSize }}>
-            Preview
-          </span>
-        </div>
-      </div>
-
-      {/* Save */}
-      <div className="flex items-center gap-3 pt-2 border-t border-gray-100">
-        <button
-          onClick={handleSave}
-          className="flex items-center gap-2 px-5 py-2 bg-[#29ABE2] text-white text-sm font-semibold rounded-xl hover:bg-[#1a94c9] transition-colors shadow-sm"
-        >
-          {saved ? <Check className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />}
-          {saved ? 'Saved!' : 'Save Appearance'}
-        </button>
-        <p className="text-xs text-gray-400">Settings are saved to your browser and applied immediately.</p>
-      </div>
     </div>
   );
 }
@@ -1327,14 +1066,11 @@ function ModulesSettings() {
 }
 
 const TAB_CONTENT: Record<Tab, React.FC> = {
-  workspace:     WorkspaceSettings,
-  modules:       ModulesSettings,
-  team:          TeamSettings,
-  routing:       RoutingSettings,
-  tags:          TagsSettings,
-  notifications: NotificationSettings,
-  security:      SecuritySettings,
-  appearance:    AppearanceSettings,
+  workspace: WorkspaceSettings,
+  modules:   ModulesSettings,
+  team:      TeamSettings,
+  routing:   RoutingSettings,
+  tags:      TagsSettings,
 };
 
 export function Settings() {
@@ -1345,7 +1081,7 @@ export function Settings() {
     <div className="flex h-full">
       {/* Sidebar */}
       <div className="w-52 border-r border-gray-100 p-3 space-y-0.5">
-        <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider px-3 mb-3">Settings</p>
+        <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider px-3 mb-3">Workspace Settings</p>
         {TABS.map(({ id, label, icon: Icon }) => (
           <button key={id} onClick={() => setTab(id)}
             className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors text-left ${

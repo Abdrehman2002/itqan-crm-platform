@@ -17,7 +17,7 @@ import {
   UserCheck, Inbox, RefreshCw, CalendarCheck, Mail,
   ClipboardList, FileText, UserPlus, Clock, Shield,
   ToggleLeft, ToggleRight, Wifi, WifiOff, UserX,
-  TrendingDown, Hash, Tag,
+  TrendingDown, Hash, Tag, ChevronRight, Zap, AlertOctagon,
 } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -138,7 +138,7 @@ const ACT_CFG: Record<string, { icon: React.ElementType; color: string; label: s
 // ══════════════════════════════════════════════════════════════════════════
 // AGENT VIEW
 // ══════════════════════════════════════════════════════════════════════════
-function AgentDashboard({ d, department }: { d: any; department: string | null }) {
+function AgentDashboard({ d, department, deptType }: { d: any; department: string | null; deptType: string | null }) {
   const calls      = d.callStats        ?? {};
   const tickets    = d.myTickets        ?? {};
   const sentiment  = d.sentiment        ?? {};
@@ -146,6 +146,12 @@ function AgentDashboard({ d, department }: { d: any; department: string | null }
   const breakdown  = (d.ticketBreakdown  ?? []) as any[];
   const recent     = (d.recentTickets    ?? []) as any[];
   const activities = (d.recentActivities ?? []) as any[];
+
+  const { data: tatData } = useQuery({
+    queryKey: ['agent-tat-dashboard'],
+    queryFn: () => api.get('/api/v1/tickets/dashboard/agent').then(r => r.data.data),
+    refetchInterval: 30_000,
+  });
 
   const callsToday     = Number(calls.calls_today     ?? 0);
   const completedToday = Number(calls.completed_today ?? 0);
@@ -189,6 +195,9 @@ function AgentDashboard({ d, department }: { d: any; department: string | null }
         <StatCard label="In Progress"     value={tickets.in_progress ?? 0}  sub="Actively working"            icon={Activity}     accent={C.gold}   trend="up" />
         <StatCard label="Resolved Today"  value={tickets.resolved_today ?? 0} sub="Closed this shift"        icon={CheckCircle2} accent={C.green}  trend="up" />
       </div>
+
+      {/* Department TAT Dashboard */}
+      {tatData && <TATPanel tat={tatData} deptType={deptType} />}
 
       {/* My CRM Activities */}
       <SectionHeader icon={CalendarCheck} label="My CRM Activities (Created by Me)" accent={C.green} />
@@ -386,11 +395,164 @@ function AgentDashboard({ d, department }: { d: any; department: string | null }
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// DEPARTMENT TAT PANEL — used inside both AgentDashboard and ManagerDashboard
+// ══════════════════════════════════════════════════════════════════════════
+function TATPanel({ tat, deptType, isManager = false }: {
+  tat: any; deptType: string | null; isManager?: boolean;
+}) {
+  if (!tat) return null;
+  const assigned       = Number(tat.assigned       ?? 0);
+  const accepted       = Number(tat.accepted        ?? 0);
+  const pending        = Number(tat.pending         ?? 0);
+  const resolved       = Number(tat.resolved        ?? 0);
+  const withinTat      = Number(tat.within_tat      ?? 0);
+  const approachingTat = Number(tat.approaching_tat ?? 0);
+  const breachedTat    = Number(tat.breached_tat    ?? 0);
+
+  const isSupport = !deptType || deptType === 'support';
+  const accent    = isSupport ? '#29ABE2' : '#4D8B3C';
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: `${accent}18` }}>
+          <Ticket className="w-4 h-4" style={{ color: accent }} />
+        </div>
+        <h2 className="font-bold text-gray-900">
+          {isManager ? 'Team Ticket Dashboard' : 'My Ticket Dashboard'}
+          {deptType && <span className="ml-2 text-xs font-normal text-gray-400 capitalize">({deptType.replace('_', ' ')})</span>}
+        </h2>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
+        <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
+          <p className="text-2xl font-bold text-gray-900">{assigned}</p>
+          <p className="text-xs text-gray-500 mt-1">Assigned</p>
+        </div>
+        <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
+          <p className="text-2xl font-bold text-blue-600">{accepted}</p>
+          <p className="text-xs text-gray-500 mt-1">Accepted</p>
+        </div>
+        <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
+          <p className="text-2xl font-bold text-amber-600">{pending}</p>
+          <p className="text-xs text-gray-500 mt-1">Pending</p>
+        </div>
+        <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
+          <p className="text-2xl font-bold text-emerald-600">{resolved}</p>
+          <p className="text-xs text-gray-500 mt-1">Resolved</p>
+        </div>
+        <div className="bg-emerald-50 rounded-xl border border-emerald-100 p-4 shadow-sm">
+          <p className="text-2xl font-bold text-emerald-700">{withinTat}</p>
+          <p className="text-xs text-emerald-600 mt-1">Within TAT</p>
+        </div>
+        <div className={`rounded-xl border p-4 shadow-sm ${approachingTat > 0 ? 'bg-amber-50 border-amber-200' : 'bg-white border-gray-100'}`}>
+          <div className="flex items-center gap-1">
+            <p className={`text-2xl font-bold ${approachingTat > 0 ? 'text-amber-700' : 'text-gray-900'}`}>{approachingTat}</p>
+            {approachingTat > 0 && <Zap className="w-4 h-4 text-amber-500" />}
+          </div>
+          <p className={`text-xs mt-1 ${approachingTat > 0 ? 'text-amber-600 font-medium' : 'text-gray-500'}`}>Approaching TAT</p>
+        </div>
+        <div className={`rounded-xl border p-4 shadow-sm ${breachedTat > 0 ? 'bg-red-50 border-red-200' : 'bg-white border-gray-100'}`}>
+          <div className="flex items-center gap-1">
+            <p className={`text-2xl font-bold ${breachedTat > 0 ? 'text-red-700' : 'text-gray-900'}`}>{breachedTat}</p>
+            {breachedTat > 0 && <AlertOctagon className="w-4 h-4 text-red-500" />}
+          </div>
+          <p className={`text-xs mt-1 ${breachedTat > 0 ? 'text-red-600 font-medium' : 'text-gray-500'}`}>Breached TAT</p>
+        </div>
+      </div>
+      {breachedTat > 0 && (
+        <div className="flex items-center gap-2 px-3 py-2 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">
+          <AlertOctagon className="w-3.5 h-3.5 shrink-0" />
+          <span><strong>{breachedTat}</strong> ticket{breachedTat !== 1 ? 's have' : ' has'} breached the SLA deadline. Immediate action required.</span>
+          <Link to="/tickets?filter=breached" className="ml-auto underline font-medium whitespace-nowrap flex items-center gap-0.5">
+            View all <ChevronRight className="w-3 h-3" />
+          </Link>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// MANAGER TEAM TABLE — per-agent breakdown with drill-down link
+// ══════════════════════════════════════════════════════════════════════════
+function TeamBreakdownTable({ agents }: { agents: any[] }) {
+  if (!agents.length) return null;
+  return (
+    <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+      <div className="px-5 py-3 border-b border-gray-100 flex items-center gap-2">
+        <Users className="w-4 h-4 text-gray-400" />
+        <h3 className="font-semibold text-gray-900 text-sm">Team Breakdown — Direct Reports</h3>
+        <span className="ml-auto text-xs text-gray-400">Click an agent to drill down</span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-gray-100 bg-gray-50 text-xs text-gray-500">
+              <th className="px-4 py-2.5 text-left font-medium">Agent</th>
+              <th className="px-3 py-2.5 text-center font-medium">Assigned</th>
+              <th className="px-3 py-2.5 text-center font-medium">Accepted</th>
+              <th className="px-3 py-2.5 text-center font-medium">Pending</th>
+              <th className="px-3 py-2.5 text-center font-medium">Resolved</th>
+              <th className="px-3 py-2.5 text-center font-medium text-emerald-600">Within TAT</th>
+              <th className="px-3 py-2.5 text-center font-medium text-amber-600">Approaching</th>
+              <th className="px-3 py-2.5 text-center font-medium text-red-600">Breached</th>
+              <th className="px-3 py-2.5"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {agents.map((a, i) => {
+              const breached    = Number(a.breached_tat    ?? 0);
+              const approaching = Number(a.approaching_tat ?? 0);
+              return (
+                <tr key={a.id} className={`border-b border-gray-50 hover:bg-blue-50/40 transition-colors ${i % 2 === 1 ? 'bg-gray-50/40' : ''}`}>
+                  <td className="px-4 py-3">
+                    <div className="font-medium text-gray-900 text-sm">{a.name}</div>
+                    {a.department && <div className="text-[10px] text-gray-400 capitalize">{a.department}</div>}
+                  </td>
+                  <td className="px-3 py-3 text-center font-semibold text-gray-700">{a.assigned ?? 0}</td>
+                  <td className="px-3 py-3 text-center font-semibold text-blue-600">{a.accepted ?? 0}</td>
+                  <td className="px-3 py-3 text-center font-semibold text-amber-600">{a.pending ?? 0}</td>
+                  <td className="px-3 py-3 text-center font-semibold text-emerald-600">{a.resolved ?? 0}</td>
+                  <td className="px-3 py-3 text-center">
+                    <span className="font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full text-xs">{a.within_tat ?? 0}</span>
+                  </td>
+                  <td className="px-3 py-3 text-center">
+                    {approaching > 0
+                      ? <span className="font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full text-xs flex items-center gap-1 justify-center"><Zap className="w-3 h-3" />{approaching}</span>
+                      : <span className="text-gray-400 text-xs">—</span>}
+                  </td>
+                  <td className="px-3 py-3 text-center">
+                    {breached > 0
+                      ? <span className="font-bold text-red-700 bg-red-50 px-2 py-0.5 rounded-full text-xs flex items-center gap-1 justify-center"><AlertOctagon className="w-3 h-3" />{breached}</span>
+                      : <span className="text-gray-400 text-xs">—</span>}
+                  </td>
+                  <td className="px-3 py-3">
+                    <Link to={`/tickets?assignee=${a.id}`} className="text-blue-500 hover:text-blue-700">
+                      <ChevronRight className="w-4 h-4" />
+                    </Link>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // MANAGER VIEW  — Bot Section + Human Section side by side
 // ══════════════════════════════════════════════════════════════════════════
-function ManagerDashboard({ d, department }: { d: any; department: string | null }) {
+function ManagerDashboard({ d, department, deptType }: { d: any; department: string | null; deptType: string | null }) {
   const bot   = d.botStats   ?? {};
   const human = d.humanStats ?? {};
+
+  const { data: teamData } = useQuery({
+    queryKey: ['manager-team-dashboard'],
+    queryFn: () => api.get('/api/v1/tickets/dashboard/team').then(r => r.data.data),
+    refetchInterval: 30_000,
+  });
   const hCalls   = human.calls      ?? {};
   const hTickets = human.tickets    ?? {};
   const hActs    = human.activities ?? {};
@@ -421,6 +583,14 @@ function ManagerDashboard({ d, department }: { d: any; department: string | null
 
   return (
     <div className="space-y-5">
+
+      {/* ── Team TAT Rollup ────────────────────────────────── */}
+      {teamData && (
+        <>
+          <TATPanel tat={teamData.totals} deptType={deptType} isManager />
+          <TeamBreakdownTable agents={teamData.agents ?? []} />
+        </>
+      )}
 
       {/* ── Two-column panels: Bot | Human ─────────────────── */}
       <div className="grid grid-cols-2 gap-5">
@@ -958,6 +1128,7 @@ export function Dashboard() {
   const { user } = useAuthStore();
   const role       = user?.role ?? 'agent';
   const department = user?.department?.toLowerCase() ?? null;
+  const deptType   = (user as any)?.department_type ?? null;
   const deptCfg    = department ? (DEPT_CONFIG[department] ?? null) : null;
 
   const { data, isLoading, dataUpdatedAt, refetch, isFetching } = useQuery({
@@ -1065,8 +1236,8 @@ export function Dashboard() {
           : isTenantAdmin
           ? <TenantAdminDashboard d={data} />
           : isManager
-          ? <ManagerDashboard d={data} department={department} />
-          : <AgentDashboard d={data} department={department} />
+          ? <ManagerDashboard d={data} department={department} deptType={deptType} />
+          : <AgentDashboard d={data} department={department} deptType={deptType} />
         }
 
         <div className="h-4" />

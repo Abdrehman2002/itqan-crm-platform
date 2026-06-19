@@ -3,6 +3,7 @@ import { z } from 'zod';
 import crypto from 'node:crypto';
 import type { DatabaseClient, EventBus } from '@crm/core';
 import { requireFeature, requireScope } from '../middlewares/auth.middleware';
+import { enqueueWebhookDelivery } from '../lib/webhook-worker';
 
 const WebhookSchema = z.object({
   name: z.string().min(1),
@@ -15,7 +16,7 @@ const WebhookSchema = z.object({
   }).optional(),
 });
 
-export function webhookRoutes(db: DatabaseClient, eventBus: EventBus) {
+export function webhookRoutes(db: DatabaseClient, _eventBus: EventBus) {
   return async function (fastify: FastifyInstance) {
     const preHandler = [requireFeature('webhooks'), requireScope('webhooks:manage')];
 
@@ -41,13 +42,9 @@ export function webhookRoutes(db: DatabaseClient, eventBus: EventBus) {
         return result.rows;
       });
 
-      // Register event listeners for each subscribed event
-      for (const evt of body.events) {
-        eventBus.on(evt, async (event) => {
-          if (event.tenantId !== req.tenant.id) return;
-          await dispatchWebhook(webhook.id, evt, event.payload, secret, body.url, db);
-        });
-      }
+      // No in-process listener needed — the WebhookDispatcher BullMQ worker
+      // consumes the crm-events queue and fans out to all matching webhooks in
+      // the DB, so delivery works correctly across all API instances.
 
       return reply.code(201).send({ success: true, data: { ...webhook, secret } });
     });
@@ -83,48 +80,62 @@ export function webhookRoutes(db: DatabaseClient, eventBus: EventBus) {
       if (!webhook) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Webhook not found' } });
 
       const testPayload = { event: 'webhook.test', timestamp: new Date().toISOString(), tenantId: req.tenant.id };
-      await dispatchWebhook(id, 'webhook.test', testPayload, webhook.secret, webhook.url, db);
-      return reply.send({ success: true, message: 'Test webhook dispatched' });
+      const retryPolicy = (webhook.retry_policy as any) ?? { maxRetries: 3, backoffMs: 1000 };
+      await enqueueWebhookDelivery(db, {
+        webhookId:  id,
+        tenantId:   req.tenant.id,
+        event:      'webhook.test',
+        payload:    testPayload,
+        maxRetries: retryPolicy.maxRetries ?? 3,
+        backoffMs:  retryPolicy.backoffMs  ?? 1000,
+      });
+      return reply.send({ success: true, message: 'Test webhook enqueued for delivery' });
+    });
+
+    // Dead-letter queue — rows that exhausted all retries
+    fastify.get('/dead-letter', { preHandler }, async (req, reply) => {
+      const rows = await db.withTenant(req.tenant.id, async (client) => {
+        const result = await client.query(
+          `SELECT wd.id, wd.webhook_id, w.name AS webhook_name, wd.event,
+                  wd.attempts, wd.max_retries, wd.status_code, wd.last_error,
+                  wd.created_at, wd.updated_at
+           FROM webhook_deliveries wd
+           JOIN webhooks w ON w.id = wd.webhook_id
+           WHERE wd.dead_lettered = true
+           ORDER BY wd.updated_at DESC
+           LIMIT 200`,
+        );
+        return result.rows;
+      });
+      return reply.send({ success: true, data: rows });
+    });
+
+    // Replay a dead-lettered delivery (re-enqueue with reset attempts)
+    fastify.post('/dead-letter/:deliveryId/replay', { preHandler }, async (req, reply) => {
+      const { deliveryId } = req.params as { deliveryId: string };
+      const [dl] = await db.withTenant(req.tenant.id, async (client) => {
+        const result = await client.query(
+          `SELECT wd.*, w.retry_policy FROM webhook_deliveries wd
+           JOIN webhooks w ON w.id = wd.webhook_id
+           WHERE wd.id=$1 AND wd.dead_lettered=true`,
+          [deliveryId],
+        );
+        return result.rows;
+      });
+      if (!dl) return reply.code(404).send({ success: false, error: 'Dead-letter entry not found' });
+
+      const retryPolicy = (dl.retry_policy as any) ?? { maxRetries: 3, backoffMs: 1000 };
+
+      // Reset the existing row rather than inserting a duplicate
+      await db.query(
+        `UPDATE webhook_deliveries
+         SET attempts=0, succeeded=false, dead_lettered=false,
+             last_error=NULL, next_attempt_at=NOW(), updated_at=NOW()
+         WHERE id=$1`,
+        [deliveryId],
+      );
+
+      return reply.send({ success: true, message: 'Delivery re-enqueued', deliveryId });
     });
   };
-}
-
-async function dispatchWebhook(
-  webhookId: string,
-  event: string,
-  payload: Record<string, unknown>,
-  secret: string,
-  url: string,
-  db: DatabaseClient,
-): Promise<void> {
-  const body = JSON.stringify({ event, payload, timestamp: new Date().toISOString() });
-  const signature = crypto.createHmac('sha256', secret).update(body).digest('hex');
-
-  let statusCode: number | undefined;
-  let response: string | undefined;
-  let succeeded = false;
-
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-CRM-Signature': `sha256=${signature}`,
-        'X-CRM-Event': event,
-      },
-      body,
-      signal: AbortSignal.timeout(10_000),
-    });
-    statusCode = res.status;
-    response = await res.text().catch(() => '');
-    succeeded = res.ok;
-  } catch (err: any) {
-    response = err.message;
-  }
-
-  await db.query(
-    `INSERT INTO webhook_deliveries (webhook_id, tenant_id, event, payload, status_code, response, attempts, succeeded)
-     SELECT id, tenant_id, $2, $3::jsonb, $4, $5, 1, $6 FROM webhooks WHERE id = $1`,
-    [webhookId, event, JSON.stringify(payload), statusCode, response, succeeded],
-  );
 }

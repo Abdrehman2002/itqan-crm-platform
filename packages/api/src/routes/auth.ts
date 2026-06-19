@@ -146,6 +146,8 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
       const token   = await reply.jwtSign({
         sub: user.id, tenantId: tenant.id, role: user.role, plan: tenant.plan,
         department: user.department ?? null,
+        department_type: user.department_type ?? null,
+        manager_id: user.manager_id ?? null,
         sector:     body.sector,
         jti:        regJti,
       });
@@ -261,6 +263,8 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
       const token = await reply.jwtSign({
         sub: user.id, tenantId: tenant.id, role: user.role, plan: tenant.plan,
         department: user.department ?? null,
+        department_type: user.department_type ?? null,
+        manager_id: user.manager_id ?? null,
         sector:     tenant.sector ?? 'other',
         permissions: effectivePermissions,
         jti,
