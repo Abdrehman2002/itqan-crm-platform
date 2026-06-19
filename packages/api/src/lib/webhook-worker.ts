@@ -65,16 +65,19 @@ export async function enqueueWebhookDelivery(
 ): Promise<string> {
   const { webhookId, tenantId, event, payload, maxRetries, backoffMs } = opts;
 
-  const { rows } = await db.query(
-    `INSERT INTO webhook_deliveries
-       (webhook_id, tenant_id, event, payload, attempts, succeeded,
-        max_retries, backoff_ms, next_attempt_at, dead_lettered)
-     VALUES ($1,$2,$3,$4::jsonb,0,false,$5,$6,NOW(),false)
-     RETURNING id`,
-    [webhookId, tenantId, event, JSON.stringify(payload), maxRetries, backoffMs],
-  );
+  const rows = await db.withSuperAdmin(async (client) => {
+    const r = await client.query(
+      `INSERT INTO webhook_deliveries
+         (webhook_id, tenant_id, event, payload, attempts, succeeded,
+          max_retries, backoff_ms, next_attempt_at, dead_lettered)
+       VALUES ($1,$2,$3,$4::jsonb,0,false,$5,$6,NOW(),false)
+       RETURNING id`,
+      [webhookId, tenantId, event, JSON.stringify(payload), maxRetries, backoffMs],
+    );
+    return r.rows;
+  });
 
-  return rows[0].id as string;
+  return (rows[0] as any).id as string;
 }
 
 // ── Internal ──────────────────────────────────────────────────────────────────
@@ -82,23 +85,26 @@ export async function enqueueWebhookDelivery(
 async function processBatch(db: DatabaseClient): Promise<void> {
   // Claim up to BATCH_SIZE rows that are due for delivery using a CTE with
   // FOR UPDATE SKIP LOCKED — safe for concurrent workers (future horizontal scaling).
-  const { rows: pending } = await db.query(
-    `WITH claimed AS (
-       SELECT wd.id, wd.webhook_id, wd.tenant_id, wd.event, wd.payload,
-              wd.attempts, wd.max_retries, wd.backoff_ms,
-              w.url, w.secret, w.headers
-       FROM webhook_deliveries wd
-       JOIN webhooks w ON w.id = wd.webhook_id
-       WHERE wd.succeeded = false
-         AND wd.dead_lettered = false
-         AND wd.next_attempt_at <= NOW()
-       ORDER BY wd.next_attempt_at
-       LIMIT $1
-       FOR UPDATE OF wd SKIP LOCKED
-     )
-     SELECT * FROM claimed`,
-    [BATCH_SIZE],
-  );
+  const pending = await db.withSuperAdmin(async (client) => {
+    const r = await client.query(
+      `WITH claimed AS (
+         SELECT wd.id, wd.webhook_id, wd.tenant_id, wd.event, wd.payload,
+                wd.attempts, wd.max_retries, wd.backoff_ms,
+                w.url, w.secret, w.headers
+         FROM webhook_deliveries wd
+         JOIN webhooks w ON w.id = wd.webhook_id
+         WHERE wd.succeeded = false
+           AND wd.dead_lettered = false
+           AND wd.next_attempt_at <= NOW()
+         ORDER BY wd.next_attempt_at
+         LIMIT $1
+         FOR UPDATE OF wd SKIP LOCKED
+       )
+       SELECT * FROM claimed`,
+      [BATCH_SIZE],
+    );
+    return r.rows;
+  });
 
   if (pending.length === 0) return;
 
