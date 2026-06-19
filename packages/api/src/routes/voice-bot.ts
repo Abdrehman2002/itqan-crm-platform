@@ -303,21 +303,6 @@ async function createTicketFromBotCall(
     ));
     const ticketNumber = `TKT-${String(Number(next_val) - 1).padStart(5, '0')}`;
 
-    const [queueRow] = await db.withSuperAdmin(async (c) => {
-      if (config?.default_queue_id) {
-        const r = await c.query(
-          `SELECT id FROM ticket_queues WHERE id = $1 AND tenant_id = $2`,
-          [config.default_queue_id, tenantId],
-        );
-        if (r.rows.length) return r.rows;
-      }
-      const r = await c.query(
-        `SELECT id FROM ticket_queues WHERE tenant_id = $1 AND is_default = true LIMIT 1`,
-        [tenantId],
-      );
-      return r.rows;
-    });
-
     const [slaRow] = await db.withSuperAdmin(async (c) => {
       const r = await c.query(
         `SELECT id FROM sla_policies WHERE tenant_id = $1 AND priority = $2 AND is_active = true LIMIT 1`,
@@ -339,9 +324,45 @@ async function createTicketFromBotCall(
       }
     }
 
-    // Use queue from IVR menu for this ticket type if configured
+    // Map ticket_type → department_type so we can pick the matching dept queue.
+    const TICKET_TYPE_TO_DEPT: Record<string, string> = {
+      complaint: 'complaint',
+      sales:     'sales',
+      inquiry:   'support',
+      support:   'support',
+    };
+    const targetDept = TICKET_TYPE_TO_DEPT[ticketType] ?? null;
+
+    // Queue selection priority:
+    //  1) Dept-specific queue matching the inferred ticket type (migration 015 auto-creates these)
+    //  2) IVR menu's mapped queue for this type
+    //  3) voice_bot_config.default_queue_id
+    //  4) tenant's is_default queue
+    const [queueRow] = await db.withSuperAdmin(async (c) => {
+      if (targetDept) {
+        const r = await c.query(
+          `SELECT id FROM ticket_queues WHERE tenant_id = $1 AND department_type = $2 LIMIT 1`,
+          [tenantId, targetDept],
+        );
+        if (r.rows.length) return r.rows;
+      }
+      if (config?.default_queue_id) {
+        const r = await c.query(
+          `SELECT id FROM ticket_queues WHERE id = $1 AND tenant_id = $2`,
+          [config.default_queue_id, tenantId],
+        );
+        if (r.rows.length) return r.rows;
+      }
+      const r = await c.query(
+        `SELECT id FROM ticket_queues WHERE tenant_id = $1 AND is_default = true LIMIT 1`,
+        [tenantId],
+      );
+      return r.rows;
+    });
+
+    // IVR menu override (legacy — kept for backward compat)
     const ivrOption = ivrMenu.find((m: any) => m.ticketType === ticketType || m.intent === ticketType);
-    const resolvedQueueId = ivrOption?.queueId ?? queueRow?.id ?? null;
+    const resolvedQueueId = queueRow?.id ?? ivrOption?.queueId ?? null;
 
     const [ticket] = await db.withSuperAdmin(async (c) => {
       const r = await c.query(
