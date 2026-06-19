@@ -264,14 +264,41 @@ export function settingsRoutes(db: DatabaseClient) {
     });
 
     // List team members (super_admin excluded — internal platform role)
-    fastify.get('/team', { preHandler: requireRole('super_admin', 'tenant_admin', 'manager') }, async (req, reply) => {
+    // Returns presence (is_online / is_recently_active) + hierarchy info (manager_id, manager_name).
+    // Manager/line_manager only see users in their own department + tenant_admins.
+    fastify.get('/team', { preHandler: requireRole('super_admin', 'tenant_admin', 'manager', 'line_manager') }, async (req, reply) => {
+      const role = (req.user as any).role as string;
+      const userId = (req.user as any).sub as string;
+      const deptFilter = (req.user as any).department_type as string | null;
+
+      const params: unknown[] = [req.tenant.id];
+      let where = `tenant_id = $1 AND role != 'super_admin'`;
+      if ((role === 'manager' || role === 'line_manager') && deptFilter) {
+        params.push(deptFilter);
+        where += ` AND (department_type = $${params.length} OR role = 'tenant_admin')`;
+      }
+
       const members = await db.withTenant(req.tenant.id, async (client) => {
-        const result = await client.query(
-          `SELECT id, name, email, role, permissions, is_active, created_at, last_login_at
-           FROM users WHERE role != 'super_admin' ORDER BY name ASC`,
+        const r = await client.query(
+          `SELECT u.id, u.email, u.name, u.role, u.department, u.department_type,
+                  u.permissions, u.is_active, u.manager_id, u.max_direct_reports, u.avatar,
+                  u.created_at, u.last_login_at, u.last_active_at,
+                  (u.last_active_at IS NOT NULL AND u.last_active_at > NOW() - INTERVAL '90 seconds') AS is_online,
+                  (u.last_active_at IS NOT NULL AND u.last_active_at > NOW() - INTERVAL '10 minutes') AS is_recently_active,
+                  m.name AS manager_name
+           FROM users u
+           LEFT JOIN users m ON m.id = u.manager_id
+           WHERE ${where}
+           ORDER BY u.role, u.name`,
+          params,
         );
-        return result.rows;
+        return r.rows;
       });
+
+      // Agents only see themselves
+      if (role === 'agent') {
+        return reply.send({ success: true, data: members.filter(u => u.id === userId) });
+      }
       return reply.send({ success: true, data: members });
     });
 
@@ -816,46 +843,5 @@ export function settingsRoutes(db: DatabaseClient) {
       });
     });
 
-    // GET /settings/team — list users with is_online + manager info
-    // Replaces (or augments) any existing team list with presence + hierarchy info.
-    fastify.get('/team', { preHandler: requireRole('super_admin', 'tenant_admin', 'manager', 'line_manager') }, async (req, reply) => {
-      const role = (req.user as any).role as string;
-      const userId = (req.user as any).sub as string;
-      const deptFilter = (req.user as any).department_type as string | null;
-
-      // Build SQL with optional department filter for managers
-      const params: unknown[] = [req.tenant.id];
-      let where = 'tenant_id = $1';
-      if (role === 'manager' || role === 'line_manager') {
-        // Only show people in same department + tenant_admin
-        if (deptFilter) {
-          params.push(deptFilter);
-          where += ` AND (department_type = $${params.length} OR role IN ('tenant_admin'))`;
-        }
-      }
-
-      const team = await db.withTenant(req.tenant.id, async (client) => {
-        const r = await client.query(
-          `SELECT u.id, u.email, u.name, u.role, u.department, u.department_type,
-                  u.is_active, u.manager_id, u.max_direct_reports, u.avatar,
-                  (u.last_active_at IS NOT NULL AND u.last_active_at > NOW() - INTERVAL '90 seconds') AS is_online,
-                  (u.last_active_at IS NOT NULL AND u.last_active_at > NOW() - INTERVAL '10 minutes') AS is_recently_active,
-                  u.last_active_at, u.last_login_at,
-                  m.name AS manager_name
-           FROM users u
-           LEFT JOIN users m ON m.id = u.manager_id
-           WHERE ${where}
-           ORDER BY u.role, u.name`,
-          params,
-        );
-        return r.rows;
-      });
-
-      // Agents only see themselves
-      if (role === 'agent') {
-        return reply.send({ success: true, data: team.filter(u => u.id === userId) });
-      }
-      return reply.send({ success: true, data: team });
-    });
   };
 }
