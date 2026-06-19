@@ -1778,6 +1778,108 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
 
       return reply.code(201).send({ success: true, data: comment });
     });
+
+    // ── AGENT DASHBOARD — personal ticket counts + TAT health ──────────
+    fastify.get('/dashboard/agent', { preHandler: requireScope('tickets:read') }, async (req, reply) => {
+      const tenantId = req.tenant.id;
+      const userId   = (req.query as any).user_id ?? req.user.sub;
+
+      const { rows } = await db.withTenant(tenantId, (client) =>
+        client.query(
+          `SELECT
+             COUNT(*) FILTER (WHERE status = 'assigned')                                              AS assigned,
+             COUNT(*) FILTER (WHERE status = 'accepted' OR accepted_at IS NOT NULL
+                               AND status NOT IN ('resolved','closed'))                               AS accepted,
+             COUNT(*) FILTER (WHERE status IN ('pending','in_progress'))                              AS pending,
+             COUNT(*) FILTER (WHERE status = 'resolved')                                              AS resolved,
+             COUNT(*) FILTER (WHERE sla_due_at IS NOT NULL AND sla_due_at > NOW()
+                               AND status NOT IN ('resolved','closed'))                               AS within_tat,
+             COUNT(*) FILTER (WHERE sla_due_at IS NOT NULL
+                               AND sla_due_at > NOW()
+                               AND sla_due_at <= NOW() + INTERVAL '2 hours'
+                               AND status NOT IN ('resolved','closed'))                               AS approaching_tat,
+             COUNT(*) FILTER (WHERE sla_due_at IS NOT NULL AND sla_due_at < NOW()
+                               AND status NOT IN ('resolved','closed'))                               AS breached_tat
+           FROM tickets
+           WHERE tenant_id = $1 AND assignee_id = $2`,
+          [tenantId, userId]
+        )
+      );
+
+      return reply.send({ success: true, data: rows[0] });
+    });
+
+    // ── MANAGER ROLLUP — recursive team summary down the manager_id chain ──
+    fastify.get('/dashboard/team', { preHandler: requireScope('tickets:read') }, async (req, reply) => {
+      const tenantId  = req.tenant.id;
+      const managerId = (req.query as any).manager_id ?? req.user.sub;
+
+      const { rows: [totals] } = await db.withTenant(tenantId, (client) =>
+        client.query(
+          `WITH RECURSIVE team AS (
+             SELECT id FROM users WHERE tenant_id = $1 AND id = $2
+             UNION ALL
+             SELECT u.id FROM users u INNER JOIN team t ON u.manager_id = t.id
+             WHERE u.tenant_id = $1
+           )
+           SELECT
+             COUNT(*) FILTER (WHERE t.status = 'assigned')                                           AS assigned,
+             COUNT(*) FILTER (WHERE t.status = 'accepted' OR t.accepted_at IS NOT NULL
+                               AND t.status NOT IN ('resolved','closed'))                             AS accepted,
+             COUNT(*) FILTER (WHERE t.status IN ('pending','in_progress'))                           AS pending,
+             COUNT(*) FILTER (WHERE t.status = 'resolved')                                           AS resolved,
+             COUNT(*) FILTER (WHERE t.sla_due_at IS NOT NULL AND t.sla_due_at > NOW()
+                               AND t.status NOT IN ('resolved','closed'))                             AS within_tat,
+             COUNT(*) FILTER (WHERE t.sla_due_at IS NOT NULL
+                               AND t.sla_due_at > NOW()
+                               AND t.sla_due_at <= NOW() + INTERVAL '2 hours'
+                               AND t.status NOT IN ('resolved','closed'))                             AS approaching_tat,
+             COUNT(*) FILTER (WHERE t.sla_due_at IS NOT NULL AND t.sla_due_at < NOW()
+                               AND t.status NOT IN ('resolved','closed'))                             AS breached_tat
+           FROM tickets t
+           WHERE t.tenant_id = $1 AND t.assignee_id IN (SELECT id FROM team)`,
+          [tenantId, managerId]
+        )
+      );
+
+      const { rows: agents } = await db.withTenant(tenantId, (client) =>
+        client.query(
+          `SELECT
+             u.id, u.name, u.email, u.department, u.department_type,
+             COUNT(t.id) FILTER (WHERE t.status = 'assigned')                                        AS assigned,
+             COUNT(t.id) FILTER (WHERE t.status = 'accepted' OR t.accepted_at IS NOT NULL
+                                  AND t.status NOT IN ('resolved','closed'))                          AS accepted,
+             COUNT(t.id) FILTER (WHERE t.status IN ('pending','in_progress'))                        AS pending,
+             COUNT(t.id) FILTER (WHERE t.status = 'resolved')                                        AS resolved,
+             COUNT(t.id) FILTER (WHERE t.sla_due_at IS NOT NULL AND t.sla_due_at > NOW()
+                                  AND t.status NOT IN ('resolved','closed'))                          AS within_tat,
+             COUNT(t.id) FILTER (WHERE t.sla_due_at IS NOT NULL
+                                  AND t.sla_due_at > NOW()
+                                  AND t.sla_due_at <= NOW() + INTERVAL '2 hours'
+                                  AND t.status NOT IN ('resolved','closed'))                          AS approaching_tat,
+             COUNT(t.id) FILTER (WHERE t.sla_due_at IS NOT NULL AND t.sla_due_at < NOW()
+                                  AND t.status NOT IN ('resolved','closed'))                          AS breached_tat
+           FROM users u
+           LEFT JOIN tickets t ON t.assignee_id = u.id AND t.tenant_id = $1
+           WHERE u.tenant_id = $1 AND u.manager_id = $2
+           GROUP BY u.id, u.name, u.email, u.department, u.department_type
+           ORDER BY u.name`,
+          [tenantId, managerId]
+        )
+      );
+
+      const { rows: [{ direct_reports }] } = await db.withTenant(tenantId, (client) =>
+        client.query(
+          `SELECT COUNT(*) AS direct_reports FROM users WHERE tenant_id = $1 AND manager_id = $2`,
+          [tenantId, managerId]
+        )
+      );
+
+      return reply.send({
+        success: true,
+        data: { totals, agents, direct_reports: Number(direct_reports) },
+      });
+    });
   };
 }
 
