@@ -1138,12 +1138,13 @@ export function Dashboard() {
   });
 
   const isTenantAdmin = role === 'tenant_admin';
-  const isManager     = ['manager','super_admin'].includes(role);
+  const isManager     = ['manager','line_manager','super_admin'].includes(role);
 
   const roleLabel = role === 'tenant_admin' ? 'Admin View'
-    : role === 'manager'     ? 'Manager View'
-    : role === 'super_admin' ? 'Super Admin View'
-    : role === 'agent'       ? 'Agent View'
+    : role === 'manager'      ? 'Manager View'
+    : role === 'line_manager' ? 'Line Manager View'
+    : role === 'super_admin'  ? 'Super Admin View'
+    : role === 'agent'        ? 'Agent View'
     : 'Viewer View';
 
   // Quick action bar varies by role
