@@ -652,7 +652,7 @@ function TicketPanel({ ticketId, onClose }: { ticketId: string; onClose: () => v
   const { data: t, isLoading } = useQuery<TicketDetail>({
     queryKey: ['ticket', ticketId],
     queryFn: async () => (await api.get(`/api/v1/tickets/${ticketId}`)).data.data,
-    refetchInterval: 20_000,
+    refetchInterval: 10_000,   // 10s — react to peer accepts/resolves quickly
   });
 
   const allComments = t?.comments ?? [];
@@ -1074,7 +1074,7 @@ export function Tickets() {
   const { data: statsData } = useQuery<Stats>({
     queryKey: ['ticket-stats'],
     queryFn: async () => (await api.get('/api/v1/tickets/stats')).data.data,
-    refetchInterval: 30_000,
+    refetchInterval: 10_000,   // 10s — keeps summary cards in sync with the list
   });
   const { data: queuesData } = useQuery<Queue[]>({
     queryKey: ['ticket-queues'],
@@ -1086,7 +1086,7 @@ export function Tickets() {
       const qs = new URLSearchParams(params).toString();
       return (await api.get(`/api/v1/tickets?${qs}`)).data;
     },
-    refetchInterval: 20_000,
+    refetchInterval: 10_000,   // 10s — tickets accepted by peer agents drop out within 10s
   });
 
   const tickets = ticketsData?.data ?? [];
