@@ -173,13 +173,31 @@ function AgentDashboard({ d, department, deptType }: { d: any; department: strin
     { name: 'Resolved ✓', value: Number(tickets.resolved_today ?? 0), fill: C.green },
   ];
 
+  // Bot stats now exposed to all roles — show them on the agent dashboard so
+  // the call activity is clearly split between AI Voice Bot vs Human Agent
+  // (Munir feedback: was previously lumped together, causing confusion).
+  const bot = d.botStats ?? {};
+  const botCallsToday = Number(bot.calls_today    ?? 0);
+  const botTicketsCreated = Number(bot.tickets_created ?? 0);
+  const botAvgDuration    = Number(bot.avg_duration_secs ?? 0);
+  const botUrgent         = Number(bot.urgent ?? 0) + Number(bot.negative ?? 0);
+
   return (
     <div className="space-y-5">
 
-      {/* My Calls */}
-      <SectionHeader icon={Phone} label="My Calls — Today (Calls I Received)" />
+      {/* ── AI Voice Bot — Today (dept-wide bot activity) ── */}
+      <SectionHeader icon={Phone} label={`AI Voice Bot — Today (${deptLabel ?? 'My Dept'})`} accent={C.cyan} />
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-        <StatCard label="Calls Received"  value={callsToday}       sub={`${completedToday} answered`}           icon={PhoneCall}   accent={C.cyan}  trend="up" />
+        <StatCard label="Bot Calls Today"      value={botCallsToday}          sub="Handled by AI"                icon={PhoneCall}   accent={C.cyan}   />
+        <StatCard label="Tickets Auto-Created" value={botTicketsCreated}       sub="Bot → CRM"                    icon={Ticket}      accent={C.green}  />
+        <StatCard label="Avg Bot Call Time"    value={fmtSecs(botAvgDuration)} sub="per completed bot call"       icon={Timer}       accent={C.green}  />
+        <StatCard label="Urgent / Negative"    value={botUrgent}               sub="Flagged for human follow-up"  icon={PhoneMissed} accent={botUrgent > 0 ? C.orange : C.green} trend={botUrgent > 0 ? 'warn' : undefined} />
+      </div>
+
+      {/* ── My Human Calls — Today (only what I personally handled) ── */}
+      <SectionHeader icon={Phone} label="My Human Calls — Today (Calls I Personally Handled)" accent={C.green} />
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <StatCard label="Calls I Handled" value={callsToday}       sub={`${completedToday} answered`}           icon={PhoneCall}   accent={C.cyan}  trend="up" />
         <StatCard label="Avg Talk Time"   value={fmtSecs(calls.avg_duration_today)} sub="per answered call"     icon={Timer}       accent={C.green} />
         <StatCard label="In Queue Now"    value={inQueue}          sub={inQueue > 0 ? 'Waiting' : 'Queue clear'} icon={Headphones}  accent={inQueue > 0 ? C.orange : C.green} trend={inQueue > 0 ? 'warn' : undefined} />
         <StatCard label="Drop Rate"       value={`${dropRate}%`}   sub={`${droppedToday} unanswered`}           icon={PhoneMissed} accent={dropRate > 20 ? C.red : C.gold}   trend={dropRate > 20 ? 'warn' : undefined} />

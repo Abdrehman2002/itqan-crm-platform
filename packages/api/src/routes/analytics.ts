@@ -490,11 +490,15 @@ export function analyticsRoutes(db: DatabaseClient) {
       });
 
       // ════════════════════════════════════════════════════════════════════
-      // MANAGER-ONLY BLOCKS
+      // BOT STATS — exposed to ALL roles (not just managers).
+      // Agents need to see what the AI voice bot did in their department so
+      // the dashboard can show a clear "Voicebot vs Human Agent" split
+      // (per product feedback — was lumped together before).
+      // The deptBotFilter already scopes by department for non-admin roles.
       // ════════════════════════════════════════════════════════════════════
 
       // ── Bot stats (voice_bot_calls) ───────────────────────────────────────
-      const botStats = isManager ? await db.withTenant(tenantId, async (client) => {
+      const botStats = await db.withTenant(tenantId, async (client) => {
         const [botSql, botParams] = resolveDept(`
           SELECT
             COUNT(*)                                                              AS total_calls,
@@ -535,7 +539,7 @@ export function analyticsRoutes(db: DatabaseClient) {
         `);
 
         return { ...r.rows[0], categories: cats.rows, config: cfg.rows[0] ?? null };
-      }) : null;
+      });
 
       // ── Human agent stats (hierarchy-scoped for managers) ────────────────
       const humanStats = isManager ? await db.withTenant(tenantId, async (client) => {
