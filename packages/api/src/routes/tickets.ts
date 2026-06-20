@@ -909,20 +909,35 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
 
       // ── Department-isolation rules ─────────────────────────────────────
       // super_admin / tenant_admin → see all tickets in tenant
-      // manager → only tickets in queues for their department, OR assigned to them, OR created by them
-      // line_manager → same as manager
-      // agent → only tickets assigned to them, OR in queues for their department
-      // viewer → only tickets assigned to them
+      // manager / line_manager     → tickets owned by anyone in their reporting
+      //                              subtree (recursive CTE down manager_id) OR
+      //                              UNASSIGNED tickets in their dept queue
+      // agent / viewer             → tickets assigned to ME OR UNASSIGNED in my
+      //                              dept queue (so I see only what's mine + what
+      //                              I can pick up — once another agent accepts a
+      //                              ticket, it disappears from my view since it
+      //                              has an assignee_id != me)
       if (role === 'agent' || role === 'viewer') {
-        where.push(`(t.assignee_id = $${idx} OR (t.queue_id IN
-          (SELECT id FROM ticket_queues WHERE department_type = $${idx + 1})))`);
+        where.push(`(t.assignee_id = $${idx}
+                    OR (t.assignee_id IS NULL AND t.queue_id IN (
+                        SELECT id FROM ticket_queues WHERE department_type = $${idx + 1})))`);
         params.push(userId, deptType ?? null);
         idx += 2;
-      } else if ((role === 'manager' || role === 'line_manager') && deptType) {
-        where.push(`(t.queue_id IN (SELECT id FROM ticket_queues WHERE department_type = $${idx})
-                    OR t.assignee_id = $${idx + 1}
-                    OR t.created_by = $${idx + 1})`);
-        params.push(deptType, userId);
+      } else if (role === 'manager' || role === 'line_manager') {
+        // Manager scope: my whole reporting subtree's tickets + unassigned in my dept queue
+        where.push(`(
+          t.assignee_id IN (
+            WITH RECURSIVE h AS (
+              SELECT id FROM users WHERE id = $${idx}
+              UNION ALL
+              SELECT u.id FROM users u INNER JOIN h ON u.manager_id = h.id
+            ) SELECT id FROM h
+          )
+          OR (t.assignee_id IS NULL AND t.queue_id IN (
+            SELECT id FROM ticket_queues WHERE department_type = $${idx + 1}))
+          OR t.created_by = $${idx}
+        )`);
+        params.push(userId, deptType ?? null);
         idx += 2;
       }
 
