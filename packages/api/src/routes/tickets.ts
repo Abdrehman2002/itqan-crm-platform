@@ -430,6 +430,52 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
 
   return async function (fastify: FastifyInstance) {
 
+    /**
+     * Guard: an agent/viewer can only mutate a ticket they are assigned to.
+     * Managers/line_managers can act on anyone in their reporting subtree.
+     * Tenant/super admins can act on anything.
+     *
+     * Returns the ticket row if allowed; replies 403 + returns null otherwise.
+     * Replies 404 + returns null if ticket doesn't exist.
+     */
+    async function assertCanMutate(req: any, reply: any, ticketId: string): Promise<any | null> {
+      const tenantId = req.tenant.id;
+      const userId   = req.user.sub as string;
+      const role     = req.user.role as string;
+
+      const [t] = await db.withTenant(tenantId, async (c) =>
+        (await c.query(`SELECT id, assignee_id, status FROM tickets WHERE id = $1`, [ticketId])).rows);
+      if (!t) { reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Ticket not found' } }); return null; }
+
+      // Admins always allowed
+      if (role === 'super_admin' || role === 'tenant_admin') return t;
+
+      // Manager/line_manager: allowed if assignee is in their reporting subtree (or they are unassigned, or self)
+      if (role === 'manager' || role === 'line_manager') {
+        if (!t.assignee_id || t.assignee_id === userId) return t;
+        const [{ in_subtree }] = await db.withTenant(tenantId, async (c) =>
+          (await c.query(
+            `WITH RECURSIVE h AS (
+               SELECT id FROM users WHERE id = $1
+               UNION ALL
+               SELECT u.id FROM users u INNER JOIN h ON u.manager_id = h.id
+             )
+             SELECT EXISTS(SELECT 1 FROM h WHERE id = $2) AS in_subtree`,
+            [userId, t.assignee_id])).rows);
+        if (in_subtree) return t;
+        reply.code(403).send({ success: false, error: { code: 'FORBIDDEN', message: 'This ticket is owned by someone outside your team' } });
+        return null;
+      }
+
+      // Agent/viewer: must be the assignee
+      if (t.assignee_id === userId) return t;
+      reply.code(403).send({
+        success: false,
+        error: { code: 'NOT_ASSIGNEE', message: 'Only the agent who accepted this ticket can modify it' },
+      });
+      return null;
+    }
+
     // ── Stats (dashboard) ─────────────────────────────────────────────────
     fastify.get('/stats', { preHandler: requireScope('tickets:read') }, async (req, reply) => {
       const tenantId = req.tenant.id;
@@ -1077,6 +1123,7 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
     // ── Update ticket ─────────────────────────────────────────────────────
     fastify.patch('/:id', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const { id } = req.params as { id: string };
+      if (!(await assertCanMutate(req, reply, id))) return;
       const body  = UpdateTicketSchema.parse(req.body);
 
       const sets: string[] = ['updated_at = NOW()'];
@@ -1137,6 +1184,7 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
      */
     fastify.post('/:id/assign', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const { id } = req.params as { id: string };
+      if (!(await assertCanMutate(req, reply, id))) return;
       const body   = z.object({
         assigneeId: z.string().uuid(),
         note:       z.string().max(500).optional(),  // manager can add a note explaining the reassignment
@@ -1354,6 +1402,15 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
       });
 
       if (!existing) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Ticket not found' } });
+      // Already-claimed guard: if another agent has set themselves as assignee,
+      // block. Covers race conditions where two agents click Accept in the same
+      // 10s poll window and the loser's UI hasn't refreshed yet.
+      if (existing.assignee_id && existing.assignee_id !== userId) {
+        return reply.code(409).send({
+          success: false,
+          error: { code: 'ALREADY_CLAIMED', message: 'This ticket was just accepted by another agent' },
+        });
+      }
       if (existing.status === 'accepted' || existing.accepted_at) {
         return reply.code(409).send({ success: false, error: { code: 'ALREADY_ACCEPTED', message: 'Ticket already accepted' } });
       }
@@ -1391,6 +1448,7 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
     // ── Resolve ticket ────────────────────────────────────────────────────
     fastify.post('/:id/resolve', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const { id }   = req.params as { id: string };
+      if (!(await assertCanMutate(req, reply, id))) return;
       const tenantId = req.tenant.id;
       const { note } = z.object({ note: z.string().optional() }).parse(req.body ?? {});
 
@@ -1444,6 +1502,7 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
     // body: { steps: [{id, label, completed, completed_at}] }
     fastify.patch('/:id/milestones', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const { id }   = req.params as { id: string };
+      if (!(await assertCanMutate(req, reply, id))) return;
       const tenantId = req.tenant.id;
       const userId   = req.user.sub;
       const { steps } = req.body as { steps: Array<{ id: string; label: string; completed: boolean; completed_at?: string }> };
@@ -1500,6 +1559,7 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
     // ── Close ticket ──────────────────────────────────────────────────────
     fastify.post('/:id/close', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const { id }   = req.params as { id: string };
+      if (!(await assertCanMutate(req, reply, id))) return;
       const tenantId = req.tenant.id;
       const userId   = req.user.sub;
 
@@ -1579,6 +1639,7 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
     // ── RCA — Root Cause Analysis ─────────────────────────────────────────
     fastify.post('/:id/rca', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const { id }   = req.params as { id: string };
+      if (!(await assertCanMutate(req, reply, id))) return;
       const tenantId = req.tenant.id;
       const userId   = req.user.sub;
       const body     = RcaSchema.parse(req.body);
