@@ -225,17 +225,42 @@ export function OrgChart() {
                     </div>
                     {deptMeta && <span className={`text-xs px-1.5 py-0.5 rounded ${deptMeta.color}`}>{deptMeta.label}</span>}
                   </div>
-                  <div className="text-xs text-gray-500 mb-1">
+                  <div className="text-xs text-gray-500 mb-2">
                     {m.direct_reports} direct reports{capacity ? ` of ${capacity} max` : ''}
                   </div>
                   {pct !== null && (
-                    <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                    <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden mb-2">
                       <div
                         className={`h-full ${pct >= 100 ? 'bg-red-500' : pct >= 80 ? 'bg-amber-500' : 'bg-emerald-500'}`}
                         style={{ width: `${pct}%` }}
                       />
                     </div>
                   )}
+                  {/* Quick-contact buttons — Email / WhatsApp / Call (per product feedback) */}
+                  <div className="flex gap-1.5 pt-2 border-t border-gray-100">
+                    {(m as any).email && (
+                      <a href={`mailto:${(m as any).email}`}
+                         title={`Email ${m.name}`}
+                         className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg bg-cyan-50 hover:bg-cyan-100 text-cyan-700 text-[11px] font-medium transition-colors">
+                        ✉️ Email
+                      </a>
+                    )}
+                    {(m as any).whatsapp_number && (
+                      <a href={`https://wa.me/${((m as any).whatsapp_number ?? '').replace(/[^\d]/g,'')}`}
+                         target="_blank" rel="noreferrer"
+                         title={`WhatsApp ${m.name}`}
+                         className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-[11px] font-medium transition-colors">
+                        💬 WhatsApp
+                      </a>
+                    )}
+                    {(m as any).phone && (
+                      <a href={`tel:${(m as any).phone}`}
+                         title={`Call ${m.name}`}
+                         className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg bg-purple-50 hover:bg-purple-100 text-purple-700 text-[11px] font-medium transition-colors">
+                        📞 Call
+                      </a>
+                    )}
+                  </div>
                 </div>
               );
             })}

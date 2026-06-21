@@ -197,26 +197,26 @@ function AgentDashboard({ d, department, deptType }: { d: any; department: strin
   const botPositive       = Number(bot.positive ?? 0);
   const botUntriaged      = Number(bot.untriaged ?? 0);
 
-  const [activeTab, setActiveTab] = useState<'manual' | 'bot'>('manual');
+  // Default tab is 'bot' — bot-generated tickets are the primary view
+  // per product feedback. Manual is secondary.
+  const [activeTab, setActiveTab] = useState<'manual' | 'bot'>('bot');
 
   return (
     <div className="space-y-5">
 
-      {/* Tab switcher — Tickets split by ORIGIN.
-            Manual = tickets humans created (channel != voice_bot).
-            Bot    = tickets the AI voice bot generated (channel = voice_bot) — handled by team. */}
+      {/* Tab switcher — Tickets split by ORIGIN. Bot first per priority. */}
       <div className="flex gap-1 p-1 bg-gray-100 rounded-xl w-fit">
-        <button onClick={() => setActiveTab('manual')}
-          className={`px-4 py-1.5 text-sm font-semibold rounded-lg transition-all ${
-            activeTab === 'manual' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-          }`}>
-          🧑 Manually Created ({ts.manual_total ?? 0})
-        </button>
         <button onClick={() => setActiveTab('bot')}
           className={`px-4 py-1.5 text-sm font-semibold rounded-lg transition-all ${
             activeTab === 'bot' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
           }`}>
           🤖 Bot-Generated ({ts.bot_total ?? 0})
+        </button>
+        <button onClick={() => setActiveTab('manual')}
+          className={`px-4 py-1.5 text-sm font-semibold rounded-lg transition-all ${
+            activeTab === 'manual' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+          }`}>
+          🧑 Manually Created ({ts.manual_total ?? 0})
         </button>
       </div>
 
@@ -672,30 +672,51 @@ function ManagerDashboard({ d, department, deptType }: { d: any; department: str
     { name: 'Complaint',  value: Number(hTickets.complaint_tickets ?? 0), color: C.orange },
   ].filter(x => x.value > 0);
 
-  const [activeTab, setActiveTab] = useState<'manual' | 'bot'>('manual');
+  // Default tab is 'bot' (per product feedback — bot-generated is shown first,
+  // manual is secondary). Bot tab carries all team operational widgets
+  // (TAT rollup, team breakdown, human agents, leaderboard, recent tickets)
+  // because those mostly reflect bot tickets accepted by the team.
+  const [activeTab, setActiveTab] = useState<'manual' | 'bot'>('bot');
 
   return (
     <div className="space-y-5">
 
-      {/* Tab switcher — Tickets split by ORIGIN.
-            Manual = tickets humans created (channel != voice_bot).
-            Bot    = tickets the AI voice bot generated (channel = voice_bot) — handled by team. */}
+      {/* Tab switcher — Tickets split by ORIGIN. Bot first per priority. */}
       <div className="flex gap-1 p-1 bg-gray-100 rounded-xl w-fit">
-        <button onClick={() => setActiveTab('manual')}
-          className={`px-4 py-1.5 text-sm font-semibold rounded-lg transition-all ${
-            activeTab === 'manual' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-          }`}>
-          🧑 Manually Created ({mts.manual_total ?? 0})
-        </button>
         <button onClick={() => setActiveTab('bot')}
           className={`px-4 py-1.5 text-sm font-semibold rounded-lg transition-all ${
             activeTab === 'bot' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
           }`}>
           🤖 Bot-Generated ({mts.bot_total ?? 0})
         </button>
+        <button onClick={() => setActiveTab('manual')}
+          className={`px-4 py-1.5 text-sm font-semibold rounded-lg transition-all ${
+            activeTab === 'manual' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+          }`}>
+          🧑 Manually Created ({mts.manual_total ?? 0})
+        </button>
       </div>
 
+      {/* Manual tab — minimal: ONLY manual ticket lifecycle counts.
+            No team breakdown, no leaderboard, no human agents section per
+            product feedback (those are about bot tickets accepted by team). */}
       {activeTab === 'manual' && (
+        <>
+          <SectionHeader icon={Ticket} label={`Manually-Created Tickets — ${deptLabel ?? 'My Dept'}`} accent={C.purple} />
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <StatCard label="Total (Manual)" value={mts.manual_total       ?? 0} sub={`${mts.manual_created_today ?? 0} created today`} icon={Ticket}       accent={C.purple} />
+            <StatCard label="Open"           value={mts.manual_open        ?? 0} sub="Awaiting accept"                                  icon={Inbox}        accent="#3b82f6"  trend={Number(mts.manual_open) > 5 ? 'warn' : undefined} />
+            <StatCard label="In Progress"    value={mts.manual_in_progress ?? 0} sub="Being worked on"                                  icon={Activity}     accent={C.gold}   />
+            <StatCard label="Resolved"       value={mts.manual_resolved    ?? 0} sub="Closed by team"                                   icon={CheckCircle2} accent={C.green}  />
+          </div>
+          <div className="bg-white rounded-xl border border-gray-100 p-5 text-sm text-gray-500 text-center">
+            Tickets created manually by agents in this department.
+            For team performance on bot-routed tickets, switch to the <strong>Bot-Generated</strong> tab.
+          </div>
+        </>
+      )}
+
+      {activeTab === 'bot' && (
         <>
       {/* ── Team TAT Rollup ────────────────────────────────── */}
       {teamData && (
@@ -777,9 +798,9 @@ function ManagerDashboard({ d, department, deptType }: { d: any; department: str
       </div>
       )}
 
-      {activeTab === 'manual' && (
+      {activeTab === 'bot' && (
         <>
-        {/* ── HUMAN AGENTS ──────────────────────────────────── */}
+        {/* ── HUMAN AGENTS handling bot tickets (per product feedback) ───── */}
         <div className="space-y-4">
           <div className="flex items-center gap-2">
             <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: `${C.cyan}18` }}>
