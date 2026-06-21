@@ -168,16 +168,36 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
       if (!tenantSlug && host.endsWith(`.${platformDomain}`)) {
         tenantSlug = host.replace(`.${platformDomain}`, '');
       }
-      if (!tenantSlug) {
-        return reply.code(400).send({ success: false, error: { code: 'TENANT_REQUIRED', message: 'Workspace slug required' } });
-      }
 
-      const [tenant] = await db.withSuperAdmin(async (client) => {
-        const result = await client.query('SELECT * FROM tenants WHERE slug = $1', [tenantSlug]);
-        return result.rows;
-      });
+      // Platform-level fallback: if no tenant slug supplied, this MAY be a
+      // super_admin (they're platform-scoped, not bound to any tenant). Look up
+      // the email globally and accept only if the matching active user is a
+      // super_admin. Any other role still requires the slug — protects tenant
+      // login from accidental cross-tenant matches.
+      let tenant: any;
+      if (!tenantSlug) {
+        const [maybeSuper] = await db.withSuperAdmin(async (client) => {
+          const r = await client.query(
+            `SELECT * FROM users WHERE email = $1 AND is_active = true AND role = 'super_admin' LIMIT 1`,
+            [body.email],
+          );
+          return r.rows;
+        });
+        if (!maybeSuper) {
+          return reply.code(400).send({ success: false, error: { code: 'TENANT_REQUIRED', message: 'Workspace slug required' } });
+        }
+        // Load the tenant the super_admin is anchored to (used only for JWT claims)
+        [tenant] = await db.withSuperAdmin(async (client) => {
+          const r = await client.query('SELECT * FROM tenants WHERE id = $1', [maybeSuper.tenant_id]);
+          return r.rows;
+        });
+      } else {
+        [tenant] = await db.withSuperAdmin(async (client) => {
+          const result = await client.query('SELECT * FROM tenants WHERE slug = $1', [tenantSlug]);
+          return result.rows;
+        });
+      }
       if (!tenant) {
-        // Use same error as invalid credentials to prevent tenant enumeration
         return reply.code(401).send({ success: false, error: { code: 'INVALID_CREDENTIALS', message: 'Invalid credentials' } });
       }
 
