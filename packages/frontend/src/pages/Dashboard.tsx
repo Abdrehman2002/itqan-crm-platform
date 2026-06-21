@@ -7,6 +7,7 @@
  * Tenant Admin → Users & Roles overview, Voice Bot health, Email health
  */
 
+import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import {
@@ -173,29 +174,61 @@ function AgentDashboard({ d, department, deptType }: { d: any; department: strin
     { name: 'Resolved ✓', value: Number(tickets.resolved_today ?? 0), fill: C.green },
   ];
 
-  // Bot stats now exposed to all roles — show them on the agent dashboard so
-  // the call activity is clearly split between AI Voice Bot vs Human Agent
-  // (Munir feedback: was previously lumped together, causing confusion).
+  // Bot stats now exposed to all roles. Two-tab layout: Voice Bot (AI handled)
+  // vs Manual / Human (what the agent personally did). Per Munir's request —
+  // keeps the two completely separate so it's clear what's bot work vs human work.
   const bot = d.botStats ?? {};
   const botCallsToday = Number(bot.calls_today    ?? 0);
   const botTicketsCreated = Number(bot.tickets_created ?? 0);
   const botAvgDuration    = Number(bot.avg_duration_secs ?? 0);
   const botUrgent         = Number(bot.urgent ?? 0) + Number(bot.negative ?? 0);
+  const botPositive       = Number(bot.positive ?? 0);
+  const botUntriaged      = Number(bot.untriaged ?? 0);
+
+  const [activeTab, setActiveTab] = useState<'manual' | 'bot'>('manual');
 
   return (
     <div className="space-y-5">
 
-      {/* ── AI Voice Bot — Today (dept-wide bot activity) ── */}
-      <SectionHeader icon={Phone} label={`AI Voice Bot — Today (${deptLabel ?? 'My Dept'})`} accent={C.cyan} />
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-        <StatCard label="Bot Calls Today"      value={botCallsToday}          sub="Handled by AI"                icon={PhoneCall}   accent={C.cyan}   />
-        <StatCard label="Tickets Auto-Created" value={botTicketsCreated}       sub="Bot → CRM"                    icon={Ticket}      accent={C.green}  />
-        <StatCard label="Avg Bot Call Time"    value={fmtSecs(botAvgDuration)} sub="per completed bot call"       icon={Timer}       accent={C.green}  />
-        <StatCard label="Urgent / Negative"    value={botUrgent}               sub="Flagged for human follow-up"  icon={PhoneMissed} accent={botUrgent > 0 ? C.orange : C.green} trend={botUrgent > 0 ? 'warn' : undefined} />
+      {/* Tab switcher — Manual (my work) vs Voice Bot (AI activity in my dept) */}
+      <div className="flex gap-1 p-1 bg-gray-100 rounded-xl w-fit">
+        <button onClick={() => setActiveTab('manual')}
+          className={`px-4 py-1.5 text-sm font-semibold rounded-lg transition-all ${
+            activeTab === 'manual' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+          }`}>
+          🧑 Manually Handled
+        </button>
+        <button onClick={() => setActiveTab('bot')}
+          className={`px-4 py-1.5 text-sm font-semibold rounded-lg transition-all ${
+            activeTab === 'bot' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+          }`}>
+          🤖 AI Voice Bot ({botCallsToday})
+        </button>
       </div>
 
+      {activeTab === 'bot' && (
+        <>
+          {/* ── AI Voice Bot — Today (dept-wide bot activity) ── */}
+          <SectionHeader icon={Phone} label={`AI Voice Bot — Today (${deptLabel ?? 'My Dept'})`} accent={C.cyan} />
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <StatCard label="Bot Calls Today"      value={botCallsToday}          sub="Handled by AI"                icon={PhoneCall}   accent={C.cyan}   />
+            <StatCard label="Tickets Auto-Created" value={botTicketsCreated}       sub="Bot → CRM"                    icon={Ticket}      accent={C.green}  />
+            <StatCard label="Avg Bot Call Time"    value={fmtSecs(botAvgDuration)} sub="per completed bot call"       icon={Timer}       accent={C.green}  />
+            <StatCard label="Urgent / Negative"    value={botUrgent}               sub="Flagged for human follow-up"  icon={PhoneMissed} accent={botUrgent > 0 ? C.orange : C.green} trend={botUrgent > 0 ? 'warn' : undefined} />
+          </div>
+          <SectionHeader icon={Phone} label="Bot Sentiment Mix" accent={C.green} />
+          <div className="grid grid-cols-3 gap-4">
+            <StatCard label="Positive" value={botPositive}  sub="Caller satisfied"          icon={CheckCircle2} accent={C.green}  />
+            <StatCard label="Untriaged"   value={botUntriaged} sub="No ticket yet — review"    icon={AlertTriangle}    accent={botUntriaged > 0 ? C.gold : C.green} trend={botUntriaged > 0 ? 'warn' : undefined} />
+            <StatCard label="Negative" value={Number(bot.negative ?? 0)} sub="Customer upset" icon={PhoneMissed} accent={C.red} />
+          </div>
+        </>
+      )}
+
+      {activeTab === 'manual' && (
+        <>
       {/* ── My Human Calls — Today (only what I personally handled) ── */}
-      <SectionHeader icon={Phone} label="My Human Calls — Today (Calls I Personally Handled)" accent={C.green} />
+      <SectionHeader icon={Phone} label="My Calls — Today (Calls I Personally Handled)" accent={C.green} />
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         <StatCard label="Calls I Handled" value={callsToday}       sub={`${completedToday} answered`}           icon={PhoneCall}   accent={C.cyan}  trend="up" />
         <StatCard label="Avg Talk Time"   value={fmtSecs(calls.avg_duration_today)} sub="per answered call"     icon={Timer}       accent={C.green} />
@@ -410,6 +443,8 @@ function AgentDashboard({ d, department, deptType }: { d: any; department: strin
           }
         </div>
       </div>
+        </>
+      )}
     </div>
   );
 }
@@ -603,9 +638,29 @@ function ManagerDashboard({ d, department, deptType }: { d: any; department: str
     { name: 'Complaint',  value: Number(hTickets.complaint_tickets ?? 0), color: C.orange },
   ].filter(x => x.value > 0);
 
+  const [activeTab, setActiveTab] = useState<'manual' | 'bot'>('manual');
+
   return (
     <div className="space-y-5">
 
+      {/* Tab switcher — Manual (team's human work) vs AI Voice Bot (dept-wide bot) */}
+      <div className="flex gap-1 p-1 bg-gray-100 rounded-xl w-fit">
+        <button onClick={() => setActiveTab('manual')}
+          className={`px-4 py-1.5 text-sm font-semibold rounded-lg transition-all ${
+            activeTab === 'manual' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+          }`}>
+          🧑 Manually Handled (Team)
+        </button>
+        <button onClick={() => setActiveTab('bot')}
+          className={`px-4 py-1.5 text-sm font-semibold rounded-lg transition-all ${
+            activeTab === 'bot' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+          }`}>
+          🤖 AI Voice Bot ({bot.calls_today ?? 0})
+        </button>
+      </div>
+
+      {activeTab === 'manual' && (
+        <>
       {/* ── Team TAT Rollup ────────────────────────────────── */}
       {teamData && (
         <>
@@ -613,9 +668,11 @@ function ManagerDashboard({ d, department, deptType }: { d: any; department: str
           <TeamBreakdownTable agents={teamData.agents ?? []} />
         </>
       )}
+        </>
+      )}
 
-      {/* ── Two-column panels: Bot | Human ─────────────────── */}
-      <div className="grid grid-cols-2 gap-5">
+      {activeTab === 'bot' && (
+      <div className="grid grid-cols-1 gap-5">
 
         {/* ── AI VOICE BOT ──────────────────────────────────── */}
         <div className="space-y-4">
@@ -679,7 +736,11 @@ function ManagerDashboard({ d, department, deptType }: { d: any; department: str
             </div>
           )}
         </div>
+      </div>
+      )}
 
+      {activeTab === 'manual' && (
+        <>
         {/* ── HUMAN AGENTS ──────────────────────────────────── */}
         <div className="space-y-4">
           <div className="flex items-center gap-2">
@@ -763,7 +824,6 @@ function ManagerDashboard({ d, department, deptType }: { d: any; department: str
             </div>
           </div>
         </div>
-      </div>
 
       {/* ── Agent Leaderboard (full width) ─────────────────── */}
       {agents.length > 0 && (
@@ -858,6 +918,8 @@ function ManagerDashboard({ d, department, deptType }: { d: any; department: str
             ))}
           </div>
         </div>
+      )}
+        </>
       )}
     </div>
   );
