@@ -169,9 +169,12 @@ function Sidebar() {
   // the regular dynamic sidebar would be polluted with cached/hardcoded items.
   if (isSuperAdmin) return <SuperAdminSidebar onLogout={logout} userName={user?.name ?? user?.email ?? 'Super Admin'} />;
 
-  // Fetch active modules from the API — drives the sidebar dynamically
+  // Fetch active modules from the API — drives the sidebar dynamically.
+  // Key includes user.id + role so a role change (re-login, role swap) busts
+  // the cache. Without this, an old tenant_admin login could keep showing the
+  // operational sidebar until the 60s staleTime expired.
   const { data: modulesData } = useQuery<ActiveModule[]>({
-    queryKey: ['modules'],
+    queryKey: ['modules', user?.id, user?.role],
     queryFn: async () => {
       const res = await api.get('/api/v1/modules');
       return res.data.data;

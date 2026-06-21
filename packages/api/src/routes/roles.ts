@@ -277,12 +277,17 @@ export function rolesRoutes(db: DatabaseClient) {
         viewer:       { name: 'Viewer',  color: '#6b7280' },
       };
       if (id in SYSTEM_ROLE_META) {
-        if (name || description) {
+        // System roles have fixed names; the frontend still sends the current
+        // name/description in the PATCH body (echoing form state). Only reject
+        // if the user actually changed them — otherwise silently ignore.
+        const meta = SYSTEM_ROLE_META[id];
+        const triedToRename = (name && name !== meta.name)
+                          || (description && description.trim() !== '');
+        if (triedToRename) {
           return reply.code(400).send({ success: false, error: { code: 'SYSTEM_ROLE', message: 'Cannot rename system roles. You can only edit their permissions.' } });
         }
         if (!permissions) return reply.send({ success: true, data: null });
 
-        const meta = SYSTEM_ROLE_META[id];
         // Check if an override row already exists for this system role
         const existingOverride = await db.withSuperAdmin(async (client) => {
           const r = await client.query(
@@ -336,9 +341,23 @@ export function rolesRoutes(db: DatabaseClient) {
       if (color !== undefined) { updates.push(`color = $${i++}`); vals.push(color); }
       if (permissions !== undefined) { updates.push(`permissions = $${i++}`); vals.push(JSON.stringify(permissions)); }
 
-      // System roles: only permissions can be changed, not name/description
-      if (existing.is_system && (name || description)) {
+      // System roles: only permissions can be changed, not name/description.
+      // Only reject if the user ACTUALLY changed name/description (the frontend
+      // echoes existing values in the body even when only permissions changed).
+      if (existing.is_system && ((name && name !== existing.name)
+                              || (description && description !== existing.description))) {
         return reply.code(400).send({ success: false, error: { code: 'SYSTEM_ROLE', message: 'Cannot rename system roles. You can only edit their permissions.' } });
+      }
+      // When system role: strip name/description from the update so a stale
+      // echo doesn't accidentally rewrite a column.
+      if (existing.is_system) {
+        for (let k = updates.length - 1; k >= 0; k--) {
+          if (updates[k].startsWith('name =') || updates[k].startsWith('description =')) {
+            updates.splice(k, 1);
+            vals.splice(k, 1);
+            i--;
+          }
+        }
       }
 
       if (updates.length === 0) return reply.send({ success: true, data: existing });
