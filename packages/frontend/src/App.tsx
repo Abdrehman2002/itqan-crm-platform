@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, NavLink } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, NavLink, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import {
   LayoutDashboard, Users, Building2, TrendingUp, Phone,
@@ -269,8 +269,9 @@ function prefetchCommonRoutes() {
 
 function AppLayout() {
   useHeartbeat();   // ping /auth/heartbeat every 30s while a tab is open (presence tracking)
-  const { isAuthenticated } = useAuthStore();
+  const { isAuthenticated, user } = useAuthStore();
   useApplyAppearance();
+  const location = useLocation();
 
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -280,6 +281,14 @@ function AppLayout() {
   }, [isAuthenticated]);
 
   if (!isAuthenticated) return <Navigate to="/login" replace />;
+
+  // Super admin can ONLY use /super-admin/* — server.ts blocks them from every
+  // /api/v1/* route. If they land on a tenant-scoped path (dashboard, tickets,
+  // anything else), bounce them to /super-admin so the layout doesn't fire a
+  // pile of 403'd queries.
+  if (user?.role === 'super_admin' && !location.pathname.startsWith('/super-admin')) {
+    return <Navigate to="/super-admin" replace />;
+  }
 
   return (
     <div className="flex h-screen bg-gray-50 overflow-hidden">
