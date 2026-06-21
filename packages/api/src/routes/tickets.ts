@@ -1497,19 +1497,31 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
       const resHours   = existing.resolution_hours ?? 24;
       const slaDueAt   = new Date(acceptedAt.getTime() + resHours * 3_600_000);
 
+      // Conditional UPDATE — close the TOCTOU race between the SELECT above
+      // and the UPDATE here. If another agent claimed in this window the row
+      // will be 0 and we return 409 instead of silently overwriting state.
       const [ticket] = await db.withTenant(tenantId, async (client) => {
         const r = await client.query(
           `UPDATE tickets
            SET status = 'accepted',
                accepted_at = $1,
                sla_due_at  = $2,
-               assignee_id = COALESCE(assignee_id, $3),
+               assignee_id = $3,
                updated_at  = NOW()
-           WHERE id = $4 RETURNING *`,
+           WHERE id = $4
+             AND (assignee_id IS NULL OR assignee_id = $3)
+             AND accepted_at IS NULL
+           RETURNING *`,
           [acceptedAt, slaDueAt, userId, id],
         );
         return r.rows;
       });
+      if (!ticket) {
+        return reply.code(409).send({
+          success: false,
+          error: { code: 'ALREADY_CLAIMED', message: 'This ticket was just accepted by another agent' },
+        });
+      }
 
       await notify(db, tenantId, [userId], 'ticket_accepted',
         `You accepted ticket ${ticket.ticket_number}`,
@@ -1575,7 +1587,8 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
     // and bypasses the assignee-must-be-me check.
     fastify.post('/:id/reassign', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const { id } = req.params as { id: string };
-      const role = (req.user as any).role as string;
+      const role     = (req.user as any).role as string;
+      const userDept = (req.user as any).department_type as string | null;
       if (!['manager','line_manager','tenant_admin','super_admin'].includes(role)) {
         return reply.code(403).send({ success: false, error: { code: 'FORBIDDEN', message: 'Only managers can reassign' } });
       }
@@ -1583,6 +1596,24 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
       const { assigneeId } = z.object({ assigneeId: z.string().uuid() }).parse(req.body);
       const tenantId = req.tenant.id;
       const userId   = req.user.sub as string;
+
+      // Cross-department guard: a Sales manager must not be able to yank a
+      // Complaints ticket and dump it on a Sales agent. Verify the target
+      // assignee is in the same department as the manager (and that the
+      // existing ticket — if it had an assignee — was also same dept).
+      // Tenant/super admins skip this check.
+      if ((role === 'manager' || role === 'line_manager') && userDept) {
+        const [target] = await db.withTenant(tenantId, async (client) =>
+          (await client.query(`SELECT department_type FROM users WHERE id = $1 AND tenant_id = $2`,
+            [assigneeId, tenantId])).rows);
+        if (!target) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Target user not found in this tenant' } });
+        if (target.department_type && target.department_type !== userDept) {
+          return reply.code(403).send({ success: false, error: {
+            code: 'DEPT_MISMATCH',
+            message: `Cannot reassign across departments — you are in ${userDept}, target is in ${target.department_type}`,
+          }});
+        }
+      }
 
       const [ticket] = await db.withTenant(tenantId, async (client) => {
         const r = await client.query(

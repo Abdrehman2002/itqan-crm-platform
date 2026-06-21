@@ -786,6 +786,25 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
         req.query as Record<string, string>;
       const offset = (Number(page) - 1) * Number(pageSize);
 
+      // Parameterize every WHERE fragment. The old version interpolated
+      // user-supplied provider/sentiment/search directly into the SQL — full
+      // SQL injection by any authenticated user.
+      const conds: string[] = [];
+      const params: any[] = [];
+      let p = 1;
+      if (provider)   { conds.push(`vbc.provider  = $${p++}`); params.push(provider); }
+      if (sentiment)  { conds.push(`vbc.sentiment = $${p++}`); params.push(sentiment); }
+      if (hasTicket === 'true')  conds.push('vbc.ticket_id IS NOT NULL');
+      if (hasTicket === 'false') conds.push('vbc.ticket_id IS NULL');
+      if (search) {
+        const like = `%${search}%`;
+        conds.push(`(vbc.from_number ILIKE $${p} OR vbc.summary ILIKE $${p} OR vbc.extracted_reporter_name ILIKE $${p})`);
+        params.push(like); p++;
+      }
+      const whereSql = conds.length ? 'AND ' + conds.join(' AND ') : '';
+      params.push(Number(pageSize), offset);
+      const limitOffsetIdx = `$${p} OFFSET $${p + 1}`;
+
       const calls = await db.withTenant(req.tenant.id, async (c) => {
         const r = await c.query(
           `SELECT vbc.*,
@@ -794,21 +813,16 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
            FROM voice_bot_calls vbc
            LEFT JOIN tickets  t   ON vbc.ticket_id  = t.id
            LEFT JOIN contacts con ON vbc.contact_id = con.id
-           WHERE 1=1
-           ${provider  ? `AND vbc.provider  = '${provider}'`  : ''}
-           ${sentiment ? `AND vbc.sentiment = '${sentiment}'` : ''}
-           ${hasTicket === 'true'  ? 'AND vbc.ticket_id IS NOT NULL' : ''}
-           ${hasTicket === 'false' ? 'AND vbc.ticket_id IS NULL'     : ''}
-           ${search    ? `AND (vbc.from_number ILIKE '%${search.replace(/'/g,'')}%'
-                           OR vbc.summary      ILIKE '%${search.replace(/'/g,'')}%'
-                           OR vbc.extracted_reporter_name ILIKE '%${search.replace(/'/g,'')}%')` : ''}
+           WHERE 1=1 ${whereSql}
            ORDER BY vbc.created_at DESC
-           LIMIT $1 OFFSET $2`,
-          [Number(pageSize), offset],
+           LIMIT ${limitOffsetIdx}`,
+          params,
         );
+        // Count uses the same WHERE fragments (drop the last 2 limit/offset params).
         const cnt = await c.query(
-          `SELECT COUNT(*) FROM voice_bot_calls WHERE tenant_id = current_setting('app.tenant_id',true)::uuid
-           ${provider ? `AND provider = '${provider}'` : ''}`,
+          `SELECT COUNT(*) FROM voice_bot_calls vbc
+           WHERE tenant_id = current_setting('app.tenant_id',true)::uuid ${whereSql}`,
+          params.slice(0, params.length - 2),
         );
         return { rows: r.rows, total: parseInt(cnt.rows[0].count) };
       });

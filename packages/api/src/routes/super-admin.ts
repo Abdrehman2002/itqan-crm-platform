@@ -415,25 +415,27 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
         password:         z.string().min(8).max(200).optional(),
       }).parse(req.body);
 
-      const existing = await db.withSuperAdmin(async (client) => {
-        const r = await client.query(`SELECT id FROM users WHERE email = $1`, [email]);
-        return r.rows[0];
-      });
-      if (existing) return reply.code(409).send({ success: false, error: { code: 'EMAIL_EXISTS', message: 'A user with this email already exists' } });
-
       const passwordHash = password
         ? await (await import('bcryptjs')).default.hash(password, 12)
         : 'INVITE_PENDING';
 
+      // Close the SELECT-then-INSERT race: ON CONFLICT DO NOTHING. If a row
+      // already exists with this email, RETURNING returns 0 rows and we 409.
+      // Avoids the previous TOCTOU where two simultaneous calls could both
+      // pass the SELECT and one would 500 on the unique-constraint violation.
       const [user] = await db.withSuperAdmin(async (client) => {
         const r = await client.query(
           `INSERT INTO users (tenant_id, name, email, role, platform_role_id, password_hash, is_active)
            VALUES ($1, $2, $3, 'platform_admin', $4, $5, true)
+           ON CONFLICT (tenant_id, email) DO NOTHING
            RETURNING id, name, email, role, is_active, created_at`,
           [tenant_id, name, email, platform_role_id ?? null, passwordHash],
         );
         return r.rows;
       });
+      if (!user) {
+        return reply.code(409).send({ success: false, error: { code: 'EMAIL_EXISTS', message: 'A user with this email already exists' } });
+      }
       return reply.code(201).send({
         success: true,
         data: user,
@@ -841,14 +843,20 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
         return reply.code(400).send({ success: false, error: { code: 'NO_RECIPIENTS', message: 'No active tenant admins to email this invoice to' } });
       }
 
-      // Render a minimal HTML invoice body — items array is already JSON
+      // HTML-escape any user-authored field before splicing into the email
+      // template. Super admin authors invoice notes/line items, but they may
+      // contain stray < or & that would break rendering downstream.
+      const esc = (v: unknown) => String(v ?? '')
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
       const itemsHtml = (inv.items as any[]).map((i: any) =>
-        `<tr><td style="padding:6px 12px;border-bottom:1px solid #eee">${i.description ?? '—'}</td><td style="padding:6px 12px;text-align:right;border-bottom:1px solid #eee">${i.quantity ?? 1}</td><td style="padding:6px 12px;text-align:right;border-bottom:1px solid #eee">${inv.currency} ${i.amount ?? 0}</td></tr>`
+        `<tr><td style="padding:6px 12px;border-bottom:1px solid #eee">${esc(i.description ?? '—')}</td><td style="padding:6px 12px;text-align:right;border-bottom:1px solid #eee">${esc(i.quantity ?? 1)}</td><td style="padding:6px 12px;text-align:right;border-bottom:1px solid #eee">${esc(inv.currency)} ${esc(i.amount ?? 0)}</td></tr>`
       ).join('');
       const html = `
-        <h2>Invoice ${inv.invoice_number}</h2>
-        <p>Billing period: ${inv.period_start} → ${inv.period_end}</p>
-        <p>Due: ${inv.due_date}</p>
+        <h2>Invoice ${esc(inv.invoice_number)}</h2>
+        <p>Billing period: ${esc(inv.period_start)} → ${esc(inv.period_end)}</p>
+        <p>Due: ${esc(inv.due_date)}</p>
         <table style="border-collapse:collapse;width:100%;margin:16px 0">
           <thead><tr style="background:#f5f5f5">
             <th style="padding:8px 12px;text-align:left">Item</th>
@@ -858,10 +866,10 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
           <tbody>${itemsHtml}</tbody>
           <tfoot><tr>
             <td colspan="2" style="padding:12px;text-align:right;font-weight:600">Total</td>
-            <td style="padding:12px;text-align:right;font-weight:700">${inv.currency} ${inv.amount}</td>
+            <td style="padding:12px;text-align:right;font-weight:700">${esc(inv.currency)} ${esc(inv.amount)}</td>
           </tr></tfoot>
         </table>
-        ${inv.notes ? `<p style="color:#666"><em>${inv.notes}</em></p>` : ''}
+        ${inv.notes ? `<p style="color:#666"><em>${esc(inv.notes)}</em></p>` : ''}
       `;
 
       // Fan-out send. EmailService is constructed per-tenant; for platform-level
