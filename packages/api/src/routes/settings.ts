@@ -777,6 +777,7 @@ export function settingsRoutes(db: DatabaseClient) {
         const r = await client.query(
           `SELECT id, email, name, role, department, department_type,
                   manager_id, max_direct_reports, is_active, avatar,
+                  phone, whatsapp_number,
                   (last_active_at IS NOT NULL AND last_active_at > NOW() - INTERVAL '90 seconds') AS is_online,
                   last_active_at
            FROM users
@@ -818,9 +819,13 @@ export function settingsRoutes(db: DatabaseClient) {
         // Roots = anyone with no manager (tenant_admin / managers / unattached)
         treeRoots = (byParent['__root__'] ?? []).map(buildSubtree).filter(Boolean);
       } else if (role === 'manager' || role === 'line_manager') {
-        // See own subtree only
-        const me = byId[userId];
-        if (me) treeRoots = [buildSubtree(userId)];
+        // See DIRECT REPORTS only (exclude self — per product feedback:
+        // 'manager hierarchy should not include itself in reportee').
+        // Each direct report becomes a root; subtree expansion brings in
+        // their reports too. Manager appears only at the top label, not as
+        // a row in the tree.
+        const directReportIds = byParent[userId] ?? [];
+        treeRoots = directReportIds.map(buildSubtree).filter(Boolean);
       }
 
       return reply.send({

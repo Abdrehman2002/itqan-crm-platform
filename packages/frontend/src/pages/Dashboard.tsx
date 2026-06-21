@@ -219,7 +219,9 @@ function AgentDashboard({ d, department, deptType }: { d: any; department: strin
           <SectionHeader icon={Phone} label="Bot Sentiment Mix" accent={C.green} />
           <div className="grid grid-cols-3 gap-4">
             <StatCard label="Positive" value={botPositive}  sub="Caller satisfied"          icon={CheckCircle2} accent={C.green}  />
-            <StatCard label="Untriaged"   value={botUntriaged} sub="No ticket yet — review"    icon={AlertTriangle}    accent={botUntriaged > 0 ? C.gold : C.green} trend={botUntriaged > 0 ? 'warn' : undefined} />
+            <Link to="/voice-bot/calls?filter=untriaged" title="Bot calls where the AI couldn't categorize the issue and no ticket was created — click to review and manually triage">
+              <StatCard label="Untriaged"   value={botUntriaged} sub="Click → review uncategorised bot calls"    icon={AlertTriangle}    accent={botUntriaged > 0 ? C.gold : C.green} trend={botUntriaged > 0 ? 'warn' : undefined} />
+            </Link>
             <StatCard label="Negative" value={Number(bot.negative ?? 0)} sub="Customer upset" icon={PhoneMissed} accent={C.red} />
           </div>
         </>
@@ -696,7 +698,9 @@ function ManagerDashboard({ d, department, deptType }: { d: any; department: str
             <StatCard label="Total Bot Calls"   value={bot.calls_30d      ?? 0}  sub="Last 30 days"             icon={Bot}         accent={C.purple} />
             <StatCard label="Calls Today"        value={bot.calls_today    ?? 0}  sub={`${bot.completed ?? 0} completed`} icon={PhoneCall}   accent={C.cyan}   trend="up" />
             <StatCard label="Tickets Created"    value={bot.tickets_created ?? 0} sub="Auto-generated"           icon={Ticket}      accent={C.green}  trend="up" />
-            <StatCard label="Untriaged"          value={bot.untriaged      ?? 0}  sub="No ticket linked"         icon={AlertTriangle} accent={bot.untriaged > 0 ? C.orange : C.green} trend={Number(bot.untriaged) > 0 ? 'warn' : undefined} />
+            <Link to="/voice-bot/calls?filter=untriaged" title="Bot calls where the AI couldn't categorize the issue and no ticket was created — click to review and manually triage">
+              <StatCard label="Untriaged"          value={bot.untriaged      ?? 0}  sub="Click → review (no ticket linked)"         icon={AlertTriangle} accent={bot.untriaged > 0 ? C.orange : C.green} trend={Number(bot.untriaged) > 0 ? 'warn' : undefined} />
+            </Link>
             <StatCard label="Avg Call Duration"  value={fmtSecs(bot.avg_duration_secs)} sub="Bot handled"        icon={Timer}       accent={C.gold}   />
             <StatCard label="Failed Calls"       value={bot.failed         ?? 0}  sub="Error / no answer"        icon={PhoneMissed} accent={Number(bot.failed) > 0 ? C.red : C.green} trend={Number(bot.failed) > 0 ? 'warn' : undefined} />
           </div>

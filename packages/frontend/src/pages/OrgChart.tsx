@@ -16,6 +16,8 @@ interface OrgNode {
   id: string;
   name: string;
   email: string;
+  phone?: string | null;
+  whatsapp_number?: string | null;
   role: 'tenant_admin' | 'manager' | 'line_manager' | 'agent' | 'viewer';
   department: string | null;
   department_type: string | null;
@@ -97,7 +99,27 @@ function NodeCard({ node, depth, expanded, onToggle }: {
           <div className="flex items-center gap-2 text-xs text-gray-500">
             <span className={`px-1.5 py-0.5 rounded border ${meta.color}`}>{meta.label}</span>
             {deptMeta && <span className={`px-1.5 py-0.5 rounded border ${deptMeta.color}`}>{deptMeta.label}</span>}
-            <span className="text-gray-400">{node.email}</span>
+          </div>
+          {/* Contact channels — Email + Phone + WhatsApp (per product feedback) */}
+          <div className="flex items-center gap-3 text-[11px] text-gray-500 mt-1 flex-wrap">
+            <a href={`mailto:${node.email}`} onClick={e => e.stopPropagation()}
+               className="hover:text-cyan-600 inline-flex items-center gap-1">
+              ✉️ {node.email}
+            </a>
+            {node.phone && (
+              <a href={`tel:${node.phone}`} onClick={e => e.stopPropagation()}
+                 className="hover:text-cyan-600 inline-flex items-center gap-1">
+                📞 {node.phone}
+              </a>
+            )}
+            {node.whatsapp_number && (
+              <a href={`https://wa.me/${node.whatsapp_number.replace(/[^\d]/g,'')}`}
+                 target="_blank" rel="noreferrer"
+                 onClick={e => e.stopPropagation()}
+                 className="hover:text-emerald-600 inline-flex items-center gap-1">
+                💬 {node.whatsapp_number}
+              </a>
+            )}
           </div>
         </div>
 
