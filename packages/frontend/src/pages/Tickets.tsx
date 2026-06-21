@@ -727,6 +727,23 @@ function TicketPanel({ ticketId, onClose }: { ticketId: string; onClose: () => v
 
   const acceptMutation  = useMutation({ mutationFn: () => api.post(`/api/v1/tickets/${ticketId}/accept`, {}),  onSuccess: invalidate });
   const resolveMutation = useMutation({ mutationFn: () => api.post(`/api/v1/tickets/${ticketId}/resolve`, {}), onSuccess: invalidate });
+  const forwardMutation = useMutation({
+    mutationFn: (team: string) => api.post(`/api/v1/tickets/${ticketId}/forward`, { team }),
+    onSuccess: invalidate,
+  });
+  const reassignMutation = useMutation({
+    mutationFn: (assigneeId: string) => api.post(`/api/v1/tickets/${ticketId}/reassign`, { assigneeId }),
+    onSuccess: invalidate,
+  });
+
+  // Manager-only: list of team members for the Reassign dropdown
+  const isMgr = can.role === 'manager' || can.role === 'line_manager' || can.role === 'tenant_admin' || can.role === 'super_admin';
+  const { data: teamMembers } = useQuery<any[]>({
+    queryKey: ['settings-team-list'],
+    queryFn: async () => (await api.get('/api/v1/settings/team')).data.data,
+    enabled: isMgr,
+    staleTime: 60_000,
+  });
 
   const commentMutation = useMutation({
     mutationFn: () => api.post(`/api/v1/tickets/${ticketId}/comments`, {
@@ -908,6 +925,43 @@ function TicketPanel({ ticketId, onClose }: { ticketId: string; onClose: () => v
                   {resolveMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCheck className="w-3.5 h-3.5" />}
                   Mark Resolved
                 </button>
+              )}
+              {/* Forward to next team — visible once accepted, hand-off to field/onboarding/etc */}
+              {['accepted','in_progress','pending'].includes(t.status) && (
+                <select
+                  value=""
+                  onChange={(e) => { if (e.target.value) forwardMutation.mutate(e.target.value); e.target.value=''; }}
+                  disabled={forwardMutation.isPending}
+                  className="px-3 py-2 rounded-xl text-xs font-semibold bg-amber-700/60 text-amber-100 hover:bg-amber-700/80 border border-amber-600/40 disabled:opacity-40 cursor-pointer">
+                  <option value="" disabled>📤 Forward to…</option>
+                  <option value="Onboarding Team">🆕 Onboarding Team</option>
+                  <option value="Field Sales Team">🚗 Field Sales Team</option>
+                  <option value="Field Complaints Team">📋 Field Complaints Team</option>
+                  <option value="Operations / Back Office">🏢 Operations / Back Office</option>
+                  <option value="Branch Manager">👔 Branch Manager</option>
+                </select>
+              )}
+              {t.forwarded_to && (
+                <span className="text-[11px] px-2.5 py-1 bg-amber-50 text-amber-700 rounded-full border border-amber-200 flex items-center gap-1">
+                  📤 Forwarded to {t.forwarded_to}
+                </span>
+              )}
+              {/* Manager-only: Reassign to any agent in their dept */}
+              {isMgr && teamMembers && teamMembers.length > 0 && (
+                <select
+                  value={t.assignee_id ?? ''}
+                  onChange={(e) => { if (e.target.value) reassignMutation.mutate(e.target.value); }}
+                  disabled={reassignMutation.isPending}
+                  className="px-3 py-2 rounded-xl text-xs font-semibold bg-cyan-700/60 text-cyan-100 hover:bg-cyan-700/80 border border-cyan-600/40 disabled:opacity-40 cursor-pointer">
+                  <option value="" disabled>👥 Reassign to…</option>
+                  {teamMembers
+                    .filter(m => ['agent','line_manager'].includes(m.role) && m.is_active)
+                    .map(m => (
+                      <option key={m.id} value={m.id}>
+                        {m.name} {m.department ? `(${m.department})` : ''} {m.id === t.assignee_id ? '✓' : ''}
+                      </option>
+                    ))}
+                </select>
               )}
             </div>
           )}

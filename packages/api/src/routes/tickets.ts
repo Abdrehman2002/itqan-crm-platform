@@ -1485,6 +1485,95 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
     });
 
     // ── Resolve ticket ────────────────────────────────────────────────────
+    // ── Forward to next team (e.g. Onboarding, Field Sales, Field Complaints) ──
+    // Lightweight handoff: stores forwarded_to as free-form text (no new dept table
+    // needed) + adds an audit entry + posts an internal comment. The ticket stays
+    // assigned to the current agent but is flagged as forwarded for visibility.
+    fastify.post('/:id/forward', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
+      const { id } = req.params as { id: string };
+      if (!(await assertCanMutate(req, reply, id))) return;
+
+      const { team, note } = z.object({
+        team: z.string().min(1).max(120),
+        note: z.string().max(2000).optional(),
+      }).parse(req.body);
+      const tenantId = req.tenant.id;
+      const userId   = req.user.sub as string;
+
+      const [ticket] = await db.withTenant(tenantId, async (client) => {
+        const r = await client.query(
+          `UPDATE tickets
+              SET forwarded_to   = $1,
+                  forwarded_at   = NOW(),
+                  forwarded_by   = $2,
+                  forwarded_note = COALESCE($3, forwarded_note),
+                  updated_at     = NOW()
+            WHERE id = $4
+            RETURNING *`,
+          [team, userId, note ?? null, id],
+        );
+        // Audit comment so downstream visibility is preserved
+        await client.query(
+          `INSERT INTO ticket_comments (tenant_id, ticket_id, author_id, body, is_internal, comment_type)
+           VALUES ($1, $2, $3, $4, true, 'note')`,
+          [tenantId, id, userId,
+            `Forwarded to ${team}${note ? `\n\n${note}` : ''}`],
+        );
+        return r.rows;
+      });
+
+      await auditLog(db, {
+        tenantId, ticketId: id, actorId: userId,
+        action: 'forwarded',
+        newValue: { team, note },
+      });
+
+      return reply.send({ success: true, data: ticket });
+    });
+
+    // ── Manager: reassign ticket to any agent in their dept ─────────────────
+    // Different from /assign (which requires ownership). This is manager-only
+    // and bypasses the assignee-must-be-me check.
+    fastify.post('/:id/reassign', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const role = (req.user as any).role as string;
+      if (!['manager','line_manager','tenant_admin','super_admin'].includes(role)) {
+        return reply.code(403).send({ success: false, error: { code: 'FORBIDDEN', message: 'Only managers can reassign' } });
+      }
+
+      const { assigneeId } = z.object({ assigneeId: z.string().uuid() }).parse(req.body);
+      const tenantId = req.tenant.id;
+      const userId   = req.user.sub as string;
+
+      const [ticket] = await db.withTenant(tenantId, async (client) => {
+        const r = await client.query(
+          `UPDATE tickets
+              SET assignee_id = $1,
+                  status      = CASE WHEN status IN ('open','assigned') THEN 'assigned' ELSE status END,
+                  updated_at  = NOW()
+            WHERE id = $2
+            RETURNING *`,
+          [assigneeId, id],
+        );
+        return r.rows;
+      });
+      if (!ticket) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Ticket not found' } });
+
+      await auditLog(db, {
+        tenantId, ticketId: id, actorId: userId,
+        action: 'reassigned',
+        newValue: { newAssignee: assigneeId },
+      });
+
+      // Notify the new assignee
+      await notify(db, tenantId, [assigneeId], 'ticket_assigned',
+        `Ticket ${ticket.ticket_number} reassigned to you`,
+        `Reassigned by your manager — please review.`,
+        id).catch(() => {});
+
+      return reply.send({ success: true, data: ticket });
+    });
+
     fastify.post('/:id/resolve', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const { id }   = req.params as { id: string };
       if (!(await assertCanMutate(req, reply, id))) return;
