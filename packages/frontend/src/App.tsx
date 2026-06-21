@@ -5,7 +5,7 @@ import {
   LayoutDashboard, Users, Building2, TrendingUp, Phone,
   CheckSquare, BarChart3, Settings as SettingsIcon, Zap, Shield,
   LogOut, CreditCard, BarChart2, LifeBuoy, List, Clock, Mail, Bot,
-  FileText, Layers,
+  FileText, Layers, UserCheck, ShieldCheck,
 } from 'lucide-react';
 import { useAuthStore } from './store/auth.store';
 import { useIsSuperAdmin, useIsAdmin } from './hooks/useRole';
@@ -110,10 +110,64 @@ const BOTTOM_NAV = [
   { to: '/billing',      label: 'Billing',      icon: 'CreditCard' },
 ];
 
+// ── Super admin sidebar — minimal, platform-only nav (no tenant items) ──
+// Super admin is platform-scoped; /api/v1/modules returns 403 for them.
+// Avoid the regular Sidebar which renders cached tenant modules + workspace chip.
+function SuperAdminSidebar({ onLogout, userName }: { onLogout: () => void; userName: string }) {
+  const items = [
+    { path: '/super-admin', label: 'Dashboard',          icon: Shield, hash: '' },
+    { path: '/super-admin#tenants',           label: 'Tenants',          icon: Users },
+    { path: '/super-admin#sub-admins',        label: 'Sub-Admins',       icon: UserCheck },
+    { path: '/super-admin#platform-roles',    label: 'Platform Roles',   icon: ShieldCheck },
+    { path: '/super-admin#platform-invoices', label: 'Platform Invoices', icon: CreditCard },
+    { path: '/super-admin#sync',              label: 'Sync Entitlements', icon: Zap },
+  ];
+  return (
+    <div className="w-56 flex flex-col h-full" style={{ background: 'linear-gradient(180deg, #1a0f2e 0%, #2b1750 60%, #3d2070 100%)' }}>
+      <div className="px-4 py-5 border-b border-white/10">
+        <div className="flex items-center gap-2.5 mb-2">
+          <div className="w-8 h-8 rounded-xl flex items-center justify-center shrink-0"
+               style={{ background: 'linear-gradient(135deg, #F5C518 0%, #f97316 100%)' }}>
+            <Shield className="w-4 h-4 text-white" />
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-bold text-white leading-tight truncate">Vextria Platform</p>
+            <p className="text-[10px] text-amber-300 font-medium">Super Admin</p>
+          </div>
+        </div>
+      </div>
+      <nav className="flex-1 px-2 py-4 space-y-0.5 overflow-y-auto">
+        {items.map(({ path, label, icon: Icon }) => (
+          <NavLink key={path} to={path} end={path === '/super-admin'}
+            className={({ isActive }) =>
+              `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${
+                isActive ? 'text-white font-semibold bg-white/15' : 'text-white/70 hover:text-white hover:bg-white/10'
+              }`}>
+            <Icon className="w-4 h-4 shrink-0" />
+            {label}
+          </NavLink>
+        ))}
+      </nav>
+      <div className="px-3 py-3 border-t border-white/10 space-y-2">
+        <div className="text-[11px] text-white/60 px-1">{userName}</div>
+        <button onClick={onLogout}
+          className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm text-white/70 hover:text-white hover:bg-white/10 transition-all">
+          <LogOut className="w-4 h-4" /> Logout
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function Sidebar() {
   const { user, tenant, logout } = useAuthStore();
   const isSuperAdmin = useIsSuperAdmin();
   const isAdmin      = useIsAdmin();
+
+  // Super admin lives at the platform layer — render a minimal sidebar with
+  // ONLY platform items. /api/v1/modules is 403 for super_admin anyway, so
+  // the regular dynamic sidebar would be polluted with cached/hardcoded items.
+  if (isSuperAdmin) return <SuperAdminSidebar onLogout={logout} userName={user?.name ?? user?.email ?? 'Super Admin'} />;
 
   // Fetch active modules from the API — drives the sidebar dynamically
   const { data: modulesData } = useQuery<ActiveModule[]>({

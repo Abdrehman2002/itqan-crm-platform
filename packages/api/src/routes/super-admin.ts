@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { DatabaseClient, TenantService } from '@crm/core';
 import type { Plan } from '@crm/shared';
 import { requireRole } from '../middlewares/auth.middleware';
+import { EmailService } from '../services/email.service';
 
 // Full module catalog — single source of truth shared with the frontend
 export const MODULE_CATALOG = [
@@ -173,6 +174,53 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
       });
 
       return reply.code(201).send({ success: true, data: updated });
+    });
+
+    // ── Edit Workspace (full tenant update) ─────────────────────────────
+    // Patch any combination of name, slug, sector, status, plan. Plan still has
+    // its own dedicated endpoint for entitlement-side effects, but admins also
+    // want a one-shot "Edit Workspace" form.
+    fastify.patch('/tenants/:id', async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const body = z.object({
+        name:   z.string().min(1).max(120).optional(),
+        slug:   z.string().min(2).max(40).regex(/^[a-z0-9-]+$/).optional(),
+        sector: z.string().min(1).optional(),
+        status: z.enum(['active','suspended','trial']).optional(),
+      }).parse(req.body);
+
+      const sets: string[] = ['updated_at = NOW()'];
+      const vals: unknown[] = [id];
+      let idx = 2;
+      for (const [k, v] of Object.entries(body)) {
+        if (v !== undefined) { sets.push(`${k} = $${idx++}`); vals.push(v); }
+      }
+      if (sets.length === 1) return reply.code(400).send({ success: false, error: { code: 'NO_CHANGES', message: 'No fields to update' } });
+
+      const [t] = await db.withSuperAdmin(async (c) => (await c.query(
+        `UPDATE tenants SET ${sets.join(',')} WHERE id = $1 RETURNING id, name, slug, sector, status, plan`,
+        vals,
+      )).rows);
+      if (!t) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Tenant not found' } });
+      return reply.send({ success: true, data: t });
+    });
+
+    // ── Reset password for ANY user in ANY tenant ───────────────────────
+    // Lets super admin set a new password for a tenant_admin or sub_admin who
+    // forgot theirs or never received their email invite. User can log in
+    // immediately with the new password.
+    fastify.post('/users/:id/reset-password', async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const { password } = z.object({ password: z.string().min(8).max(200) }).parse(req.body);
+      const hash = await (await import('bcryptjs')).default.hash(password, 12);
+
+      const [u] = await db.withSuperAdmin(async (c) => (await c.query(
+        `UPDATE users SET password_hash = $1, updated_at = NOW()
+         WHERE id = $2 RETURNING id, email, name, role`,
+        [hash, id],
+      )).rows);
+      if (!u) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'User not found' } });
+      return reply.send({ success: true, data: u, message: `Password reset for ${u.email}` });
     });
 
     // Upgrade / downgrade plan
@@ -357,11 +405,14 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
 
     // POST /super-admin/sub-admins — invite a new sub-admin
     fastify.post('/sub-admins', async (req, reply) => {
-      const { name, email, platform_role_id, tenant_id } = z.object({
+      const { name, email, platform_role_id, tenant_id, password } = z.object({
         name:             z.string().min(1),
         email:            z.string().email(),
         platform_role_id: z.string().uuid().optional(),
         tenant_id:        z.string().uuid(),
+        // Optional: set login password immediately. Without it, sub-admin
+        // would need an email-invite flow (not yet wired for platform users).
+        password:         z.string().min(8).max(200).optional(),
       }).parse(req.body);
 
       const existing = await db.withSuperAdmin(async (client) => {
@@ -370,16 +421,25 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
       });
       if (existing) return reply.code(409).send({ success: false, error: { code: 'EMAIL_EXISTS', message: 'A user with this email already exists' } });
 
+      const passwordHash = password
+        ? await (await import('bcryptjs')).default.hash(password, 12)
+        : 'INVITE_PENDING';
+
       const [user] = await db.withSuperAdmin(async (client) => {
         const r = await client.query(
-          `INSERT INTO users (tenant_id, name, email, role, platform_role_id, is_active)
-           VALUES ($1, $2, $3, 'platform_admin', $4, true)
+          `INSERT INTO users (tenant_id, name, email, role, platform_role_id, password_hash, is_active)
+           VALUES ($1, $2, $3, 'platform_admin', $4, $5, true)
            RETURNING id, name, email, role, is_active, created_at`,
-          [tenant_id, name, email, platform_role_id ?? null],
+          [tenant_id, name, email, platform_role_id ?? null, passwordHash],
         );
         return r.rows;
       });
-      return reply.code(201).send({ success: true, data: user });
+      return reply.code(201).send({
+        success: true,
+        data: user,
+        immediateLogin: !!password,
+        message: password ? `${name} can log in now with their email + the password you set.` : `Sub-admin created. Set their password via /super-admin/users/${user.id}/reset-password.`,
+      });
     });
 
     // PATCH /super-admin/sub-admins/:id — update role assignment or active status
@@ -760,6 +820,78 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
         await client.query(`DELETE FROM platform_invoices WHERE id = $1 AND status = 'draft'`, [id]);
       });
       return reply.send({ success: true });
+    });
+
+    // POST /super-admin/platform-invoices/:id/send — email invoice to all
+    // tenant_admin users of the target tenant + flip status draft → sent.
+    fastify.post('/platform-invoices/:id/send', async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const [inv] = await db.withSuperAdmin(async (c) => (await c.query(
+        `SELECT pi.*, t.name AS tenant_name
+         FROM platform_invoices pi
+         JOIN tenants t ON t.id = pi.tenant_id
+         WHERE pi.id = $1`, [id])).rows);
+      if (!inv) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Invoice not found' } });
+
+      const admins = await db.withSuperAdmin(async (c) => (await c.query(
+        `SELECT email, name FROM users
+         WHERE tenant_id = $1 AND role = 'tenant_admin' AND is_active = true`,
+        [inv.tenant_id])).rows);
+      if (admins.length === 0) {
+        return reply.code(400).send({ success: false, error: { code: 'NO_RECIPIENTS', message: 'No active tenant admins to email this invoice to' } });
+      }
+
+      // Render a minimal HTML invoice body — items array is already JSON
+      const itemsHtml = (inv.items as any[]).map((i: any) =>
+        `<tr><td style="padding:6px 12px;border-bottom:1px solid #eee">${i.description ?? '—'}</td><td style="padding:6px 12px;text-align:right;border-bottom:1px solid #eee">${i.quantity ?? 1}</td><td style="padding:6px 12px;text-align:right;border-bottom:1px solid #eee">${inv.currency} ${i.amount ?? 0}</td></tr>`
+      ).join('');
+      const html = `
+        <h2>Invoice ${inv.invoice_number}</h2>
+        <p>Billing period: ${inv.period_start} → ${inv.period_end}</p>
+        <p>Due: ${inv.due_date}</p>
+        <table style="border-collapse:collapse;width:100%;margin:16px 0">
+          <thead><tr style="background:#f5f5f5">
+            <th style="padding:8px 12px;text-align:left">Item</th>
+            <th style="padding:8px 12px;text-align:right">Qty</th>
+            <th style="padding:8px 12px;text-align:right">Amount</th>
+          </tr></thead>
+          <tbody>${itemsHtml}</tbody>
+          <tfoot><tr>
+            <td colspan="2" style="padding:12px;text-align:right;font-weight:600">Total</td>
+            <td style="padding:12px;text-align:right;font-weight:700">${inv.currency} ${inv.amount}</td>
+          </tr></tfoot>
+        </table>
+        ${inv.notes ? `<p style="color:#666"><em>${inv.notes}</em></p>` : ''}
+      `;
+
+      // Fan-out send. EmailService is constructed per-tenant; for platform-level
+      // mail we use the recipient tenant's email config (their own SMTP). Best-effort.
+      const emailSvc = new EmailService(db);
+      let sentCount = 0;
+      for (const a of admins) {
+        try {
+          await emailSvc.send(inv.tenant_id, {
+            to:       a.email,
+            toName:   a.name ?? undefined,
+            subject:  `Invoice ${inv.invoice_number} — ${inv.currency} ${inv.amount} due ${inv.due_date}`,
+            bodyHtml: html,
+            bodyText: `Invoice ${inv.invoice_number}\nTotal: ${inv.currency} ${inv.amount}\nDue: ${inv.due_date}`,
+          });
+          sentCount++;
+        } catch { /* per-recipient failure shouldn't abort the batch */ }
+      }
+
+      // Flip status draft → sent on first successful send
+      if (sentCount > 0 && inv.status === 'draft') {
+        await db.withSuperAdmin(async (c) =>
+          c.query(`UPDATE platform_invoices SET status='sent', updated_at=NOW() WHERE id=$1`, [id]));
+      }
+
+      return reply.send({
+        success: true,
+        data: { sent_to: sentCount, total_recipients: admins.length },
+        message: `Invoice emailed to ${sentCount} of ${admins.length} tenant admin(s)`,
+      });
     });
 
     // POST /super-admin/platform-invoices/:id/payments — record a payment
