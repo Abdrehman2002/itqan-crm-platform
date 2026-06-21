@@ -6,16 +6,23 @@ import { requireRole } from '../middlewares/auth.middleware';
 
 // Full module catalog — single source of truth shared with the frontend
 export const MODULE_CATALOG = [
-  { key: 'crm',          label: 'Core CRM',           description: 'Contacts, companies, deals, activities and analytics. Always included.',           always: true  },
-  { key: 'ticketing',    label: 'Ticketing',           description: 'Support tickets, SLA management, escalations, queues and CSAT surveys.',           always: false },
-  { key: 'voice',        label: 'Voice Calls',         description: 'Inbound and outbound call logging, recordings and agent call management.',          always: false },
-  { key: 'voicebot',     label: 'Voice Bot (AI)',      description: 'AI-powered SIP/IVR voice bot for automated customer interactions.',                 always: false },
-  { key: 'emails',       label: 'Email Inbox',         description: 'Shared team email inbox with assignment, threading and SLA tracking.',              always: false },
-  { key: 'integrations', label: 'Integrations',        description: 'SMS gateways, webhooks, Zapier/Make connectors and third-party API bridges.',       always: false },
-  { key: 'analytics',    label: 'Advanced Analytics',  description: 'Cross-module reports, heatmaps, funnels and department performance dashboards.',    always: false },
+  { key: 'crm',          label: 'Core CRM',           description: 'Contacts, companies, deals, activities and analytics. Always included.',           always: true,  included_in_plans: ['free','starter','professional','enterprise'] },
+  { key: 'ticketing',    label: 'Ticketing',           description: 'Support tickets, SLA management, escalations, queues and CSAT surveys.',           always: false, included_in_plans: ['starter','professional','enterprise'] },
+  { key: 'voice',        label: 'Voice Calls',         description: 'Inbound and outbound call logging, recordings and agent call management.',          always: false, included_in_plans: ['professional','enterprise'] },
+  { key: 'voicebot',     label: 'Voice Bot (AI)',      description: 'AI-powered SIP/IVR voice bot for automated customer interactions.',                 always: false, included_in_plans: ['enterprise'] },
+  { key: 'emails',       label: 'Email Inbox',         description: 'Shared team email inbox with assignment, threading and SLA tracking.',              always: false, included_in_plans: ['starter','professional','enterprise'] },
+  { key: 'integrations', label: 'Integrations',        description: 'SMS gateways, webhooks, Zapier/Make connectors and third-party API bridges.',       always: false, included_in_plans: ['professional','enterprise'] },
+  { key: 'analytics',    label: 'Advanced Analytics',  description: 'Cross-module reports, heatmaps, funnels and department performance dashboards.',    always: false, included_in_plans: ['professional','enterprise'] },
 ] as const;
 export type ModuleKey = typeof MODULE_CATALOG[number]['key'];
 export const ALL_MODULE_KEYS = MODULE_CATALOG.map(m => m.key) as ModuleKey[];
+
+const RolePayloadSchema = z.object({
+  base_role:   z.string(),
+  name:        z.string(),
+  color:       z.string().optional(),
+  permissions: z.record(z.boolean()),
+});
 
 const CreateTenantSchema = z.object({
   name:         z.string().min(2),
@@ -24,9 +31,8 @@ const CreateTenantSchema = z.object({
   adminEmail:   z.string().email(),
   adminName:    z.string().min(1),
   customDomain: z.string().optional(),
-  // Modules this tenant is licensed for (crm always included).
-  // Super admin selects these at creation time based on what the customer has paid for.
   modules:      z.array(z.enum(ALL_MODULE_KEYS as [ModuleKey, ...ModuleKey[]])).default(['crm']),
+  roles:        z.array(RolePayloadSchema).optional(),
 });
 
 export function superAdminRoutes(db: DatabaseClient, tenantService: TenantService) {
@@ -143,6 +149,21 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
         }
       });
 
+      // Seed role permissions if provided
+      if (body.roles?.length) {
+        await db.withSuperAdmin(async (client) => {
+          for (const r of body.roles!) {
+            await client.query(
+              `INSERT INTO roles (tenant_id, name, color, is_system, base_role, permissions)
+               VALUES ($1, $2, $3, true, $4, $5)
+               ON CONFLICT (tenant_id, base_role) WHERE is_system = true
+               DO UPDATE SET permissions = EXCLUDED.permissions, name = EXCLUDED.name`,
+              [tenant.id, r.name, r.color ?? '#6366f1', r.base_role, JSON.stringify(r.permissions)],
+            );
+          }
+        });
+      }
+
       // Invalidate cache so the new active_modules are visible immediately
       await tenantService.invalidateCacheById(tenant.id);
 
@@ -199,6 +220,38 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
       return reply.send({ success: true, data: { licensedModules } });
     });
 
+    // GET /super-admin/tenants/:id/roles — fetch this tenant's system role permissions
+    fastify.get('/tenants/:id/roles', async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const rows = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(
+          `SELECT id, name, color, is_system, base_role, permissions
+           FROM roles WHERE tenant_id = $1 AND is_system = true ORDER BY base_role`,
+          [id],
+        );
+        return r.rows;
+      });
+      return reply.send({ success: true, data: rows });
+    });
+
+    // POST /super-admin/tenants/:id/roles — upsert system role permissions for a tenant
+    fastify.post('/tenants/:id/roles', async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const { roles } = z.object({ roles: z.array(RolePayloadSchema) }).parse(req.body);
+      await db.withSuperAdmin(async (client) => {
+        for (const r of roles) {
+          await client.query(
+            `INSERT INTO roles (tenant_id, name, color, is_system, base_role, permissions)
+             VALUES ($1, $2, $3, true, $4, $5)
+             ON CONFLICT (tenant_id, base_role) WHERE is_system = true
+             DO UPDATE SET permissions = EXCLUDED.permissions, name = EXCLUDED.name`,
+            [id, r.name, r.color ?? '#6366f1', r.base_role, JSON.stringify(r.permissions)],
+          );
+        }
+      });
+      return reply.send({ success: true });
+    });
+
     // Suspend tenant
     fastify.post('/tenants/:id/suspend', async (req, reply) => {
       const { id } = req.params as { id: string };
@@ -215,24 +268,552 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
       return reply.send({ success: true });
     });
 
-    // Platform-wide metrics
-    fastify.get('/metrics', async (req, reply) => {
-      const [metrics] = await db.withSuperAdmin(async (client) => {
-        const result = await client.query(`
-          SELECT
-            COUNT(*) as total_tenants,
-            COUNT(*) FILTER (WHERE status = 'active') as active_tenants,
-            COUNT(*) FILTER (WHERE status = 'trial') as trial_tenants,
-            COUNT(*) FILTER (WHERE plan = 'free') as free_plan,
-            COUNT(*) FILTER (WHERE plan = 'starter') as starter_plan,
-            COUNT(*) FILTER (WHERE plan = 'professional') as professional_plan,
-            COUNT(*) FILTER (WHERE plan = 'enterprise') as enterprise_plan,
-            COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '30 days') as new_tenants_30d
-          FROM tenants`);
-        return result.rows;
+    // ── Platform Roles (for sub-admins) ──────────────────────────────────────
+
+    // GET /super-admin/platform-roles
+    fastify.get('/platform-roles', async (_req, reply) => {
+      const rows = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(
+          `SELECT id, name, description, color, permissions, created_at FROM platform_roles ORDER BY created_at`,
+        );
+        return r.rows;
+      });
+      return reply.send({ success: true, data: rows });
+    });
+
+    // POST /super-admin/platform-roles
+    fastify.post('/platform-roles', async (req, reply) => {
+      const { name, description, color, permissions } = z.object({
+        name:        z.string().min(1),
+        description: z.string().optional(),
+        color:       z.string().optional(),
+        permissions: z.record(z.boolean()),
+      }).parse(req.body);
+      const [row] = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(
+          `INSERT INTO platform_roles (name, description, color, permissions)
+           VALUES ($1, $2, $3, $4) RETURNING *`,
+          [name, description ?? null, color ?? '#6366f1', JSON.stringify(permissions)],
+        );
+        return r.rows;
+      });
+      return reply.code(201).send({ success: true, data: row });
+    });
+
+    // PATCH /super-admin/platform-roles/:id
+    fastify.patch('/platform-roles/:id', async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const { name, description, color, permissions } = z.object({
+        name:        z.string().min(1).optional(),
+        description: z.string().optional(),
+        color:       z.string().optional(),
+        permissions: z.record(z.boolean()).optional(),
+      }).parse(req.body);
+      const [row] = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(
+          `UPDATE platform_roles SET
+             name        = COALESCE($2, name),
+             description = COALESCE($3, description),
+             color       = COALESCE($4, color),
+             permissions = COALESCE($5, permissions),
+             updated_at  = NOW()
+           WHERE id = $1 RETURNING *`,
+          [id, name ?? null, description ?? null, color ?? null, permissions ? JSON.stringify(permissions) : null],
+        );
+        return r.rows;
+      });
+      if (!row) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Platform role not found' } });
+      return reply.send({ success: true, data: row });
+    });
+
+    // DELETE /super-admin/platform-roles/:id
+    fastify.delete('/platform-roles/:id', async (req, reply) => {
+      const { id } = req.params as { id: string };
+      await db.withSuperAdmin(async (client) => {
+        // Unlink sub-admins before deleting
+        await client.query(`UPDATE users SET platform_role_id = NULL WHERE platform_role_id = $1`, [id]);
+        await client.query(`DELETE FROM platform_roles WHERE id = $1`, [id]);
+      });
+      return reply.send({ success: true });
+    });
+
+    // ── Sub-Admin Users ───────────────────────────────────────────────────────
+
+    // GET /super-admin/sub-admins
+    fastify.get('/sub-admins', async (_req, reply) => {
+      const rows = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(
+          `SELECT u.id, u.name, u.email, u.role, u.is_active, u.created_at,
+                  pr.id AS platform_role_id, pr.name AS platform_role_name, pr.color AS platform_role_color
+           FROM users u
+           LEFT JOIN platform_roles pr ON u.platform_role_id = pr.id
+           WHERE u.role = 'platform_admin'
+           ORDER BY u.created_at`,
+        );
+        return r.rows;
+      });
+      return reply.send({ success: true, data: rows });
+    });
+
+    // POST /super-admin/sub-admins — invite a new sub-admin
+    fastify.post('/sub-admins', async (req, reply) => {
+      const { name, email, platform_role_id, tenant_id } = z.object({
+        name:             z.string().min(1),
+        email:            z.string().email(),
+        platform_role_id: z.string().uuid().optional(),
+        tenant_id:        z.string().uuid(),
+      }).parse(req.body);
+
+      const existing = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(`SELECT id FROM users WHERE email = $1`, [email]);
+        return r.rows[0];
+      });
+      if (existing) return reply.code(409).send({ success: false, error: { code: 'EMAIL_EXISTS', message: 'A user with this email already exists' } });
+
+      const [user] = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(
+          `INSERT INTO users (tenant_id, name, email, role, platform_role_id, is_active)
+           VALUES ($1, $2, $3, 'platform_admin', $4, true)
+           RETURNING id, name, email, role, is_active, created_at`,
+          [tenant_id, name, email, platform_role_id ?? null],
+        );
+        return r.rows;
+      });
+      return reply.code(201).send({ success: true, data: user });
+    });
+
+    // PATCH /super-admin/sub-admins/:id — update role assignment or active status
+    fastify.patch('/sub-admins/:id', async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const body = z.object({
+        platform_role_id: z.string().uuid().nullable().optional(),
+        is_active:        z.boolean().optional(),
+      }).parse(req.body);
+      const [user] = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(
+          `UPDATE users SET
+             platform_role_id = CASE WHEN $2::boolean THEN $3::uuid ELSE platform_role_id END,
+             is_active        = COALESCE($4, is_active),
+             updated_at       = NOW()
+           WHERE id = $1 AND role = 'platform_admin'
+           RETURNING id, name, email, role, platform_role_id, is_active`,
+          [id, 'platform_role_id' in body, body.platform_role_id ?? null, body.is_active ?? null],
+        );
+        return r.rows;
+      });
+      if (!user) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Sub-admin not found' } });
+      return reply.send({ success: true, data: user });
+    });
+
+    // DELETE /super-admin/sub-admins/:id
+    fastify.delete('/sub-admins/:id', async (req, reply) => {
+      const { id } = req.params as { id: string };
+      await db.withSuperAdmin(async (client) => {
+        await client.query(`DELETE FROM users WHERE id = $1 AND role = 'platform_admin'`, [id]);
+      });
+      return reply.send({ success: true });
+    });
+
+    // ── Entitlement Sync ─────────────────────────────────────────────────────
+
+    // GET /super-admin/sync-entitlements/preview
+    // Returns: modules to add per tenant (plan-based) + roles with missing permission keys
+    fastify.get('/sync-entitlements/preview', async (_req, reply) => {
+      const { defaultPermissions, MODULE_DEFS } = await import('./roles');
+      const allPermissionKeys = MODULE_DEFS.flatMap((m) => m.actions.map((a) => a.key));
+
+      const tenants = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(
+          `SELECT id, name, plan, active_modules FROM tenants WHERE status != 'cancelled'`,
+        );
+        return r.rows;
       });
 
-      return reply.send({ success: true, data: metrics });
+      const moduleChanges: Array<{ tenant_id: string; tenant_name: string; add_modules: string[] }> = [];
+      const roleChanges: Array<{ tenant_id: string; tenant_name: string; roles_affected: number; sample_keys: string[] }> = [];
+
+      for (const tenant of tenants) {
+        // Which modules does this plan qualify for that the tenant doesn't have yet?
+        const current: string[] = tenant.active_modules ?? [];
+        const entitled = MODULE_CATALOG
+          .filter((m) => (m.included_in_plans as readonly string[]).includes(tenant.plan))
+          .map((m) => m.key);
+        const toAdd = entitled.filter((k) => !current.includes(k));
+        if (toAdd.length > 0) {
+          moduleChanges.push({ tenant_id: tenant.id, tenant_name: tenant.name, add_modules: toAdd });
+        }
+
+        // Which roles have missing permission keys?
+        const roles = await db.withSuperAdmin(async (client) => {
+          const r = await client.query(
+            `SELECT id, name, base_role, permissions FROM roles WHERE tenant_id = $1`,
+            [tenant.id],
+          );
+          return r.rows;
+        });
+
+        const missingKeysSet = new Set<string>();
+        let affectedCount = 0;
+        for (const role of roles) {
+          const perms: Record<string, boolean> = role.permissions ?? {};
+          const missing = allPermissionKeys.filter((k) => !(k in perms));
+          if (missing.length > 0) {
+            affectedCount++;
+            missing.forEach((k) => missingKeysSet.add(k));
+          }
+        }
+        if (affectedCount > 0) {
+          roleChanges.push({
+            tenant_id: tenant.id,
+            tenant_name: tenant.name,
+            roles_affected: affectedCount,
+            sample_keys: Array.from(missingKeysSet).slice(0, 5),
+          });
+        }
+      }
+
+      return reply.send({ success: true, data: { moduleChanges, roleChanges } });
+    });
+
+    // POST /super-admin/sync-entitlements/apply
+    fastify.post('/sync-entitlements/apply', async (req, reply) => {
+      const { apply_modules, apply_permissions } = z.object({
+        apply_modules:     z.boolean().default(true),
+        apply_permissions: z.boolean().default(true),
+      }).parse(req.body);
+
+      const { defaultPermissions, MODULE_DEFS } = await import('./roles');
+      const allPermissionKeys = MODULE_DEFS.flatMap((m) => m.actions.map((a) => a.key));
+
+      const tenants = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(
+          `SELECT id, name, plan, active_modules FROM tenants WHERE status != 'cancelled'`,
+        );
+        return r.rows;
+      });
+
+      let modulesUpdated = 0;
+      let rolesUpdated   = 0;
+      const tenantsPendingReview: string[] = [];
+
+      for (const tenant of tenants) {
+        // ── Module sync ──────────────────────────────────────────────────────
+        if (apply_modules) {
+          const current: string[] = tenant.active_modules ?? [];
+          const entitled = MODULE_CATALOG
+            .filter((m) => (m.included_in_plans as readonly string[]).includes(tenant.plan))
+            .map((m) => m.key);
+          const toAdd = entitled.filter((k) => !current.includes(k));
+          if (toAdd.length > 0) {
+            const merged = Array.from(new Set([...current, ...toAdd]));
+            await db.withSuperAdmin(async (client) => {
+              await client.query(
+                `UPDATE tenants SET active_modules = $1, updated_at = NOW() WHERE id = $2`,
+                [merged, tenant.id],
+              );
+            });
+            modulesUpdated++;
+          }
+        }
+
+        // ── Permission key sync ──────────────────────────────────────────────
+        if (apply_permissions) {
+          const roles = await db.withSuperAdmin(async (client) => {
+            const r = await client.query(
+              `SELECT id, base_role, permissions FROM roles WHERE tenant_id = $1`,
+              [tenant.id],
+            );
+            return r.rows;
+          });
+
+          let tenantHadMissing = false;
+          for (const role of roles) {
+            const perms: Record<string, boolean> = { ...(role.permissions ?? {}) };
+            const defaults = defaultPermissions(role.base_role ?? 'viewer');
+            const missing  = allPermissionKeys.filter((k) => !(k in perms));
+            if (missing.length > 0) {
+              missing.forEach((k) => { perms[k] = defaults[k] ?? false; });
+              await db.withSuperAdmin(async (client) => {
+                await client.query(
+                  `UPDATE roles SET permissions = $1, updated_at = NOW() WHERE id = $2`,
+                  [JSON.stringify(perms), role.id],
+                );
+              });
+              rolesUpdated++;
+              tenantHadMissing = true;
+            }
+          }
+
+          // Flag tenant for role review
+          if (tenantHadMissing) {
+            tenantsPendingReview.push(tenant.id);
+            await db.withSuperAdmin(async (client) => {
+              await client.query(
+                `UPDATE tenants
+                 SET settings = jsonb_set(COALESCE(settings,'{}'), '{pending_role_review}', 'true')
+                 WHERE id = $1`,
+                [tenant.id],
+              );
+            });
+          }
+        }
+      }
+
+      return reply.send({
+        success: true,
+        data: { modulesUpdated, rolesUpdated, tenantsNotified: tenantsPendingReview.length },
+      });
+    });
+
+    // Platform-wide metrics (dashboard)
+    fastify.get('/metrics', async (_req, reply) => {
+      const PLAN_MRR: Record<string, number> = {
+        free: 0, starter: 49, professional: 149, enterprise: 499,
+      };
+
+      const [tenantStats] = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(`
+          SELECT
+            COUNT(*)                                                          AS total_tenants,
+            COUNT(*) FILTER (WHERE status = 'active')                        AS active_tenants,
+            COUNT(*) FILTER (WHERE status = 'trial')                         AS trial_tenants,
+            COUNT(*) FILTER (WHERE status = 'suspended')                     AS suspended_tenants,
+            COUNT(*) FILTER (WHERE plan = 'free')                            AS free_plan,
+            COUNT(*) FILTER (WHERE plan = 'starter')                         AS starter_plan,
+            COUNT(*) FILTER (WHERE plan = 'professional')                    AS professional_plan,
+            COUNT(*) FILTER (WHERE plan = 'enterprise')                      AS enterprise_plan,
+            COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '30 days') AS new_tenants_30d,
+            COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days')  AS new_tenants_7d
+          FROM tenants`);
+        return r.rows;
+      });
+
+      // MRR estimate from active tenants by plan
+      const mrr = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(`
+          SELECT plan, COUNT(*) AS cnt
+          FROM tenants WHERE status = 'active'
+          GROUP BY plan`);
+        return r.rows.reduce((sum: number, row: any) => {
+          return sum + (PLAN_MRR[row.plan] ?? 0) * parseInt(row.cnt);
+        }, 0);
+      });
+
+      // Total users across all tenants
+      const [userStats] = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(`
+          SELECT
+            COUNT(*)                                                          AS total_users,
+            COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '30 days') AS new_users_30d
+          FROM users WHERE role != 'super_admin'`);
+        return r.rows;
+      });
+
+      // Recent 6 tenants
+      const recentTenants = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(`
+          SELECT id, name, slug, plan, status, active_modules, created_at
+          FROM tenants ORDER BY created_at DESC LIMIT 6`);
+        return r.rows;
+      });
+
+      // Growth: new tenants per month for last 6 months
+      const monthlyGrowth = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(`
+          SELECT
+            TO_CHAR(DATE_TRUNC('month', created_at), 'Mon') AS month,
+            COUNT(*) AS count
+          FROM tenants
+          WHERE created_at > NOW() - INTERVAL '6 months'
+          GROUP BY DATE_TRUNC('month', created_at)
+          ORDER BY DATE_TRUNC('month', created_at)`);
+        return r.rows;
+      });
+
+      // Module adoption: how many tenants have each module
+      const moduleAdoption = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(`
+          SELECT m.module, COUNT(*) AS cnt
+          FROM tenants, UNNEST(active_modules) AS m(module)
+          WHERE status = 'active'
+          GROUP BY m.module ORDER BY cnt DESC`);
+        return r.rows;
+      });
+
+      return reply.send({
+        success: true,
+        data: {
+          ...tenantStats,
+          mrr,
+          ...userStats,
+          recentTenants,
+          monthlyGrowth,
+          moduleAdoption,
+        },
+      });
+    });
+
+    // ── Platform Invoices (super admin → tenant billing) ──────────────────────
+
+    // GET /super-admin/platform-invoices
+    fastify.get('/platform-invoices', async (req, reply) => {
+      const { tenant_id, status, page = 1, pageSize = 20 } = req.query as any;
+      const offset = (Number(page) - 1) * Number(pageSize);
+
+      const rows = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(
+          `SELECT pi.*, t.name AS tenant_name, t.plan AS tenant_plan,
+                  COALESCE(SUM(pp.amount),0) AS amount_paid
+           FROM platform_invoices pi
+           JOIN tenants t ON pi.tenant_id = t.id
+           LEFT JOIN platform_payments pp ON pp.invoice_id = pi.id
+           WHERE ($1::uuid IS NULL OR pi.tenant_id = $1)
+             AND ($2::text IS NULL OR pi.status = $2)
+           GROUP BY pi.id, t.name, t.plan
+           ORDER BY pi.created_at DESC
+           LIMIT $3 OFFSET $4`,
+          [tenant_id ?? null, status ?? null, Number(pageSize), offset],
+        );
+        return r.rows;
+      });
+
+      const [{ count }] = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(
+          `SELECT COUNT(*) FROM platform_invoices
+           WHERE ($1::uuid IS NULL OR tenant_id = $1)
+             AND ($2::text IS NULL OR status = $2)`,
+          [tenant_id ?? null, status ?? null],
+        );
+        return r.rows;
+      });
+
+      return reply.send({ success: true, data: rows, meta: { total: Number(count), page: Number(page), pageSize: Number(pageSize) } });
+    });
+
+    // POST /super-admin/platform-invoices
+    fastify.post('/platform-invoices', async (req, reply) => {
+      const body = z.object({
+        tenant_id:    z.string().uuid(),
+        period_start: z.string(),
+        period_end:   z.string(),
+        due_date:     z.string(),
+        currency:     z.string().default('GBP'),
+        items:        z.array(z.object({
+          description: z.string(),
+          quantity:    z.number().default(1),
+          unit_price:  z.number(),
+        })).min(1),
+        notes: z.string().optional(),
+      }).parse(req.body);
+
+      const amount = body.items.reduce((s, i) => s + i.quantity * i.unit_price, 0);
+
+      // Generate sequential invoice number e.g. INV-2026-0042
+      const [{ nextval }] = await db.withSuperAdmin(async (c) => {
+        const r = await c.query(`SELECT COALESCE(MAX(CAST(SPLIT_PART(invoice_number,'-',3) AS INT)),0)+1 AS nextval FROM platform_invoices`);
+        return r.rows;
+      });
+      const invoiceNumber = `INV-${new Date().getFullYear()}-${String(nextval).padStart(4,'0')}`;
+
+      const [row] = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(
+          `INSERT INTO platform_invoices (tenant_id, invoice_number, period_start, period_end, due_date, currency, amount, items, notes)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+          [body.tenant_id, invoiceNumber, body.period_start, body.period_end, body.due_date,
+           body.currency, amount, JSON.stringify(body.items), body.notes ?? null],
+        );
+        return r.rows;
+      });
+      return reply.code(201).send({ success: true, data: row });
+    });
+
+    // PATCH /super-admin/platform-invoices/:id — update status or send
+    fastify.patch('/platform-invoices/:id', async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const body = z.object({
+        status: z.enum(['draft','sent','paid','overdue','cancelled']).optional(),
+        notes:  z.string().optional(),
+        due_date: z.string().optional(),
+      }).parse(req.body);
+
+      const [row] = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(
+          `UPDATE platform_invoices SET
+             status   = COALESCE($2, status),
+             notes    = COALESCE($3, notes),
+             due_date = COALESCE($4, due_date),
+             paid_at  = CASE WHEN $2 = 'paid' AND paid_at IS NULL THEN NOW() ELSE paid_at END,
+             updated_at = NOW()
+           WHERE id = $1 RETURNING *`,
+          [id, body.status ?? null, body.notes ?? null, body.due_date ?? null],
+        );
+        return r.rows;
+      });
+      if (!row) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Invoice not found' } });
+      return reply.send({ success: true, data: row });
+    });
+
+    // DELETE /super-admin/platform-invoices/:id (draft only)
+    fastify.delete('/platform-invoices/:id', async (req, reply) => {
+      const { id } = req.params as { id: string };
+      await db.withSuperAdmin(async (client) => {
+        await client.query(`DELETE FROM platform_invoices WHERE id = $1 AND status = 'draft'`, [id]);
+      });
+      return reply.send({ success: true });
+    });
+
+    // POST /super-admin/platform-invoices/:id/payments — record a payment
+    fastify.post('/platform-invoices/:id/payments', async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const body = z.object({
+        amount:       z.number().positive(),
+        payment_date: z.string(),
+        method:       z.enum(['bank_transfer','card','cheque','cash','other']).optional(),
+        reference:    z.string().optional(),
+        notes:        z.string().optional(),
+      }).parse(req.body);
+
+      const [invoice] = await db.withSuperAdmin(async (c) => {
+        const r = await c.query(`SELECT * FROM platform_invoices WHERE id = $1`, [id]);
+        return r.rows;
+      });
+      if (!invoice) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Invoice not found' } });
+
+      const [payment] = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(
+          `INSERT INTO platform_payments (invoice_id, tenant_id, amount, currency, payment_date, method, reference, notes)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+          [id, invoice.tenant_id, body.amount, invoice.currency, body.payment_date,
+           body.method ?? null, body.reference ?? null, body.notes ?? null],
+        );
+        return r.rows;
+      });
+
+      // Auto-mark invoice paid if total payments cover the amount
+      const [{ total_paid }] = await db.withSuperAdmin(async (c) => {
+        const r = await c.query(`SELECT COALESCE(SUM(amount),0) AS total_paid FROM platform_payments WHERE invoice_id=$1`, [id]);
+        return r.rows;
+      });
+      if (Number(total_paid) >= Number(invoice.amount)) {
+        await db.withSuperAdmin(async (c) => {
+          await c.query(`UPDATE platform_invoices SET status='paid', paid_at=NOW(), updated_at=NOW() WHERE id=$1`, [id]);
+        });
+      }
+
+      return reply.code(201).send({ success: true, data: payment });
+    });
+
+    // GET /super-admin/platform-invoices/:id/payments
+    fastify.get('/platform-invoices/:id/payments', async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const rows = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(
+          `SELECT * FROM platform_payments WHERE invoice_id = $1 ORDER BY payment_date DESC`,
+          [id],
+        );
+        return r.rows;
+      });
+      return reply.send({ success: true, data: rows });
     });
   };
 }
