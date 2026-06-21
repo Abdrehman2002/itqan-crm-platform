@@ -46,12 +46,21 @@ const CreateTicketSchema = z.object({
   contactId:     z.string().uuid().optional(),
   companyId:     z.string().uuid().optional(),
   assigneeId:    z.string().uuid().optional(),
-  reporterEmail: z.string().email().optional(),
+  // Accept empty strings (forms send "" not undefined). Coerce to undefined.
+  reporterEmail: z.preprocess(v => (v === '' ? undefined : v),
+                              z.string().email().optional()),
   reporterName:  z.string().optional(),
   reporterPhone:     z.string().optional(),
   reporterWhatsapp:  z.string().optional(),
-  preferredChannel:  z.enum(['email','sms','whatsapp']).default('email'),
-  ticketType:        z.enum(['complaint','inquiry','sales']).default('complaint'),
+  // Multi-select channel — accept array OR legacy single value
+  preferredChannel:  z.union([
+                       z.enum(['email','sms','whatsapp','phone']),
+                       z.array(z.enum(['email','sms','whatsapp','phone'])),
+                     ]).default('email'),
+  // ticket_type now includes 'support' (was missing — broke support agent manual ticket creation)
+  ticketType:        z.enum(['complaint','inquiry','sales','support']).default('complaint'),
+  // Optional preset issue category (loan type, complaint reason, etc.)
+  issueCategory:     z.string().optional(),
   tags:              z.array(z.string()).optional(),
   customFields:  z.record(z.unknown()).optional(),
 });
@@ -813,35 +822,65 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
     fastify.post('/', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const body       = CreateTicketSchema.parse(req.body);
       const tenantId   = req.tenant.id;
+      const userId     = req.user.sub as string;
+      const userDept   = (req.user as any).department_type as string | null;
+
+      // Auto-default ticketType from user's department if frontend didn't specify.
+      // Sales agent → 'sales', Complaints agent → 'complaint', Support agent → 'support'.
+      // Maps both 'complaints' and 'complaint' to 'complaint' (DB enum value).
+      const ticketType = body.ticketType !== 'complaint' ? body.ticketType
+        : userDept === 'sales'      ? 'sales'
+        : userDept === 'support'    ? 'support'
+        : 'complaint';
+
       const ticketNum  = await nextTicketNumber(db, tenantId);
       const sla        = await findSlaPolicy(db, tenantId, body.slaPolicyId, body.priority);
 
       const [ticket] = await db.withTenant(tenantId, async (client) => {
-        // Auto-assign to default queue if none given
+        // Auto-assign to user's dept queue first (Sales agent → Sales Queue),
+        // fall back to default queue if dept queue not found.
         let queueId = body.queueId;
         if (!queueId) {
-          const qr = await client.query('SELECT id FROM ticket_queues WHERE is_default = true LIMIT 1');
+          const wantedDept = ticketType === 'complaint' ? 'complaint'
+                           : ticketType === 'sales'     ? 'sales'
+                           : ticketType === 'support'   ? 'support' : null;
+          const qr = await client.query(
+            `SELECT id FROM ticket_queues
+             WHERE ($1::text IS NULL OR department_type = $1)
+                OR is_default = true
+             ORDER BY (department_type = $1) DESC NULLS LAST, is_default DESC
+             LIMIT 1`,
+            [wantedDept],
+          );
           queueId = qr.rows[0]?.id;
         }
 
+        // Normalize preferredChannel — DB column is text, store as comma-joined
+        // string when multi-select (preserves all channels the customer wants).
+        const prefChan = Array.isArray(body.preferredChannel)
+          ? body.preferredChannel.join(',')
+          : (body.preferredChannel ?? 'email');
+
         const status = body.assigneeId ? 'assigned' : 'open';
+        const customFields = { ...(body.customFields ?? {}),
+          ...(body.issueCategory ? { issue_category: body.issueCategory } : {}) };
+
         const r = await client.query(
           `INSERT INTO tickets
              (tenant_id, ticket_number, subject, description, status, priority, channel,
-              queue_id, sla_policy_id, contact_id, company_id, assignee_id,
+              queue_id, sla_policy_id, contact_id, company_id, assignee_id, created_by,
               reporter_email, reporter_name, reporter_phone, reporter_whatsapp,
               preferred_channel, ticket_type, tags, custom_fields)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
            RETURNING *`,
           [tenantId, ticketNum, body.subject, body.description ?? null,
            status, body.priority, body.channel,
            queueId ?? null, sla?.id ?? null,
            body.contactId ?? null, body.companyId ?? null,
-           body.assigneeId ?? null,
+           body.assigneeId ?? null, userId,
            body.reporterEmail ?? null, body.reporterName ?? null, body.reporterPhone ?? null,
-            body.reporterWhatsapp ?? null, body.preferredChannel ?? 'email',
-            body.ticketType ?? 'complaint',
-            body.tags ?? [], JSON.stringify(body.customFields ?? {})],
+            body.reporterWhatsapp ?? null, prefChan, ticketType,
+            body.tags ?? [], JSON.stringify(customFields)],
         );
         return r.rows;
       });
@@ -1930,17 +1969,21 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
       const tenantId  = req.tenant.id;
       const managerId = (req.query as any).manager_id ?? req.user.sub;
 
+      // Reporting subtree EXCLUDING the manager themself (per product feedback —
+      // the manager shouldn't appear in their own team breakdown). Builds rows
+      // for every direct + indirect report so the Manager sees their full team
+      // (Sadia + Ali + Omar + Zoya), not just direct reports (Sadia alone).
       const { rows: [totals] } = await db.withTenant(tenantId, (client) =>
         client.query(
           `WITH RECURSIVE team AS (
-             SELECT id FROM users WHERE tenant_id = $1 AND id = $2
+             SELECT id FROM users WHERE tenant_id = $1 AND manager_id = $2
              UNION ALL
              SELECT u.id FROM users u INNER JOIN team t ON u.manager_id = t.id
              WHERE u.tenant_id = $1
            )
            SELECT
              COUNT(*) FILTER (WHERE t.status = 'assigned')                                           AS assigned,
-             COUNT(*) FILTER (WHERE t.status = 'accepted' OR t.accepted_at IS NOT NULL
+             COUNT(*) FILTER (WHERE (t.status = 'accepted' OR t.accepted_at IS NOT NULL)
                                AND t.status NOT IN ('resolved','closed'))                             AS accepted,
              COUNT(*) FILTER (WHERE t.status IN ('pending','in_progress'))                           AS pending,
              COUNT(*) FILTER (WHERE t.status = 'resolved')                                           AS resolved,
@@ -1960,10 +2003,16 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
 
       const { rows: agents } = await db.withTenant(tenantId, (client) =>
         client.query(
-          `SELECT
-             u.id, u.name, u.email, u.department, u.department_type,
+          `WITH RECURSIVE team AS (
+             SELECT id FROM users WHERE tenant_id = $1 AND manager_id = $2
+             UNION ALL
+             SELECT u.id FROM users u INNER JOIN team t ON u.manager_id = t.id
+             WHERE u.tenant_id = $1
+           )
+           SELECT
+             u.id, u.name, u.email, u.role, u.department, u.department_type,
              COUNT(t.id) FILTER (WHERE t.status = 'assigned')                                        AS assigned,
-             COUNT(t.id) FILTER (WHERE t.status = 'accepted' OR t.accepted_at IS NOT NULL
+             COUNT(t.id) FILTER (WHERE (t.status = 'accepted' OR t.accepted_at IS NOT NULL)
                                   AND t.status NOT IN ('resolved','closed'))                          AS accepted,
              COUNT(t.id) FILTER (WHERE t.status IN ('pending','in_progress'))                        AS pending,
              COUNT(t.id) FILTER (WHERE t.status = 'resolved')                                        AS resolved,
@@ -1977,9 +2026,11 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
                                   AND t.status NOT IN ('resolved','closed'))                          AS breached_tat
            FROM users u
            LEFT JOIN tickets t ON t.assignee_id = u.id AND t.tenant_id = $1
-           WHERE u.tenant_id = $1 AND u.manager_id = $2
-           GROUP BY u.id, u.name, u.email, u.department, u.department_type
-           ORDER BY u.name`,
+           WHERE u.id IN (SELECT id FROM team)
+           GROUP BY u.id, u.name, u.email, u.role, u.department, u.department_type
+           ORDER BY
+             CASE u.role WHEN 'line_manager' THEN 1 WHEN 'agent' THEN 2 ELSE 3 END,
+             u.name`,
           [tenantId, managerId]
         )
       );

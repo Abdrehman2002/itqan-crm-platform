@@ -392,10 +392,14 @@ function TicketCard({
 // ── Create ticket modal ────────────────────────────────────────────────────
 function CreateTicketModal({ queues, onClose }: { queues: Queue[]; onClose: () => void }) {
   const qc = useQueryClient();
+  // preferredChannels is multi-select now (customer can pick email + WhatsApp etc.)
+  // issueCategory is the dropdown picked from a preset list per dept (or "Other")
   const [form, setForm] = useState({
     subject: '', description: '', priority: 'medium',
     queueId: '', reporterName: '', reporterEmail: '', reporterPhone: '',
-    reporterWhatsapp: '', preferredChannel: 'email' as 'email' | 'sms' | 'whatsapp',
+    reporterWhatsapp: '',
+    preferredChannels: ['email'] as Array<'email' | 'sms' | 'whatsapp' | 'phone'>,
+    issueCategory: '',
   });
 
   const mutation = useMutation({
@@ -409,13 +413,18 @@ function CreateTicketModal({ queues, onClose }: { queues: Queue[]; onClose: () =
       reporterEmail:    form.reporterEmail    || undefined,
       reporterPhone:     form.reporterPhone     || undefined,
       reporterWhatsapp:  form.reporterWhatsapp  || undefined,
-      preferredChannel:  form.preferredChannel,
+      // Multi-select: send as array if more than one channel chosen, else single value
+      preferredChannel:  form.preferredChannels.length > 1
+                           ? form.preferredChannels
+                           : (form.preferredChannels[0] ?? 'email'),
+      issueCategory:     form.issueCategory || undefined,
     }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['tickets'] });
       qc.invalidateQueries({ queryKey: ['ticket-stats'] });
       onClose();
     },
+    // No onError needed — error.message is rendered in the modal footer below.
   });
 
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
@@ -447,34 +456,70 @@ function CreateTicketModal({ queues, onClose }: { queues: Queue[]; onClose: () =
             </div>
           </div>
 
-          {/* Preferred response channel */}
+          {/* Preferred response channels — MULTI-select (customer can pick more than one) */}
           <div>
-            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Preferred Response Channel</p>
-            <p className="text-xs text-gray-400 mb-2">How would the customer like to receive replies?</p>
-            <div className="grid grid-cols-3 gap-2">
+            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Preferred Response Channels</p>
+            <p className="text-xs text-gray-400 mb-2">Tap one or more — customer can prefer multiple ways to be reached</p>
+            <div className="grid grid-cols-4 gap-2">
               {([
-                { val: 'email',    label: 'Email',    icon: '✉️',  desc: 'Reply by email' },
-                { val: 'sms',      label: 'SMS',      icon: '💬',  desc: 'Text message' },
-                { val: 'whatsapp', label: 'WhatsApp', icon: '📱',  desc: 'WhatsApp message' },
-              ] as const).map(({ val, label, icon, desc }) => (
+                { val: 'email',    label: 'Email',    icon: '✉️',  desc: 'Email' },
+                { val: 'sms',      label: 'SMS',      icon: '💬',  desc: 'Text' },
+                { val: 'whatsapp', label: 'WhatsApp', icon: '📱',  desc: 'WhatsApp' },
+                { val: 'phone',    label: 'Phone',    icon: '📞',  desc: 'Call' },
+              ] as const).map(({ val, label, icon, desc }) => {
+                const isSelected = form.preferredChannels.includes(val);
+                return (
                 <button key={val} type="button"
-                  onClick={() => setForm(f => ({ ...f, preferredChannel: val }))}
+                  onClick={() => setForm(f => ({
+                    ...f,
+                    preferredChannels: isSelected
+                      ? f.preferredChannels.filter(c => c !== val)
+                      : [...f.preferredChannels, val],
+                  }))}
                   className={`flex flex-col items-center gap-1 p-3 rounded-xl border-2 transition-all text-center ${
-                    form.preferredChannel === val
+                    isSelected
                       ? 'border-brand-500 bg-brand-50'
                       : 'border-gray-200 hover:border-gray-300'
                   }`}>
                   <span className="text-lg">{icon}</span>
-                  <span className={`text-xs font-semibold ${form.preferredChannel === val ? 'text-brand-700' : 'text-gray-700'}`}>{label}</span>
+                  <span className={`text-xs font-semibold ${isSelected ? 'text-brand-700' : 'text-gray-700'}`}>{label}</span>
                   <span className="text-[10px] text-gray-400">{desc}</span>
                 </button>
-              ))}
+                );
+              })}
             </div>
           </div>
 
-          {/* Issue section */}
+          {/* Issue section — dropdown of common categories + custom (Other) */}
           <div>
             <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Issue Details</p>
+            <select value={form.issueCategory} onChange={set('issueCategory')}
+              className="w-full bg-white border border-gray-200 text-gray-700 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-brand-500/60 mb-3">
+              <option value="">Select issue category…</option>
+              <optgroup label="Sales">
+                <option value="home_loan">Home Loan inquiry</option>
+                <option value="auto_loan">Auto Loan inquiry</option>
+                <option value="personal_loan">Personal Loan inquiry</option>
+                <option value="gold_loan">Gold Loan inquiry</option>
+                <option value="credit_card">Credit Card inquiry</option>
+              </optgroup>
+              <optgroup label="Complaints">
+                <option value="fraud">Fraud / Unauthorized transaction</option>
+                <option value="wrong_charge">Wrong charge / Disputed transaction</option>
+                <option value="atm_issue">ATM card swallowed / stuck</option>
+                <option value="card_blocked">Card blocked (PIN attempts)</option>
+                <option value="unauth_sms">Unauthorized SMS banking transfer</option>
+              </optgroup>
+              <optgroup label="Support">
+                <option value="password_reset">Password reset</option>
+                <option value="beneficiary_add">Add beneficiary</option>
+                <option value="mobile_banking">Mobile banking issue</option>
+                <option value="statement_download">Statement download</option>
+                <option value="cheque_book">Cheque book request</option>
+                <option value="iban_query">IBAN / account info</option>
+              </optgroup>
+              <option value="other">Other (specify in subject)</option>
+            </select>
             <input value={form.subject} onChange={set('subject')} placeholder="Reason / Subject *"
               className="w-full bg-white border border-gray-200 text-gray-900 placeholder-gray-400 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-brand-500/60 mb-3" />
             <textarea value={form.description} onChange={set('description')} rows={3} placeholder="Describe the problem in detail…"
@@ -507,6 +552,16 @@ function CreateTicketModal({ queues, onClose }: { queues: Queue[]; onClose: () =
           </div>
         </div>
 
+        {/* Inline error — show validation/server failures so user knows why submit silently no-ops */}
+        {mutation.isError && (
+          <div className="mx-6 mb-3 px-3 py-2 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
+            {(() => {
+              const err = mutation.error as any;
+              const resp = err?.response?.data?.error;
+              return resp?.message ?? err?.message ?? 'Failed to create ticket — check required fields.';
+            })()}
+          </div>
+        )}
         <div className="px-6 pb-5 flex gap-2">
           <button onClick={onClose} className="flex-1 py-2.5 border border-gray-200 rounded-xl text-sm text-gray-500 hover:bg-gray-50">Cancel</button>
           <button onClick={() => mutation.mutate()} disabled={!form.subject || mutation.isPending}
