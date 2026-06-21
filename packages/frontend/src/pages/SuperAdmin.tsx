@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 import { api } from '../services/api';
 import { useIsSuperAdmin } from '../hooks/useRole';
-import { Navigate } from 'react-router-dom';
+import { Navigate, useLocation } from 'react-router-dom';
 import { PermissionsMatrix } from '../components/PermissionsMatrix';
 import type { ModuleDef } from '../components/PermissionsMatrix';
 
@@ -1556,7 +1556,22 @@ export function SuperAdmin() {
   if (!isSuperAdmin) return <Navigate to="/dashboard" replace />;
 
   const qc = useQueryClient();
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'tenants' | 'roles' | 'sub-admins' | 'billing'>('dashboard');
+  // Hash-synced tab so the SuperAdminSidebar links (e.g. /super-admin#tenants)
+  // actually switch tabs instead of just changing the URL fragment silently.
+  const location = useLocation();
+  const tabFromHash = (h: string): 'dashboard' | 'tenants' | 'roles' | 'sub-admins' | 'billing' => {
+    const v = h.replace(/^#/, '');
+    return (['dashboard','tenants','roles','sub-admins','billing'] as const).includes(v as any)
+      ? (v as any) : 'dashboard';
+  };
+  const [activeTab, setActiveTabState] = useState<'dashboard' | 'tenants' | 'roles' | 'sub-admins' | 'billing'>(tabFromHash(location.hash));
+  // Keep state and URL hash in lockstep: clicking a sidebar link updates state;
+  // clicking a tab button updates the URL hash so deep-links + back/forward work.
+  useEffect(() => { setActiveTabState(tabFromHash(location.hash)); }, [location.hash]);
+  const setActiveTab = (t: typeof activeTab) => {
+    setActiveTabState(t);
+    if (location.hash !== `#${t}`) window.history.replaceState(null, '', `#${t}`);
+  };
   const [search, setSearch] = useState('');
   const [planFilter, setPlanFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');

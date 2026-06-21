@@ -114,13 +114,14 @@ const BOTTOM_NAV = [
 // Super admin is platform-scoped; /api/v1/modules returns 403 for them.
 // Avoid the regular Sidebar which renders cached tenant modules + workspace chip.
 function SuperAdminSidebar({ onLogout, userName }: { onLogout: () => void; userName: string }) {
+  // Hash matches SuperAdmin.tsx's activeTab keys exactly:
+  // 'dashboard' | 'tenants' | 'billing' | 'roles' | 'sub-admins'
   const items = [
-    { path: '/super-admin', label: 'Dashboard',          icon: Shield, hash: '' },
-    { path: '/super-admin#tenants',           label: 'Tenants',          icon: Users },
-    { path: '/super-admin#sub-admins',        label: 'Sub-Admins',       icon: UserCheck },
-    { path: '/super-admin#platform-roles',    label: 'Platform Roles',   icon: ShieldCheck },
-    { path: '/super-admin#platform-invoices', label: 'Platform Invoices', icon: CreditCard },
-    { path: '/super-admin#sync',              label: 'Sync Entitlements', icon: Zap },
+    { path: '/super-admin#dashboard',  label: 'Dashboard',       icon: BarChart3 },
+    { path: '/super-admin#tenants',    label: 'Tenants',         icon: Building2 },
+    { path: '/super-admin#billing',    label: 'Platform Billing', icon: CreditCard },
+    { path: '/super-admin#roles',      label: 'Sub-Admin Roles', icon: ShieldCheck },
+    { path: '/super-admin#sub-admins', label: 'Sub-Admins',      icon: UserCheck },
   ];
   return (
     <div className="w-56 flex flex-col h-full" style={{ background: 'linear-gradient(180deg, #1a0f2e 0%, #2b1750 60%, #3d2070 100%)' }}>
