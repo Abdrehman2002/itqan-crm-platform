@@ -11,6 +11,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { Bell, CheckCheck, LifeBuoy, AlertTriangle, ShieldAlert, X } from 'lucide-react';
 import { api } from '../services/api';
+import { useAuthStore } from '../store/auth.store';
 
 interface Notification {
   id: string;
@@ -44,12 +45,21 @@ export function NotificationBell() {
   const ref = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
   const qc = useQueryClient();
+  const { user } = useAuthStore();
+
+  // Super admin lives at the platform layer — server.ts blocks them from all
+  // /api/v1/* routes with a 403. Don't render the bell at all (and don't fire
+  // the poll) for them; their notifications belong on the super-admin surface.
+  const isSuperAdmin = user?.role === 'super_admin';
 
   const { data } = useQuery<{ data: Notification[]; meta: { unreadCount: number } }>({
     queryKey: ['notifications'],
     queryFn: async () => (await api.get('/api/v1/notifications')).data,
     refetchInterval: 30_000,
+    enabled: !isSuperAdmin,
   });
+
+  if (isSuperAdmin) return null;
 
   const readMutation = useMutation({
     mutationFn: (id: string) => api.post(`/api/v1/notifications/${id}/read`, {}),
