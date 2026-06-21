@@ -97,8 +97,28 @@ export function rolesRoutes(db: DatabaseClient) {
     });
 
     // GET /api/v1/roles/modules — module definitions
+    // Frontend RoleModal expects { key, label, icon, actions: [{ key, label, type }] },
+    // not the internal { levels: [] } shape. Transform on the way out so the
+    // Edit Role modal renders instead of crashing on m.actions.map() (blank screen bug).
     fastify.get('/modules', async (_req, reply) => {
-      return reply.send({ success: true, data: MODULE_DEFS });
+      const out = MODULE_DEFS.map((m) => {
+        const actions: Array<{ key: string; label: string; type: 'read' | 'write' | 'danger' }> = [];
+        // 'view' level → read action (always present unless level set is just ['none'])
+        if (m.levels.includes('view')) {
+          actions.push({ key: `${m.key}:read`, label: 'View', type: 'read' });
+        }
+        // 'full' level → write action (create/edit/manage)
+        if (m.levels.includes('full')) {
+          actions.push({ key: `${m.key}:write`, label: 'Create / Edit', type: 'write' });
+          // Delete is implicit in 'full' for record-bearing modules — gate by key to
+          // avoid showing 'Delete dashboard' which is nonsensical.
+          if (['contacts','companies','deals','activities','tickets','emails'].includes(m.key)) {
+            actions.push({ key: `${m.key}:delete`, label: 'Delete', type: 'danger' });
+          }
+        }
+        return { key: m.key, label: m.label, icon: m.icon, actions };
+      });
+      return reply.send({ success: true, data: out });
     });
 
     // POST /api/v1/roles — create custom role
