@@ -502,10 +502,13 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
       const scopeParams: any[] = [userId];
 
       if (role === 'agent' || role === 'viewer') {
-        // Their work + the dept queue they could claim from
-        scopeSql = `WHERE (assignee_id = $1 OR (assignee_id IS NULL AND queue_id IN (
-                      SELECT id FROM ticket_queues WHERE LOWER(name) LIKE '%' || $2 || '%'
-                    )))`;
+        // Their work + the dept queue they could claim from + tickets they created
+        // (so a ticket they manually created shows on their dashboard even if
+        // push_random auto-routed it to someone else).
+        scopeSql = `WHERE (assignee_id = $1
+                      OR created_by  = $1
+                      OR (assignee_id IS NULL AND queue_id IN (
+                            SELECT id FROM ticket_queues WHERE LOWER(name) LIKE '%' || $2 || '%')))`;
         scopeParams.push((deptType ?? '').toLowerCase());
       } else if (role === 'manager' || role === 'line_manager') {
         // Recursive subtree of users reporting up to me + tickets in my dept queue
@@ -861,22 +864,31 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
       const sla        = await findSlaPolicy(db, tenantId, body.slaPolicyId, body.priority);
 
       const [ticket] = await db.withTenant(tenantId, async (client) => {
-        // Auto-assign to user's dept queue first (Sales agent → Sales Queue),
-        // fall back to default queue if dept queue not found.
-        let queueId = body.queueId;
+        // For non-admin roles: FORCE the queue to match the user's department,
+        // regardless of what the frontend sent. Prevents a Sales agent from
+        // accidentally dumping a ticket into Complaints Queue. Tenant/super
+        // admins can still override via body.queueId.
+        const wantedDept = ticketType === 'complaint' ? 'complaint'
+                         : ticketType === 'sales'     ? 'sales'
+                         : ticketType === 'support'   ? 'support' : null;
+        const isAdmin = (req.user as any).role === 'tenant_admin' || (req.user as any).role === 'super_admin';
+        let queueId = isAdmin ? body.queueId : undefined;
         if (!queueId) {
-          const wantedDept = ticketType === 'complaint' ? 'complaint'
-                           : ticketType === 'sales'     ? 'sales'
-                           : ticketType === 'support'   ? 'support' : null;
+          // Match the dept queue strictly first (no fallback to default for
+          // non-admins — a Sales ticket MUST go to Sales Queue).
           const qr = await client.query(
             `SELECT id FROM ticket_queues
              WHERE ($1::text IS NULL OR department_type = $1)
-                OR is_default = true
-             ORDER BY (department_type = $1) DESC NULLS LAST, is_default DESC
+             ORDER BY (department_type = $1) DESC NULLS LAST
              LIMIT 1`,
             [wantedDept],
           );
           queueId = qr.rows[0]?.id;
+          // Last-resort fallback to default queue only if absolutely no dept match
+          if (!queueId) {
+            const def = await client.query(`SELECT id FROM ticket_queues WHERE is_default = true LIMIT 1`);
+            queueId = def.rows[0]?.id;
+          }
         }
 
         // Normalize preferredChannel — DB column is text, store as comma-joined
@@ -1027,7 +1039,10 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
       //                              ticket, it disappears from my view since it
       //                              has an assignee_id != me)
       if (role === 'agent' || role === 'viewer') {
+        // Mine + unassigned in dept queue + ones I created (so my own manual
+        // tickets show even if push_random handed them to a teammate).
         where.push(`(t.assignee_id = $${idx}
+                    OR t.created_by  = $${idx}
                     OR (t.assignee_id IS NULL AND t.queue_id IN (
                         SELECT id FROM ticket_queues WHERE department_type = $${idx + 1})))`);
         params.push(userId, deptType ?? null);

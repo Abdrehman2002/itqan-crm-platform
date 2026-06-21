@@ -543,11 +543,11 @@ function CreateTicketModal({ queues, onClose }: { queues: Queue[]; onClose: () =
             </div>
             <div>
               <p className="text-xs font-medium text-gray-400 mb-1.5">Queue</p>
-              <select value={form.queueId} onChange={set('queueId')}
-                className="w-full bg-white border border-gray-200 text-gray-700 rounded-xl px-3 py-2 text-sm outline-none focus:border-brand-500/60">
-                <option value="">Default queue</option>
-                {queues.map(q => <option key={q.id} value={q.id}>{q.name}</option>)}
-              </select>
+              {/* For non-admins: queue is auto-routed to their dept queue server-side.
+                  The dropdown is shown disabled with a hint so users know where it'll land. */}
+              <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-500">
+                Auto-routed to your department queue
+              </div>
             </div>
           </div>
         </div>
