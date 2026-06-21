@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import bcrypt from 'bcrypt';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { DatabaseClient } from '@crm/core';
@@ -445,12 +446,19 @@ export function settingsRoutes(db: DatabaseClient) {
         managerId:       z.string().uuid().optional(),
         // Capacity: how many direct reports this user can have (only meaningful for manager/line_manager)
         maxDirectReports: z.number().int().min(0).max(100).optional(),
+        // Direct password set — tenant admin can onboard members without depending
+        // on email delivery. If supplied, user can log in immediately. If omitted,
+        // falls through to the existing email-invite-link flow.
+        password:        z.string().min(8).max(200).optional(),
       });
       const parsed = InviteSchema.safeParse(req.body);
       if (!parsed.success) {
         return reply.code(400).send({ success: false, error: { code: 'INVALID_INPUT', message: parsed.error.issues[0]?.message ?? 'Invalid input' } });
       }
-      const { email, name, role, custom_role_id, permissions: customPermissions, department, departmentType, managerId, maxDirectReports } = parsed.data;
+      const { email, name, role, custom_role_id, permissions: customPermissions, department, departmentType, managerId, maxDirectReports, password } = parsed.data;
+      // Pre-hash if password was supplied so we can write it straight into INSERT.
+      // bcrypt is imported at the top of this file for /auth/refresh + similar flows.
+      const passwordHash = password ? await bcrypt.hash(password, 12) : 'INVITE_PENDING';
 
       const displayName  = name?.trim() || email.split('@')[0];
       const assignedRole = role ?? 'agent';
@@ -503,16 +511,21 @@ export function settingsRoutes(db: DatabaseClient) {
       let user: any;
       try {
         [user] = await db.withTenant(req.tenant.id, async (client) => {
+          // Pass the pre-hashed password (real bcrypt hash if supplied, else
+          // 'INVITE_PENDING' sentinel). On UPDATE we only overwrite the hash
+          // if a real one was provided — avoids wiping an existing user's
+          // password back to INVITE_PENDING when re-inviting them.
           const result = await client.query(
             `INSERT INTO users (tenant_id, email, name, role, password_hash, permissions, custom_role_id, department, department_type, manager_id, max_direct_reports)
-             VALUES ($1, $2, $3, $4, 'INVITE_PENDING', $5, $6, $7, $8, $9, $10)
+             VALUES ($1, $2, $3, $4, $11, $5, $6, $7, $8, $9, $10)
              ON CONFLICT (tenant_id, email) DO UPDATE
                SET role = EXCLUDED.role, name = EXCLUDED.name,
                    permissions = EXCLUDED.permissions, custom_role_id = EXCLUDED.custom_role_id,
                    department = EXCLUDED.department, department_type = EXCLUDED.department_type,
-                   manager_id = EXCLUDED.manager_id, max_direct_reports = EXCLUDED.max_direct_reports
+                   manager_id = EXCLUDED.manager_id, max_direct_reports = EXCLUDED.max_direct_reports,
+                   password_hash = CASE WHEN $11 = 'INVITE_PENDING' THEN users.password_hash ELSE $11 END
              RETURNING id, email, name, role, permissions, custom_role_id, department, department_type, manager_id, max_direct_reports`,
-            [req.tenant.id, email, displayName, assignedRole, JSON.stringify(perms), custom_role_id ?? null, department ?? null, departmentType ?? null, managerId ?? null, maxDirectReports ?? null],
+            [req.tenant.id, email, displayName, assignedRole, JSON.stringify(perms), custom_role_id ?? null, department ?? null, departmentType ?? null, managerId ?? null, maxDirectReports ?? null, passwordHash],
           );
           return result.rows;
         });
@@ -525,7 +538,17 @@ export function settingsRoutes(db: DatabaseClient) {
         throw err;
       }
 
-      // 2. Generate a password-setup token (reuses the reset-password flow)
+      // 2. If admin supplied a password, the user can log in immediately —
+      //    short-circuit and skip the reset-token + email-invite plumbing.
+      if (password) {
+        return reply.send({
+          success: true,
+          data: { user, immediateLogin: true },
+          message: `${displayName} can log in now with their email + the password you set.`,
+        });
+      }
+
+      // 2b. Otherwise: generate a password-setup token (reuses reset-password flow)
       const rawToken  = crypto.randomBytes(32).toString('hex');
       const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
       const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
