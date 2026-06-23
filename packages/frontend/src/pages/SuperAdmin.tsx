@@ -11,13 +11,47 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Shield, Plus, Search, MoreVertical, Users, TrendingUp,
   Loader2, X, Check, AlertTriangle, Building2, BarChart3,
-  Package, Ban, Play, KeyRound, Edit2, Trash2, RefreshCw,
+  Package, Ban, Play, KeyRound, Trash2, RefreshCw, FileText,
+  BarChart2, Receipt, ClipboardList, Edit2, Eye, EyeOff,
+  Lock, Calendar, ChevronDown, ChevronRight, Download,
 } from 'lucide-react';
 import { api } from '../services/api';
 import { useIsSuperAdmin } from '../hooks/useRole';
-import { Navigate, useLocation } from 'react-router-dom';
+import { Navigate } from 'react-router-dom';
 import { PermissionsMatrix } from '../components/PermissionsMatrix';
 import type { ModuleDef } from '../components/PermissionsMatrix';
+
+// ── Reusable confirm modal ─────────────────────────────────────────────────
+function ConfirmModal({ title, message, confirmLabel = 'Delete', onConfirm, onCancel }: {
+  title: string; message: string; confirmLabel?: string;
+  onConfirm: () => void; onCancel: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm mx-4 p-6 space-y-4">
+        <div className="flex items-start gap-3">
+          <div className="w-9 h-9 bg-red-50 rounded-full flex items-center justify-center shrink-0">
+            <AlertTriangle className="w-5 h-5 text-red-500" />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-gray-900">{title}</h3>
+            <p className="text-xs text-gray-500 mt-1">{message}</p>
+          </div>
+        </div>
+        <div className="flex gap-2 justify-end pt-1">
+          <button onClick={onCancel}
+            className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50">
+            Cancel
+          </button>
+          <button onClick={onConfirm}
+            className="px-4 py-2 text-sm text-white bg-red-600 rounded-lg hover:bg-red-700">
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 const PLANS = ['free', 'starter', 'professional', 'enterprise'] as const;
 const PLAN_COLORS: Record<string, string> = {
@@ -36,12 +70,10 @@ const STATUS_COLORS: Record<string, string> = {
 // Full module catalog — keep in sync with MODULE_CATALOG in super-admin.ts
 const ALL_MODULES: Array<{ key: string; label: string; description: string; always?: boolean; icon: string }> = [
   { key: 'crm',          label: 'Core CRM',          icon: '🏢', description: 'Contacts, companies, deals, activities and analytics.',        always: true  },
-  { key: 'ticketing',    label: 'Ticketing',          icon: '🎫', description: 'Support tickets, SLA, escalations, queues and CSAT surveys.'             },
-  { key: 'voice',        label: 'Voice Calls',        icon: '📞', description: 'Inbound/outbound call logging, recordings and agent management.'         },
-  { key: 'voicebot',     label: 'Voice Bot (AI)',     icon: '🤖', description: 'AI-powered SIP/IVR voice bot for automated interactions.'               },
   { key: 'emails',       label: 'Email Inbox',        icon: '📧', description: 'Shared team email inbox with assignment and SLA tracking.'              },
   { key: 'integrations', label: 'Integrations',       icon: '🔌', description: 'SMS gateways, webhooks, Zapier/Make and API bridges.'                  },
   { key: 'analytics',    label: 'Advanced Analytics', icon: '📊', description: 'Cross-module reports, heatmaps and performance dashboards.'             },
+  { key: 'sales',        label: 'Sales Module',       icon: '💼', description: 'Sales pipeline, invoicing, payments and forecasting.'                    },
 ];
 
 const SYSTEM_ROLES_META = [
@@ -182,52 +214,65 @@ function buildRolesPayload(rolePerms: Record<string, Record<string, boolean>>) {
 // ── Create Workspace Modal ─────────────────────────────────────────────────
 function CreateWorkspaceModal({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
-  const [form, setForm] = useState({ name: '', slug: '', plan: 'starter', adminEmail: '', adminName: '' });
+  const [form, setForm] = useState({ name: '', slug: '', plan: 'starter', adminEmail: '', adminName: '', adminPassword: '' });
+  const [autoGenPw, setAutoGenPw] = useState(true);
   const [slugTouched, setSlugTouched] = useState(false);
-  const [selectedModules, setSelectedModules] = useState<string[]>(['crm']);
-  const [step, setStep] = useState<'details' | 'modules' | 'roles'>('details');
-  const [rolePerms, setRolePerms] = useState<Record<string, Record<string, boolean>>>({});
+  const [selectedFeatures, setSelectedFeatures] = useState<string[]>([]);
+  const [step, setStep] = useState<'details' | 'modules'>('details');
+  const [result, setResult] = useState<{ slug: string; adminEmail: string; tempPassword?: string; emailSent?: boolean } | null>(null);
 
-  const { data: modules = [] } = useQuery<ModuleDef[]>({
-    queryKey: ['role-modules'],
-    queryFn: () => api.get('/api/v1/roles/modules').then((r) => r.data.data),
+  // Licensable module + feature catalog — the single source of truth (from the API).
+  // Adding a module there makes it appear here automatically.
+  type CatalogModule = { key: string; label: string; description: string; always?: boolean; features: { key: string; label: string }[] };
+  const { data: catalog = [] } = useQuery<CatalogModule[]>({
+    queryKey: ['license-catalog'],
+    queryFn: () => api.get('/super-admin/modules').then((r) => r.data.data),
   });
 
-  // Load defaults when entering roles step
+  // Pre-select all features of always-on modules (e.g. Core CRM) once the catalog loads.
   useEffect(() => {
-    if (step !== 'roles' || Object.keys(rolePerms).length > 0 || modules.length === 0) return;
-    const blank = Object.fromEntries(modules.flatMap((m) => m.actions.map((a) => [a.key, false])));
-    Promise.all(
-      SYSTEM_ROLES_META.map((r) =>
-        api.get(`/api/v1/roles/defaults/${r.base_role}`)
-          .then((res) => [r.base_role, res.data.data ?? blank] as [string, Record<string, boolean>])
-          .catch(() => [r.base_role, blank] as [string, Record<string, boolean>])
-      )
-    ).then((entries) => setRolePerms(Object.fromEntries(entries)));
-  }, [step, modules]);
+    if (catalog.length === 0 || selectedFeatures.length > 0) return;
+    const alwaysFeatures = catalog.filter((m) => m.always).flatMap((m) => m.features.map((f) => f.key));
+    if (alwaysFeatures.length) setSelectedFeatures(alwaysFeatures);
+  }, [catalog]);
 
   const mutation = useMutation({
-    mutationFn: (payload: typeof form & { modules: string[]; roles: any[] }) =>
-      api.post('/super-admin/tenants', payload),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['sa-tenants'] }); onClose(); },
+    // No roles payload — the backend auto-seeds the standard roles with sensible
+    // defaults. The tenant admin tailors who-can-do-what later, under Roles.
+    mutationFn: () => api.post('/super-admin/tenants', {
+      ...form,
+      adminPassword: autoGenPw ? undefined : (form.adminPassword || undefined),
+      entitledFeatures: selectedFeatures,
+    }),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ['sa-tenants'] });
+      const d = res.data.data;
+      setResult({ slug: d.slug, adminEmail: form.adminEmail, tempPassword: d.tempPassword, emailSent: d.emailSent });
+    },
   });
 
   const autoSlug = (name: string) =>
     name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
-  const toggleModule = (key: string) => {
-    if (key === 'crm') return;
-    setSelectedModules(prev =>
-      prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key],
-    );
+  // Feature-area selection (the entitlement). Modules are derived: licensed if ≥1 feature on.
+  const toggleFeature = (key: string) =>
+    setSelectedFeatures(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]);
+
+  const toggleModuleAll = (mod: CatalogModule) => {
+    const fkeys = mod.features.map(f => f.key);
+    const allOn = fkeys.every(k => selectedFeatures.includes(k));
+    setSelectedFeatures(prev => allOn
+      ? prev.filter(k => !fkeys.includes(k))
+      : Array.from(new Set([...prev, ...fkeys])));
   };
 
-  const detailsValid = form.name && form.slug && form.adminEmail && form.adminName;
+  const pwValid = autoGenPw || form.adminPassword.length >= 8;
+  const detailsValid = form.name && form.slug && form.adminEmail && form.adminName && pwValid;
+  const selectedModuleCount = catalog.filter(m => m.features.some(f => selectedFeatures.includes(f.key))).length;
 
   const STEP_LABELS: Record<string, string> = {
-    details: 'Step 1 of 3 — Workspace details',
-    modules: 'Step 2 of 3 — Licensed modules',
-    roles:   'Step 3 of 3 — Role permissions',
+    details: 'Step 1 of 2 — Workspace & admin details',
+    modules: 'Step 2 of 2 — Licensed modules & features',
   };
 
   return (
@@ -235,21 +280,56 @@ function CreateWorkspaceModal({ onClose }: { onClose: () => void }) {
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-6">
         <div className="flex items-center justify-between mb-5">
           <div>
-            <h2 className="font-semibold text-gray-900">Create Workspace</h2>
-            <p className="text-xs text-gray-400 mt-0.5">{STEP_LABELS[step]}</p>
+            <h2 className="font-semibold text-gray-900">{result ? 'Workspace Created' : 'Create Workspace'}</h2>
+            {!result && <p className="text-xs text-gray-400 mt-0.5">{STEP_LABELS[step]}</p>}
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
         </div>
 
+        {/* ── Success screen — surfaces the temp password once ── */}
+        {result && (
+          <div className="space-y-4">
+            <div className="flex flex-col items-center text-center py-2">
+              <div className="w-12 h-12 bg-green-50 rounded-full flex items-center justify-center mb-3">
+                <Check className="w-6 h-6 text-green-600" />
+              </div>
+              <p className="font-semibold text-gray-900">{form.name} is ready</p>
+              <p className="text-xs text-gray-400 mt-0.5">The tenant admin can sign in now with these credentials.</p>
+            </div>
+            <div className="bg-gray-50 border border-gray-100 rounded-xl divide-y divide-gray-100 text-sm">
+              <div className="flex justify-between px-4 py-2.5"><span className="text-gray-400">Workspace</span><span className="font-mono text-gray-700">{result.slug}</span></div>
+              <div className="flex justify-between px-4 py-2.5"><span className="text-gray-400">Admin email</span><span className="font-mono text-gray-700">{result.adminEmail}</span></div>
+              {result.tempPassword ? (
+                <div className="flex justify-between items-center px-4 py-2.5">
+                  <span className="text-gray-400">Temp password</span>
+                  <span className="font-mono font-semibold text-gray-900 bg-amber-50 border border-amber-100 px-2 py-0.5 rounded">{result.tempPassword}</span>
+                </div>
+              ) : (
+                <div className="flex justify-between px-4 py-2.5"><span className="text-gray-400">Password</span><span className="text-gray-500">Set by you</span></div>
+              )}
+            </div>
+            {result.tempPassword && (
+              <p className="text-xs flex items-start gap-1.5 text-amber-600">
+                <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                {result.emailSent
+                  ? 'Password emailed to the customer. Copy it above as a backup — it is shown only once.'
+                  : 'No system email configured — copy this password and share it securely with the customer. They should change it on first login.'}
+              </p>
+            )}
+            <button onClick={onClose} className="w-full py-2 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700">Done</button>
+          </div>
+        )}
+
+        {!result && (<>
         {/* Step indicator */}
         <div className="flex items-center gap-2 mb-5">
-          {(['details','modules','roles'] as const).map((s, i) => (
+          {(['details','modules'] as const).map((s, i) => (
             <div key={s} className="flex items-center gap-2">
               <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold transition-colors ${
                 step === s ? 'bg-brand-600 text-white' :
-                (['details','modules','roles'].indexOf(step) > i) ? 'bg-green-500 text-white' : 'bg-gray-100 text-gray-400'
+                (['details','modules'].indexOf(step) > i) ? 'bg-green-500 text-white' : 'bg-gray-100 text-gray-400'
               }`}>{i + 1}</div>
-              {i < 2 && <div className="h-px w-6 bg-gray-200" />}
+              {i < 1 && <div className="h-px w-6 bg-gray-200" />}
             </div>
           ))}
         </div>
@@ -298,6 +378,19 @@ function CreateWorkspaceModal({ onClose }: { onClose: () => void }) {
                 type="email" placeholder="admin@acme.com"
                 className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400" />
             </div>
+            {/* Admin password — auto-generate (shown once) or set manually */}
+            <div>
+              <label className="text-xs font-medium text-gray-600 mb-1 block">Admin Password</label>
+              <label className="flex items-center gap-2 mb-2 cursor-pointer">
+                <input type="checkbox" checked={autoGenPw} onChange={(e) => setAutoGenPw(e.target.checked)} className="accent-brand-600" />
+                <span className="text-xs text-gray-600">Auto-generate a temporary password (shown once after creation)</span>
+              </label>
+              {!autoGenPw && (
+                <input value={form.adminPassword} onChange={(e) => setForm({ ...form, adminPassword: e.target.value })}
+                  type="text" placeholder="Min 8 characters"
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400" />
+              )}
+            </div>
           </div>
         )}
 
@@ -307,53 +400,49 @@ function CreateWorkspaceModal({ onClose }: { onClose: () => void }) {
             <div className="bg-amber-50 border border-amber-100 rounded-xl px-4 py-3 mb-4">
               <p className="text-xs text-amber-700 flex items-start gap-1.5">
                 <Package className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                Select only the modules this tenant has <strong>paid and agreed for</strong>. The tenant admin
-                can enable/disable these for their users but cannot unlock modules not listed here.
+                <span>Allocate only the modules and feature-areas this customer <strong>agreed and paid for</strong>. This becomes their licensed entitlement — who can create/edit/delete within these is set later under Roles.</span>
               </p>
             </div>
-            <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-              {ALL_MODULES.map((m) => {
-                const isOn = selectedModules.includes(m.key);
-                const locked = m.always;
+            <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
+              {catalog.map((m) => {
+                const fkeys = m.features.map(f => f.key);
+                const onCount = fkeys.filter(k => selectedFeatures.includes(k)).length;
+                const allOn = onCount === fkeys.length && fkeys.length > 0;
+                const moduleOn = onCount > 0 || m.always;
                 return (
-                  <label key={m.key}
-                    className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition-colors ${
-                      locked
-                        ? 'bg-gray-50 border-gray-200 opacity-60 cursor-not-allowed'
-                        : isOn
-                        ? 'bg-brand-50 border-brand-200'
-                        : 'bg-white border-gray-100 hover:border-gray-200'
-                    }`}>
-                    <input type="checkbox" checked={isOn} disabled={locked} onChange={() => toggleModule(m.key)} className="accent-brand-600 shrink-0" />
-                    <span className="text-lg shrink-0">{m.icon}</span>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <p className="text-sm font-medium text-gray-800">{m.label}</p>
-                        {locked && <span className="text-[10px] bg-gray-200 text-gray-500 px-1.5 py-0.5 rounded-full">Always On</span>}
+                  <div key={m.key} className={`rounded-xl border ${moduleOn ? 'border-brand-200 bg-brand-50/40' : 'border-gray-100'}`}>
+                    {/* Module header — toggles all its features */}
+                    <label className="flex items-center gap-3 p-3 cursor-pointer">
+                      <input type="checkbox" checked={allOn}
+                        ref={(el) => { if (el) el.indeterminate = onCount > 0 && !allOn; }}
+                        onChange={() => toggleModuleAll(m)} className="accent-brand-600 shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-semibold text-gray-800">{m.label}</p>
+                          {m.always && <span className="text-[10px] bg-gray-200 text-gray-500 px-1.5 py-0.5 rounded-full">Always On</span>}
+                          <span className="text-[10px] text-gray-400">{onCount}/{fkeys.length} features</span>
+                        </div>
+                        <p className="text-xs text-gray-400 mt-0.5 leading-relaxed">{m.description}</p>
                       </div>
-                      <p className="text-xs text-gray-400 mt-0.5 leading-relaxed">{m.description}</p>
+                    </label>
+                    {/* Feature-area checkboxes */}
+                    <div className="px-3 pb-3 pl-9 grid grid-cols-2 gap-x-4 gap-y-1.5">
+                      {m.features.map((f) => (
+                        <label key={f.key} className="flex items-center gap-2 cursor-pointer">
+                          <input type="checkbox" checked={selectedFeatures.includes(f.key)}
+                            onChange={() => toggleFeature(f.key)} className="accent-brand-600 shrink-0" />
+                          <span className="text-xs text-gray-700">{f.label}</span>
+                        </label>
+                      ))}
                     </div>
-                  </label>
+                  </div>
                 );
               })}
             </div>
             <p className="text-xs text-gray-400 mt-3">
-              {selectedModules.length} module{selectedModules.length !== 1 ? 's' : ''} selected
+              {selectedModuleCount} module{selectedModuleCount !== 1 ? 's' : ''} · {selectedFeatures.length} feature{selectedFeatures.length !== 1 ? 's' : ''} allocated
             </p>
           </div>
-        )}
-
-        {/* Step 3 — Role permissions */}
-        {step === 'roles' && (
-          modules.length === 0 ? (
-            <div className="flex justify-center py-8"><Loader2 className="w-5 h-5 animate-spin text-gray-400" /></div>
-          ) : (
-            <RolesStep
-              modules={modules}
-              rolePerms={rolePerms}
-              onChange={(base_role, perms) => setRolePerms((p) => ({ ...p, [base_role]: perms }))}
-            />
-          )
         )}
 
         {mutation.isError && (
@@ -368,24 +457,15 @@ function CreateWorkspaceModal({ onClose }: { onClose: () => void }) {
               <button onClick={onClose} className="flex-1 py-2 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50">Cancel</button>
               <button onClick={() => setStep('modules')} disabled={!detailsValid}
                 className="flex-1 py-2 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700 disabled:opacity-50 flex items-center justify-center gap-2">
-                Next: Set Modules →
+                Next: Allocate Modules →
               </button>
             </>
           )}
           {step === 'modules' && (
             <>
               <button onClick={() => setStep('details')} className="flex-1 py-2 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50">← Back</button>
-              <button onClick={() => setStep('roles')}
-                className="flex-1 py-2 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700 flex items-center justify-center gap-2">
-                Next: Set Role Permissions →
-              </button>
-            </>
-          )}
-          {step === 'roles' && (
-            <>
-              <button onClick={() => setStep('modules')} className="flex-1 py-2 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50">← Back</button>
               <button
-                onClick={() => mutation.mutate({ ...form, modules: selectedModules, roles: buildRolesPayload(rolePerms) })}
+                onClick={() => mutation.mutate()}
                 disabled={mutation.isPending}
                 className="flex-1 py-2 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700 disabled:opacity-50 flex items-center justify-center gap-2">
                 {mutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
@@ -394,6 +474,7 @@ function CreateWorkspaceModal({ onClose }: { onClose: () => void }) {
             </>
           )}
         </div>
+        </>)}
       </div>
     </div>
   );
@@ -425,9 +506,31 @@ function TenantActions({ tenant, onClose }: { tenant: any; onClose: () => void }
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['sa-tenants'] }); onClose(); },
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => api.delete(`/super-admin/tenants/${id}`),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['sa-tenants'] }); onClose(); },
+  });
+
   const [activeModules, setActiveModules] = useState<string[]>(tenant.active_modules ?? ['crm']);
   const [showModules, setShowModules] = useState(false);
+
+  // Catalog (cached) — used to label the workspace's agreed feature entitlement.
+  const { data: licenseCatalog = [] } = useQuery<Array<{ key: string; label: string; features: { key: string; label: string }[] }>>({
+    queryKey: ['license-catalog'],
+    queryFn: () => api.get('/super-admin/modules').then((r) => r.data.data),
+  });
+  const entitledFeatures: string[] = Array.isArray(tenant.entitled_features) ? tenant.entitled_features : [];
+  const featureLabel = (key: string) =>
+    licenseCatalog.flatMap((m) => m.features).find((f) => f.key === key)?.label ?? key;
+  const resetPasswordMutation = useMutation({
+    mutationFn: (id: string) => api.post(`/super-admin/tenants/${id}/reset-admin-password`),
+  });
+
   const [showManageRoles, setShowManageRoles] = useState(false);
+  const [showEdit, setShowEdit] = useState(false);
+  const [showUsers, setShowUsers] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [showResetResult, setShowResetResult] = useState(false);
 
   return (
     <div className="fixed inset-0 z-50" onClick={onClose}>
@@ -462,6 +565,19 @@ function TenantActions({ tenant, onClose }: { tenant: any; onClose: () => void }
         </button>
         {showModules && (
           <div className="px-3 pb-3 space-y-1.5 border-t border-gray-50 pt-2">
+            {/* Agreed feature entitlement (read-only) captured at workspace creation */}
+            <div className="mb-2">
+              <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Agreed Features</p>
+              {entitledFeatures.length === 0 ? (
+                <p className="text-[10px] text-gray-400">No specific features recorded (legacy workspace).</p>
+              ) : (
+                <div className="flex flex-wrap gap-1">
+                  {entitledFeatures.map((k) => (
+                    <span key={k} className="text-[10px] bg-brand-50 text-brand-700 px-1.5 py-0.5 rounded-full">{featureLabel(k)}</span>
+                  ))}
+                </div>
+              )}
+            </div>
             <p className="text-[10px] text-gray-400 mb-2 leading-relaxed">
               Check only modules this tenant has <strong>paid for</strong>.
               Unchecked modules are hidden from their workspace.
@@ -514,6 +630,48 @@ function TenantActions({ tenant, onClose }: { tenant: any; onClose: () => void }
           <span>Manage Role Permissions</span>
         </button>
 
+        {/* Edit workspace */}
+        <button onClick={() => setShowEdit(true)}
+          className="w-full flex items-center gap-2 px-3 py-2.5 text-sm text-gray-700 hover:bg-gray-50">
+          <Edit2 className="w-4 h-4 text-gray-400" /> Edit Workspace
+        </button>
+
+        {/* Reset admin password */}
+        {showResetResult && resetPasswordMutation.data ? (
+          <div className="px-3 py-2 border-t border-gray-50 space-y-1.5">
+            <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">New Temp Password</p>
+            <p className="font-mono text-xs bg-amber-50 border border-amber-100 px-2 py-1 rounded text-gray-900 select-all">
+              {resetPasswordMutation.data.data?.data?.tempPassword}
+            </p>
+            <p className="text-[10px] text-gray-400">
+              {resetPasswordMutation.data.data?.data?.emailSent
+                ? `Emailed to ${resetPasswordMutation.data.data?.data?.adminEmail}`
+                : 'No system email configured — share this securely'}
+            </p>
+            <button onClick={() => { setShowResetResult(false); resetPasswordMutation.reset(); }}
+              className="text-[10px] text-gray-400 hover:text-gray-600 underline">Dismiss</button>
+          </div>
+        ) : (
+          <button
+            onClick={() => {
+              resetPasswordMutation.mutate(tenant.id, {
+                onSuccess: () => setShowResetResult(true),
+              });
+            }}
+            disabled={resetPasswordMutation.isPending}
+            className="w-full flex items-center gap-2 px-3 py-2.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50">
+            <KeyRound className="w-4 h-4 text-gray-400" />
+            {resetPasswordMutation.isPending ? 'Resetting…' : 'Reset Admin Password'}
+          </button>
+        )}
+
+        {/* Users */}
+        <button onClick={() => setShowUsers(!showUsers)}
+          className="w-full flex items-center gap-2 px-3 py-2.5 text-sm text-gray-700 hover:bg-gray-50">
+          <Users className="w-4 h-4 text-gray-400" /> Manage Users
+          {showUsers ? <ChevronDown className="w-3 h-3 ml-auto text-gray-400" /> : <ChevronRight className="w-3 h-3 ml-auto text-gray-400" />}
+        </button>
+
         {/* Status actions */}
         <div className="border-t border-gray-50 mt-1 pt-1">
           {tenant.status !== 'suspended' ? (
@@ -527,11 +685,312 @@ function TenantActions({ tenant, onClose }: { tenant: any; onClose: () => void }
               <Play className="w-4 h-4" /> Reactivate Workspace
             </button>
           )}
+          {confirmDelete ? (
+            <div className="px-3 py-2 space-y-1">
+              <p className="text-xs text-red-700 font-semibold">Delete "{tenant.name}"?</p>
+              <p className="text-[10px] text-red-500">This is irreversible. All data will be lost.</p>
+              <div className="flex gap-1 mt-1">
+                <button onClick={() => setConfirmDelete(false)} className="flex-1 py-1 text-xs border border-gray-200 rounded hover:bg-gray-50">Cancel</button>
+                <button onClick={() => deleteMutation.mutate(tenant.id)} disabled={deleteMutation.isPending}
+                  className="flex-1 py-1 text-xs bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50">
+                  {deleteMutation.isPending ? 'Deleting…' : 'Delete'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button onClick={() => setConfirmDelete(true)}
+              className="w-full flex items-center gap-2 px-3 py-2.5 text-sm text-red-700 hover:bg-red-50">
+              <Trash2 className="w-4 h-4" /> Delete Workspace
+            </button>
+          )}
         </div>
       </div>
       {showManageRoles && (
         <TenantRolesModal tenant={tenant} onClose={() => { setShowManageRoles(false); onClose(); }} />
       )}
+      {showEdit && (
+        <EditWorkspaceModal tenant={tenant} onClose={() => { setShowEdit(false); onClose(); }} />
+      )}
+      {showUsers && (
+        <TenantUsersModal tenant={tenant} onClose={() => { setShowUsers(false); onClose(); }} />
+      )}
+    </div>
+  );
+}
+
+// ── Edit Workspace Modal ───────────────────────────────────────────────────
+function EditWorkspaceModal({ tenant, onClose }: { tenant: any; onClose: () => void }) {
+  const qc = useQueryClient();
+  const [name,   setName]   = useState(tenant.name);
+  const [sector, setSector] = useState(tenant.sector ?? '');
+  const [status, setStatus] = useState(tenant.status);
+  const [error,  setError]  = useState('');
+
+  const mutation = useMutation({
+    mutationFn: () => api.patch(`/super-admin/tenants/${tenant.id}`, { name, sector, status }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['sa-tenants'] }); onClose(); },
+    onError: (e: any) => setError(e?.response?.data?.error?.message ?? 'Update failed'),
+  });
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6 space-y-4">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-gray-900">Edit Workspace</h3>
+          <button onClick={onClose}><X className="w-4 h-4 text-gray-400" /></button>
+        </div>
+        <div className="space-y-3">
+          <div>
+            <label className="text-xs font-medium text-gray-500 block mb-1">Name</label>
+            <input value={name} onChange={e => setName(e.target.value)}
+              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400" />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-gray-500 block mb-1">Sector</label>
+            <select value={sector} onChange={e => setSector(e.target.value)}
+              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400 bg-white">
+              {['banking','telecom','transport','logistics','insurance','education','ecommerce','other'].map(s => (
+                <option key={s} value={s} className="capitalize">{s}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-gray-500 block mb-1">Status</label>
+            <select value={status} onChange={e => setStatus(e.target.value)}
+              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400 bg-white">
+              {['active','trial','suspended','cancelled'].map(s => (
+                <option key={s} value={s} className="capitalize">{s}</option>
+              ))}
+            </select>
+          </div>
+          {error && <p className="text-xs text-red-600 bg-red-50 px-3 py-2 rounded-lg">{error}</p>}
+        </div>
+        <div className="flex gap-2 justify-end pt-1">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50">Cancel</button>
+          <button onClick={() => mutation.mutate()} disabled={mutation.isPending}
+            className="px-4 py-2 text-sm text-white bg-brand-600 rounded-lg hover:bg-brand-700 disabled:opacity-50">
+            {mutation.isPending ? 'Saving…' : 'Save Changes'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Tenant Users Modal ─────────────────────────────────────────────────────
+function TenantUsersModal({ tenant, onClose }: { tenant: any; onClose: () => void }) {
+  const qc = useQueryClient();
+  const [showCreate, setShowCreate] = useState(false);
+  const [editUser,   setEditUser]   = useState<any>(null);
+  const [confirmDel, setConfirmDel] = useState<string | null>(null);
+
+  const { data: users = [], isLoading, refetch } = useQuery<any[]>({
+    queryKey: ['sa-tenant-users', tenant.id],
+    queryFn: () => api.get(`/super-admin/tenants/${tenant.id}/users`).then(r => r.data.data),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (uid: string) => api.delete(`/super-admin/users/${uid}`),
+    onSuccess: () => { refetch(); setConfirmDel(null); },
+  });
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl mx-4 flex flex-col" style={{ maxHeight: '85vh' }}>
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 shrink-0">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-900">Users — {tenant.name}</h3>
+            <p className="text-xs text-gray-400 font-mono">{tenant.slug}</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setShowCreate(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-brand-600 text-white text-xs rounded-lg hover:bg-brand-700">
+              <Plus className="w-3.5 h-3.5" /> Add User
+            </button>
+            <button onClick={onClose}><X className="w-4 h-4 text-gray-400" /></button>
+          </div>
+        </div>
+        <div className="overflow-y-auto flex-1">
+          {isLoading ? (
+            <div className="flex justify-center py-12"><Loader2 className="w-5 h-5 animate-spin text-gray-400" /></div>
+          ) : (
+            <table className="w-full">
+              <thead className="bg-gray-50 border-b border-gray-100 sticky top-0">
+                <tr>
+                  {['Name','Email','Role','Status','Created',''].map(h => (
+                    <th key={h} className="px-4 py-2.5 text-left text-xs font-semibold text-gray-400">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50">
+                {users.length === 0 && (
+                  <tr><td colSpan={6} className="px-4 py-8 text-center text-xs text-gray-400">No users found.</td></tr>
+                )}
+                {users.map((u: any) => (
+                  <tr key={u.id} className="hover:bg-gray-50">
+                    <td className="px-4 py-2.5 text-xs font-medium text-gray-900">{u.name}</td>
+                    <td className="px-4 py-2.5 text-xs font-mono text-gray-600">{u.email}</td>
+                    <td className="px-4 py-2.5 text-xs capitalize text-gray-600">{u.role?.replace('_', ' ')}</td>
+                    <td className="px-4 py-2.5">
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold capitalize ${u.status === 'active' ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-500'}`}>{u.status}</span>
+                    </td>
+                    <td className="px-4 py-2.5 text-xs text-gray-400">{new Date(u.created_at).toLocaleDateString('en-GB')}</td>
+                    <td className="px-4 py-2.5">
+                      <div className="flex items-center gap-1.5">
+                        <button onClick={() => setEditUser(u)}
+                          className="p-1 text-gray-400 hover:text-brand-600 rounded"><Edit2 className="w-3.5 h-3.5" /></button>
+                        {confirmDel === u.id ? (
+                          <div className="flex gap-1">
+                            <button onClick={() => setConfirmDel(null)} className="text-[10px] px-1.5 py-0.5 border border-gray-200 rounded">Cancel</button>
+                            <button onClick={() => deleteMutation.mutate(u.id)}
+                              className="text-[10px] px-1.5 py-0.5 bg-red-600 text-white rounded">Confirm</button>
+                          </div>
+                        ) : (
+                          <button onClick={() => setConfirmDel(u.id)}
+                            className="p-1 text-gray-400 hover:text-red-600 rounded"><Trash2 className="w-3.5 h-3.5" /></button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+      {showCreate && <CreateUserModal tenantId={tenant.id} onClose={() => { setShowCreate(false); refetch(); }} />}
+      {editUser   && <EditUserModal   user={editUser}      onClose={() => { setEditUser(null);   refetch(); }} />}
+    </div>
+  );
+}
+
+// ── Create User Modal ──────────────────────────────────────────────────────
+function CreateUserModal({ tenantId, onClose }: { tenantId: string; onClose: () => void }) {
+  const [form, setForm] = useState({ name: '', email: '', role: 'admin', password: '' });
+  const [showPw, setShowPw] = useState(false);
+  const [error, setError] = useState('');
+  const mutation = useMutation({
+    mutationFn: () => api.post(`/super-admin/tenants/${tenantId}/users`, form),
+    onSuccess: onClose,
+    onError: (e: any) => setError(e?.response?.data?.error?.message ?? 'Create failed'),
+  });
+  const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setForm(f => ({ ...f, [k]: e.target.value }));
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 backdrop-blur-sm">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm mx-4 p-6 space-y-4">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-gray-900">Add User</h3>
+          <button onClick={onClose}><X className="w-4 h-4 text-gray-400" /></button>
+        </div>
+        <div className="space-y-3">
+          {[['Name','name','text'],['Email','email','email']].map(([label, key, type]) => (
+            <div key={key}>
+              <label className="text-xs font-medium text-gray-500 block mb-1">{label}</label>
+              <input type={type} value={(form as any)[key]} onChange={set(key)}
+                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400" />
+            </div>
+          ))}
+          <div>
+            <label className="text-xs font-medium text-gray-500 block mb-1">Role</label>
+            <select value={form.role} onChange={set('role')}
+              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400 bg-white">
+              {['admin','manager','agent'].map(r => <option key={r} value={r} className="capitalize">{r}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-gray-500 block mb-1">Password</label>
+            <div className="relative">
+              <input type={showPw ? 'text' : 'password'} value={form.password} onChange={set('password')}
+                className="w-full px-3 py-2 pr-9 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400" />
+              <button type="button" onClick={() => setShowPw(v => !v)}
+                className="absolute right-2.5 top-2.5 text-gray-400">{showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}</button>
+            </div>
+          </div>
+          {error && <p className="text-xs text-red-600 bg-red-50 px-3 py-2 rounded-lg">{error}</p>}
+        </div>
+        <div className="flex gap-2 justify-end">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50">Cancel</button>
+          <button onClick={() => mutation.mutate()} disabled={mutation.isPending}
+            className="px-4 py-2 text-sm text-white bg-brand-600 rounded-lg hover:bg-brand-700 disabled:opacity-50">
+            {mutation.isPending ? 'Creating…' : 'Create User'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Edit User Modal ────────────────────────────────────────────────────────
+function EditUserModal({ user, onClose }: { user: any; onClose: () => void }) {
+  const [form, setForm] = useState({ name: user.name, email: user.email, role: user.role, status: user.status, password: '' });
+  const [showPw, setShowPw] = useState(false);
+  const [changePass, setChangePass] = useState(false);
+  const [error, setError] = useState('');
+  const mutation = useMutation({
+    mutationFn: () => api.patch(`/super-admin/users/${user.id}`, {
+      name: form.name, email: form.email, role: form.role, status: form.status,
+      ...(changePass && form.password ? { password: form.password } : {}),
+    }),
+    onSuccess: onClose,
+    onError: (e: any) => setError(e?.response?.data?.error?.message ?? 'Update failed'),
+  });
+  const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setForm(f => ({ ...f, [k]: e.target.value }));
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 backdrop-blur-sm">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm mx-4 p-6 space-y-4">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-gray-900">Edit User</h3>
+          <button onClick={onClose}><X className="w-4 h-4 text-gray-400" /></button>
+        </div>
+        <div className="space-y-3">
+          {[['Name','name','text'],['Email','email','email']].map(([label, key, type]) => (
+            <div key={key}>
+              <label className="text-xs font-medium text-gray-500 block mb-1">{label}</label>
+              <input type={type} value={(form as any)[key]} onChange={set(key)}
+                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400" />
+            </div>
+          ))}
+          <div>
+            <label className="text-xs font-medium text-gray-500 block mb-1">Role</label>
+            <select value={form.role} onChange={set('role')}
+              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400 bg-white">
+              {['admin','manager','agent','sales_manager','sales_agent','support_manager','support_agent'].map(r => (
+                <option key={r} value={r}>{r.replace('_', ' ')}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-gray-500 block mb-1">Status</label>
+            <select value={form.status} onChange={set('status')}
+              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400 bg-white">
+              {['active','inactive'].map(s => <option key={s} value={s} className="capitalize">{s}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" checked={changePass} onChange={e => setChangePass(e.target.checked)} className="accent-brand-600" />
+              <span className="text-xs text-gray-600">Reset password</span>
+            </label>
+            {changePass && (
+              <div className="relative mt-2">
+                <input type={showPw ? 'text' : 'password'} value={form.password} onChange={set('password')}
+                  placeholder="New password (min 8 chars)"
+                  className="w-full px-3 py-2 pr-9 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400" />
+                <button type="button" onClick={() => setShowPw(v => !v)}
+                  className="absolute right-2.5 top-2.5 text-gray-400">{showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}</button>
+              </div>
+            )}
+          </div>
+          {error && <p className="text-xs text-red-600 bg-red-50 px-3 py-2 rounded-lg">{error}</p>}
+        </div>
+        <div className="flex gap-2 justify-end">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50">Cancel</button>
+          <button onClick={() => mutation.mutate()} disabled={mutation.isPending}
+            className="px-4 py-2 text-sm text-white bg-brand-600 rounded-lg hover:bg-brand-700 disabled:opacity-50">
+            {mutation.isPending ? 'Saving…' : 'Save Changes'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -940,6 +1399,7 @@ function PlatformRoleModal({ role, onClose }: { role?: any; onClose: () => void 
 function PlatformRolesTab() {
   const qc = useQueryClient();
   const [modal, setModal] = useState<{ open: boolean; role?: any }>({ open: false });
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
   const { data: roles = [], isLoading } = useQuery<any[]>({
     queryKey: ['platform-roles'],
@@ -948,7 +1408,7 @@ function PlatformRolesTab() {
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.delete(`/super-admin/platform-roles/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['platform-roles'] }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['platform-roles'] }); setConfirmDelete(null); },
   });
 
   return (
@@ -1001,9 +1461,9 @@ function PlatformRolesTab() {
                     )}
                     <button onClick={() => setModal({ open: true, role })}
                       className="p-1.5 text-gray-400 hover:text-brand-600 rounded-lg hover:bg-brand-50 transition-colors">
-                      <Edit2 className="w-3.5 h-3.5" />
+                      <KeyRound className="w-3.5 h-3.5" />
                     </button>
-                    <button onClick={() => deleteMutation.mutate(role.id)}
+                    <button onClick={() => setConfirmDelete(role.id)}
                       className="p-1.5 text-gray-400 hover:text-red-600 rounded-lg hover:bg-red-50 transition-colors">
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
@@ -1028,6 +1488,14 @@ function PlatformRolesTab() {
       )}
 
       {modal.open && <PlatformRoleModal role={modal.role} onClose={() => setModal({ open: false })} />}
+      {confirmDelete && (
+        <ConfirmModal
+          title="Delete Sub-Admin Role"
+          message="Are you sure you want to delete this role? Sub-admins assigned to it will lose their permissions."
+          onConfirm={() => deleteMutation.mutate(confirmDelete)}
+          onCancel={() => setConfirmDelete(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1036,6 +1504,7 @@ function PlatformRolesTab() {
 function SubAdminsTab() {
   const qc = useQueryClient();
   const [showInvite, setShowInvite] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
 
   const { data: subAdmins = [], isLoading } = useQuery<any[]>({
     queryKey: ['sub-admins'],
@@ -1066,7 +1535,7 @@ function SubAdminsTab() {
 
   const remove = useMutation({
     mutationFn: (id: string) => api.delete(`/super-admin/sub-admins/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['sub-admins'] }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['sub-admins'] }); setConfirmRemove(null); },
   });
 
   return (
@@ -1127,7 +1596,7 @@ function SubAdminsTab() {
                     </button>
                   </td>
                   <td className="px-4 py-3 text-right">
-                    <button onClick={() => remove.mutate(u.id)}
+                    <button onClick={() => setConfirmRemove(u.id)}
                       className="p-1 text-gray-400 hover:text-red-600 rounded transition-colors">
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
@@ -1141,6 +1610,15 @@ function SubAdminsTab() {
 
       {showInvite && (
         <InviteSubAdminModal tenants={tenants} platformRoles={platformRoles} onClose={() => setShowInvite(false)} />
+      )}
+      {confirmRemove && (
+        <ConfirmModal
+          title="Remove Sub-Admin"
+          message="Are you sure you want to remove this sub-admin? They will lose all platform access immediately."
+          confirmLabel="Remove"
+          onConfirm={() => remove.mutate(confirmRemove)}
+          onCancel={() => setConfirmRemove(null)}
+        />
       )}
     </div>
   );
@@ -1404,8 +1882,9 @@ function RecordPaymentModal({ invoice, onClose }: { invoice: any; onClose: () =>
 
 function PlatformBillingTab({ tenants }: { tenants: any[] }) {
   const qc = useQueryClient();
-  const [showCreate, setShowCreate]   = useState(false);
-  const [payInvoice, setPayInvoice]   = useState<any>(null);
+  const [showCreate, setShowCreate]     = useState(false);
+  const [payInvoice, setPayInvoice]     = useState<any>(null);
+  const [confirmDelInv, setConfirmDelInv] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState('');
   const [tenantFilter, setTenantFilter] = useState('');
 
@@ -1426,7 +1905,7 @@ function PlatformBillingTab({ tenants }: { tenants: any[] }) {
 
   const deleteInvoice = useMutation({
     mutationFn: (id: string) => api.delete(`/super-admin/platform-invoices/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['platform-invoices'] }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['platform-invoices'] }); setConfirmDelInv(null); },
   });
 
   // Summary KPIs
@@ -1530,7 +2009,7 @@ function PlatformBillingTab({ tenants }: { tenants: any[] }) {
                         </button>
                       )}
                       {inv.status === 'draft' && (
-                        <button onClick={() => { if(confirm('Delete this draft?')) deleteInvoice.mutate(inv.id); }}
+                        <button onClick={() => setConfirmDelInv(inv.id)}
                           className="p-1 rounded text-gray-400 hover:text-red-500 hover:bg-red-50">
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -1546,6 +2025,521 @@ function PlatformBillingTab({ tenants }: { tenants: any[] }) {
 
       {showCreate && <CreateInvoiceModal tenants={tenants} onClose={() => setShowCreate(false)} />}
       {payInvoice  && <RecordPaymentModal invoice={payInvoice} onClose={() => setPayInvoice(null)} />}
+      {confirmDelInv && (
+        <ConfirmModal
+          title="Delete Draft Invoice"
+          message="Are you sure you want to delete this draft invoice? This action cannot be undone."
+          onConfirm={() => deleteInvoice.mutate(confirmDelInv)}
+          onCancel={() => setConfirmDelInv(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── Super Admin Reports ────────────────────────────────────────────────────
+function SuperAdminReports() {
+  const today = new Date().toISOString().slice(0, 10);
+  const monthStart = today.slice(0, 8) + '01';
+
+  const [section, setSection] = useState<'tenant-details' | 'backup' | 'invoices-all' | 'invoices-tenant' | 'audit'>('tenant-details');
+  const [dateFrom, setDateFrom] = useState(monthStart);
+  const [dateTo,   setDateTo]   = useState(today);
+  const [selectedTenant, setSelectedTenant] = useState('');
+  const [auditEntity, setAuditEntity] = useState('');
+  const [auditAction, setAuditAction]  = useState('');
+
+  const params = { from: dateFrom || undefined, to: dateTo || undefined };
+
+  const { data: tenantList = [] } = useQuery<any[]>({
+    queryKey: ['sa-tenants-list'],
+    queryFn: () => api.get('/super-admin/tenants', { params: { pageSize: 200 } }).then(r => r.data.data ?? []),
+  });
+
+  const { data: wsData,     isLoading: wsLoading }     = useQuery<any[]>({
+    queryKey: ['sa-rep-tenants', dateFrom, dateTo],
+    queryFn: () => api.get('/super-admin/reports/workspaces', { params }).then(r => r.data.data),
+    enabled: section === 'tenant-details',
+  });
+  const { data: bkData,     isLoading: bkLoading }     = useQuery<any[]>({
+    queryKey: ['sa-rep-backups'],
+    queryFn: () => api.get('/super-admin/reports/backups').then(r => r.data.data),
+    enabled: section === 'backup',
+  });
+  const { data: invAllData, isLoading: invAllLoading } = useQuery<any[]>({
+    queryKey: ['sa-rep-inv-all', dateFrom, dateTo],
+    queryFn: () => api.get('/super-admin/reports/invoices', { params }).then(r => r.data.data),
+    enabled: section === 'invoices-all',
+  });
+  const { data: invTenData, isLoading: invTenLoading } = useQuery<any[]>({
+    queryKey: ['sa-rep-inv-ten', dateFrom, dateTo, selectedTenant],
+    queryFn: () => api.get('/super-admin/reports/invoices', { params: { ...params, tenant_id: selectedTenant || undefined } }).then(r => r.data.data),
+    enabled: section === 'invoices-tenant' && !!selectedTenant,
+  });
+  const { data: auditData, isLoading: auditLoading, refetch: refetchAudit } = useQuery<any[]>({
+    queryKey: ['sa-rep-audit', auditEntity, auditAction],
+    queryFn: () => api.get('/super-admin/reports/audit', { params: { entity: auditEntity || undefined, action: auditAction || undefined } }).then(r => r.data.data),
+    enabled: section === 'audit',
+  });
+
+  const fmtDate     = (d: string) => d ? new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
+  const fmtDateTime = (d: string) => d ? new Date(d).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
+  const fmtBytes    = (b: number) => !b ? '—' : b < 1_048_576 ? `${(b/1024).toFixed(1)} KB` : `${(b/1_048_576).toFixed(1)} MB`;
+
+  const SECTIONS = [
+    { key: 'tenant-details',   label: 'Tenant Details',        icon: Building2     },
+    { key: 'backup',           label: 'Backup Report',         icon: RefreshCw     },
+    { key: 'invoices-all',     label: 'All Invoices',          icon: FileText      },
+    { key: 'invoices-tenant',  label: 'Tenant Invoices',       icon: Receipt       },
+    { key: 'audit',            label: 'Audit Log',             icon: ClipboardList },
+  ] as const;
+
+  const STATUS_BADGE: Record<string, string> = {
+    active: 'bg-green-50 text-green-700',   trial: 'bg-amber-50 text-amber-700',
+    suspended: 'bg-red-50 text-red-600',    cancelled: 'bg-gray-100 text-gray-500',
+    draft: 'bg-gray-100 text-gray-600',     sent: 'bg-blue-50 text-blue-700',
+    paid: 'bg-green-50 text-green-700',     overdue: 'bg-red-50 text-red-600',
+    partial: 'bg-amber-50 text-amber-700',  unpaid: 'bg-red-50 text-red-600',
+    ok: 'bg-green-50 text-green-700',       never: 'bg-red-50 text-red-600',
+    not_due: 'bg-gray-100 text-gray-600',   no_due_date: 'bg-gray-100 text-gray-500',
+  };
+
+  const thCls = 'px-4 py-3 text-left text-xs font-semibold text-gray-400 whitespace-nowrap';
+  const tdCls = 'px-4 py-3 text-xs text-gray-700';
+
+  const needsDates = ['tenant-details','invoices-all','invoices-tenant'].includes(section);
+
+  // Invoice helper
+  function InvoiceTable({ data, loading }: { data: any[] | undefined; loading: boolean }) {
+    if (loading) return <div className="flex justify-center py-16"><Loader2 className="w-5 h-5 animate-spin text-gray-400" /></div>;
+    const rows = data ?? [];
+    return (
+      <table className="w-full">
+        <thead className="bg-gray-50 border-b border-gray-100 sticky top-0">
+          <tr>
+            {['Invoice #','Date','Tenant','Tenant ID','Amount','Amount Paid','Unpaid','Balance Due','Currency','Due Date','Due Status','Payment Status'].map(h => (
+              <th key={h} className={thCls}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-gray-50">
+          {rows.length === 0 && <tr><td colSpan={12} className="px-4 py-12 text-center text-xs text-gray-400">No invoices in this period.</td></tr>}
+          {rows.map((inv: any) => {
+            const amt  = Number(inv.amount);
+            const paid = Number(inv.amount_paid ?? 0);
+            const bal  = amt - paid;
+            const unpaid = amt - paid;
+            return (
+              <tr key={inv.id} className="hover:bg-gray-50">
+                <td className={tdCls + ' font-mono text-brand-600'}>{inv.invoice_number}</td>
+                <td className={tdCls + ' whitespace-nowrap'}>{fmtDate(inv.created_at)}</td>
+                <td className={tdCls}><p className="font-medium text-gray-900">{inv.tenant_name}</p></td>
+                <td className={tdCls + ' font-mono text-gray-400 text-[10px]'}>{inv.tenant_id?.slice(0,8)}…</td>
+                <td className={tdCls + ' font-semibold whitespace-nowrap'}>{inv.currency} {amt.toFixed(2)}</td>
+                <td className={tdCls + ' text-green-600 whitespace-nowrap'}>{paid > 0 ? `${inv.currency} ${paid.toFixed(2)}` : '—'}</td>
+                <td className={tdCls + (unpaid > 0 ? ' text-red-600 font-semibold' : ' text-gray-400') + ' whitespace-nowrap'}>{unpaid > 0 ? `${inv.currency} ${unpaid.toFixed(2)}` : '—'}</td>
+                <td className={tdCls + (bal > 0 ? ' text-red-600 font-semibold' : ' text-gray-400') + ' whitespace-nowrap'}>{bal > 0 ? `${inv.currency} ${bal.toFixed(2)}` : '✓ Nil'}</td>
+                <td className={tdCls}>{inv.currency}</td>
+                <td className={tdCls + ' whitespace-nowrap'}>{fmtDate(inv.due_date)}</td>
+                <td className={tdCls}>
+                  <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full capitalize ${STATUS_BADGE[inv.due_status] ?? 'bg-gray-100 text-gray-600'}`}>
+                    {inv.due_status?.replace('_', ' ')}
+                  </span>
+                </td>
+                <td className={tdCls}>
+                  <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full capitalize ${STATUS_BADGE[inv.payment_status] ?? 'bg-gray-100 text-gray-600'}`}>
+                    {inv.payment_status}
+                  </span>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    );
+  }
+
+  return (
+    <div className="space-y-5">
+      {/* Section tabs */}
+      <div className="flex gap-2 flex-wrap">
+        {SECTIONS.map(({ key, label, icon: Icon }) => (
+          <button key={key} onClick={() => setSection(key as any)}
+            className={`flex items-center gap-2 px-4 py-2 text-sm rounded-xl border transition-colors ${
+              section === key
+                ? 'bg-brand-600 text-white border-brand-600 font-semibold'
+                : 'bg-white text-gray-600 border-gray-200 hover:border-brand-400 hover:text-brand-600'
+            }`}>
+            <Icon className="w-4 h-4" />
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* Date range + optional tenant filter */}
+      <div className="bg-white border border-gray-100 rounded-xl px-5 py-4 flex flex-wrap items-end gap-4">
+        {needsDates && (
+          <>
+            <div>
+              <label className="text-xs font-medium text-gray-400 block mb-1">From</label>
+              <div className="flex items-center gap-1.5 border border-gray-200 rounded-lg px-3 py-2">
+                <Calendar className="w-3.5 h-3.5 text-gray-400" />
+                <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
+                  className="text-sm outline-none bg-transparent" />
+              </div>
+            </div>
+            <div>
+              <label className="text-xs font-medium text-gray-400 block mb-1">To</label>
+              <div className="flex items-center gap-1.5 border border-gray-200 rounded-lg px-3 py-2">
+                <Calendar className="w-3.5 h-3.5 text-gray-400" />
+                <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
+                  className="text-sm outline-none bg-transparent" />
+              </div>
+            </div>
+          </>
+        )}
+        {section === 'invoices-tenant' && (
+          <div>
+            <label className="text-xs font-medium text-gray-400 block mb-1">Tenant</label>
+            <select value={selectedTenant} onChange={e => setSelectedTenant(e.target.value)}
+              className="px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400 bg-white min-w-48">
+              <option value="">— Select Tenant —</option>
+              {tenantList.map((t: any) => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </div>
+        )}
+        {section === 'audit' && (
+          <>
+            <div>
+              <label className="text-xs font-medium text-gray-400 block mb-1">Entity Type</label>
+              <input value={auditEntity} onChange={e => setAuditEntity(e.target.value)}
+                placeholder="e.g. ticket"
+                className="px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400 w-40" />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-gray-400 block mb-1">Action</label>
+              <input value={auditAction} onChange={e => setAuditAction(e.target.value)}
+                placeholder="e.g. status_changed"
+                className="px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400 w-44" />
+            </div>
+            <button onClick={() => refetchAudit()}
+              className="flex items-center gap-1.5 px-3 py-2 bg-brand-600 text-white text-sm rounded-lg hover:bg-brand-700">
+              <RefreshCw className="w-3.5 h-3.5" /> Refresh
+            </button>
+          </>
+        )}
+        {needsDates && (
+          <div className="ml-auto flex gap-2">
+            {[
+              { label: 'This month', f: monthStart, t: today },
+              { label: 'Last 30d',   f: new Date(Date.now()-30*86400000).toISOString().slice(0,10), t: today },
+              { label: 'This year',  f: today.slice(0,4)+'-01-01', t: today },
+            ].map(({ label, f, t }) => (
+              <button key={label} onClick={() => { setDateFrom(f); setDateTo(t); }}
+                className="px-3 py-2 text-xs border border-gray-200 rounded-lg hover:bg-gray-50 text-gray-600">{label}</button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ── Tenant Details ── */}
+      {section === 'tenant-details' && (
+        <div className="bg-white rounded-xl border border-gray-100 overflow-x-auto">
+          {wsLoading ? <div className="flex justify-center py-16"><Loader2 className="w-5 h-5 animate-spin text-gray-400" /></div> : (
+            <table className="w-full">
+              <thead className="bg-gray-50 border-b border-gray-100 sticky top-0">
+                <tr>
+                  {['Workspace','Slug','Sector','Plan','Status','Modules','Users (Active)','Contacts','Open Deals','Storage','Created','Last Backup'].map(h => (
+                    <th key={h} className={thCls}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50">
+                {(wsData ?? []).length === 0 && <tr><td colSpan={12} className="px-4 py-12 text-center text-xs text-gray-400">No tenants in this period.</td></tr>}
+                {(wsData ?? []).map((w: any) => (
+                  <tr key={w.id} className="hover:bg-gray-50">
+                    <td className={tdCls + ' font-semibold text-gray-900 whitespace-nowrap'}>{w.name}</td>
+                    <td className={tdCls + ' font-mono text-brand-600'}>{w.slug}</td>
+                    <td className={tdCls + ' capitalize'}>{w.sector?.replace('_', ' ') ?? '—'}</td>
+                    <td className={tdCls + ' capitalize'}>{w.plan}</td>
+                    <td className={tdCls}>
+                      <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full capitalize ${STATUS_BADGE[w.status] ?? 'bg-gray-100 text-gray-600'}`}>{w.status}</span>
+                    </td>
+                    <td className={tdCls}>
+                      <div className="flex gap-1 flex-wrap">
+                        {(w.active_modules ?? []).map((m: string) => (
+                          <span key={m} className="text-[10px] bg-brand-50 text-brand-600 px-1 py-0.5 rounded capitalize">{m}</span>
+                        ))}
+                      </div>
+                    </td>
+                    <td className={tdCls + ' text-center'}>{w.active_users}/{w.user_count}</td>
+                    <td className={tdCls + ' text-center'}>{w.contact_count}</td>
+                    <td className={tdCls + ' text-center'}>{w.open_deals}</td>
+                    <td className={tdCls}>{fmtBytes(Number(w.storage_bytes))}</td>
+                    <td className={tdCls + ' whitespace-nowrap'}>{fmtDate(w.created_at)}</td>
+                    <td className={tdCls + ' whitespace-nowrap'}>
+                      {w.last_backup_at ? fmtDate(w.last_backup_at) : <span className="text-red-500 font-semibold text-[10px]">Never</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
+      {/* ── Backup Report ── */}
+      {section === 'backup' && (
+        <div className="bg-white rounded-xl border border-gray-100 overflow-x-auto">
+          {bkLoading ? <div className="flex justify-center py-16"><Loader2 className="w-5 h-5 animate-spin text-gray-400" /></div> : (
+            <table className="w-full">
+              <thead className="bg-gray-50 border-b border-gray-100 sticky top-0">
+                <tr>
+                  {['Workspace','Slug','Status','Last Backup','Days Since Backup','Backup Status'].map(h => (
+                    <th key={h} className={thCls}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50">
+                {(bkData ?? []).length === 0 && <tr><td colSpan={6} className="px-4 py-12 text-center text-xs text-gray-400">No data.</td></tr>}
+                {(bkData ?? []).map((bk: any) => {
+                  const days = bk.days_since_backup != null ? Math.round(Number(bk.days_since_backup)) : null;
+                  const overdue = bk.backup_status === 'overdue' || bk.backup_status === 'never';
+                  return (
+                    <tr key={bk.id} className={overdue ? 'bg-red-50 hover:bg-red-100' : 'hover:bg-gray-50'}>
+                      <td className={tdCls + ' font-semibold text-gray-900'}>{bk.name}</td>
+                      <td className={tdCls + ' font-mono text-brand-600'}>{bk.slug}</td>
+                      <td className={tdCls}>
+                        <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full capitalize ${STATUS_BADGE[bk.status] ?? 'bg-gray-100 text-gray-600'}`}>{bk.status}</span>
+                      </td>
+                      <td className={tdCls + ' whitespace-nowrap'}>{bk.last_backup_at ? fmtDate(bk.last_backup_at) : <span className="text-red-600 font-semibold">Never</span>}</td>
+                      <td className={tdCls + (overdue ? ' text-red-600 font-bold' : '')}>
+                        {days != null ? `${days} day${days !== 1 ? 's' : ''}` : '—'}
+                      </td>
+                      <td className={tdCls}>
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase ${STATUS_BADGE[bk.backup_status] ?? 'bg-gray-100 text-gray-600'}`}>
+                          {bk.backup_status === 'never' ? '⚠ Never Backed Up' : bk.backup_status === 'overdue' ? '⚠ Overdue' : '✓ OK'}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
+      {/* ── All Invoices ── */}
+      {section === 'invoices-all' && (
+        <div className="bg-white rounded-xl border border-gray-100 overflow-x-auto">
+          <InvoiceTable data={invAllData} loading={invAllLoading} />
+        </div>
+      )}
+
+      {/* ── Tenant Invoices ── */}
+      {section === 'invoices-tenant' && (
+        <div className="bg-white rounded-xl border border-gray-100 overflow-x-auto">
+          {!selectedTenant ? (
+            <div className="py-12 text-center text-xs text-gray-400">Select a tenant above to view their invoices.</div>
+          ) : (
+            <InvoiceTable data={invTenData} loading={invTenLoading} />
+          )}
+        </div>
+      )}
+
+      {/* ── Audit Log ── */}
+      {section === 'audit' && (
+        <div className="bg-white rounded-xl border border-gray-100 overflow-x-auto">
+          {auditLoading ? <div className="flex justify-center py-16"><Loader2 className="w-5 h-5 animate-spin text-gray-400" /></div> : (
+            <table className="w-full">
+              <thead className="bg-gray-50 border-b border-gray-100 sticky top-0">
+                <tr>
+                  {['Timestamp','Tenant','Actor','Role','Entity','Action','Detail'].map(h => (
+                    <th key={h} className={thCls}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50">
+                {(auditData ?? []).length === 0 && <tr><td colSpan={7} className="px-4 py-12 text-center text-xs text-gray-400">No audit entries found.</td></tr>}
+                {(auditData ?? []).map((a: any) => (
+                  <tr key={a.id} className="hover:bg-gray-50">
+                    <td className={tdCls + ' whitespace-nowrap text-gray-500'}>{fmtDateTime(a.created_at)}</td>
+                    <td className={tdCls}><p className="font-medium text-gray-900">{a.tenant_name ?? '—'}</p><p className="text-[10px] text-gray-400">{a.tenant_slug}</p></td>
+                    <td className={tdCls}><p className="font-medium">{a.actor_name ?? 'System'}</p><p className="text-[10px] text-gray-400">{a.actor_email}</p></td>
+                    <td className={tdCls + ' capitalize text-gray-500'}>{a.actor_role?.replace('_', ' ') ?? '—'}</td>
+                    <td className={tdCls + ' capitalize text-gray-600'}>{a.entity_type?.replace('_', ' ') ?? '—'}</td>
+                    <td className={tdCls}>
+                      <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-700 capitalize">{a.action?.replace('_', ' ')}</span>
+                    </td>
+                    <td className={tdCls + ' text-gray-400 max-w-xs truncate'}>
+                      {a.new_value ? (typeof a.new_value === 'object' ? JSON.stringify(a.new_value).slice(0, 80) : String(a.new_value).slice(0, 80)) : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Super Admin Settings (Password Management) ────────────────────────────
+function SuperAdminSettings() {
+  const [selectedTenant, setSelectedTenant] = useState('');
+  const [showCreateUser, setShowCreateUser] = useState(false);
+  const [editUser, setEditUser] = useState<any>(null);
+  const [confirmDel, setConfirmDel] = useState<string | null>(null);
+
+  const { data: tenantList = [] } = useQuery<any[]>({
+    queryKey: ['sa-tenants-list-settings'],
+    queryFn: () => api.get('/super-admin/tenants', { params: { pageSize: 200 } }).then(r => r.data.data ?? []),
+  });
+
+  const { data: users = [], isLoading: usersLoading, refetch: refetchUsers } = useQuery<any[]>({
+    queryKey: ['sa-settings-users', selectedTenant],
+    queryFn: () => api.get(`/super-admin/tenants/${selectedTenant}/users`).then(r => r.data.data),
+    enabled: !!selectedTenant,
+  });
+
+  const { data: pwLog = [], isLoading: logLoading, refetch: refetchLog } = useQuery<any[]>({
+    queryKey: ['sa-pw-log', selectedTenant],
+    queryFn: () => api.get('/super-admin/password-log', { params: { tenant_id: selectedTenant || undefined } }).then(r => r.data.data),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (uid: string) => api.delete(`/super-admin/users/${uid}`),
+    onSuccess: () => { refetchUsers(); setConfirmDel(null); },
+  });
+
+  const fmtDateTime = (d: string) => d ? new Date(d).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
+
+  return (
+    <div className="space-y-6">
+      {/* Tenant selector */}
+      <div className="bg-white rounded-xl border border-gray-100 px-5 py-4 flex items-end gap-4">
+        <div className="flex-1 max-w-xs">
+          <label className="text-xs font-medium text-gray-400 block mb-1">Select Tenant / Workspace</label>
+          <select value={selectedTenant} onChange={e => setSelectedTenant(e.target.value)}
+            className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400 bg-white">
+            <option value="">— All Tenants —</option>
+            {tenantList.map((t: any) => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+        </div>
+        {selectedTenant && (
+          <button onClick={() => setShowCreateUser(true)}
+            className="flex items-center gap-1.5 px-4 py-2 bg-brand-600 text-white text-sm rounded-lg hover:bg-brand-700">
+            <Plus className="w-4 h-4" /> Add Tenant User
+          </button>
+        )}
+      </div>
+
+      {/* Users table */}
+      {selectedTenant && (
+        <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
+          <div className="px-5 py-3 border-b border-gray-50 flex items-center justify-between">
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+              Tenant Users — {tenantList.find(t => t.id === selectedTenant)?.name}
+            </p>
+          </div>
+          {usersLoading ? (
+            <div className="flex justify-center py-10"><Loader2 className="w-5 h-5 animate-spin text-gray-400" /></div>
+          ) : (
+            <table className="w-full">
+              <thead className="bg-gray-50 border-b border-gray-100">
+                <tr>
+                  {['Name','Email','Role','Status','Created','Actions'].map(h => (
+                    <th key={h} className="px-4 py-2.5 text-left text-xs font-semibold text-gray-400">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50">
+                {users.length === 0 && <tr><td colSpan={6} className="px-4 py-8 text-center text-xs text-gray-400">No users in this workspace.</td></tr>}
+                {users.map((u: any) => (
+                  <tr key={u.id} className="hover:bg-gray-50">
+                    <td className="px-4 py-2.5 text-xs font-medium text-gray-900">{u.name}</td>
+                    <td className="px-4 py-2.5 text-xs font-mono text-gray-600">{u.email}</td>
+                    <td className="px-4 py-2.5 text-xs capitalize text-gray-600">{u.role?.replace(/_/g, ' ')}</td>
+                    <td className="px-4 py-2.5">
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold capitalize ${u.status === 'active' ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-500'}`}>{u.status}</span>
+                    </td>
+                    <td className="px-4 py-2.5 text-xs text-gray-400">{new Date(u.created_at).toLocaleDateString('en-GB')}</td>
+                    <td className="px-4 py-2.5">
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => setEditUser(u)}
+                          className="flex items-center gap-1 text-xs text-brand-600 hover:underline">
+                          <Edit2 className="w-3 h-3" /> Edit / Reset Password
+                        </button>
+                        {confirmDel === u.id ? (
+                          <div className="flex gap-1">
+                            <button onClick={() => setConfirmDel(null)} className="text-[10px] px-1.5 py-0.5 border border-gray-200 rounded">Cancel</button>
+                            <button onClick={() => deleteMutation.mutate(u.id)}
+                              className="text-[10px] px-1.5 py-0.5 bg-red-600 text-white rounded">Confirm Delete</button>
+                          </div>
+                        ) : (
+                          <button onClick={() => setConfirmDel(u.id)} className="text-xs text-red-500 hover:underline">Delete</button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
+      {/* Password change log */}
+      <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
+        <div className="px-5 py-3 border-b border-gray-50 flex items-center justify-between">
+          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-2">
+            <Lock className="w-3.5 h-3.5" /> Password Change Log {selectedTenant && `— ${tenantList.find(t => t.id === selectedTenant)?.name}`}
+          </p>
+          <button onClick={() => refetchLog()} className="text-xs text-gray-400 hover:text-brand-600 flex items-center gap-1">
+            <RefreshCw className="w-3 h-3" /> Refresh
+          </button>
+        </div>
+        {logLoading ? (
+          <div className="flex justify-center py-10"><Loader2 className="w-5 h-5 animate-spin text-gray-400" /></div>
+        ) : pwLog.length === 0 ? (
+          <p className="text-center text-xs text-gray-400 py-8">No password changes recorded yet.</p>
+        ) : (
+          <table className="w-full">
+            <thead className="bg-gray-50 border-b border-gray-100">
+              <tr>
+                {['Date / Time','Tenant','User','Email','Role','Action','Changed By','Notes'].map(h => (
+                  <th key={h} className="px-4 py-2.5 text-left text-xs font-semibold text-gray-400">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-50">
+              {pwLog.map((l: any) => (
+                <tr key={l.id} className="hover:bg-gray-50">
+                  <td className="px-4 py-2.5 text-xs text-gray-500 whitespace-nowrap">{fmtDateTime(l.created_at)}</td>
+                  <td className="px-4 py-2.5 text-xs text-gray-700">{l.tenant_name ?? '—'}</td>
+                  <td className="px-4 py-2.5 text-xs font-medium text-gray-900">{l.user_name ?? '—'}</td>
+                  <td className="px-4 py-2.5 text-xs font-mono text-gray-500">{l.user_email ?? '—'}</td>
+                  <td className="px-4 py-2.5 text-xs capitalize text-gray-600">{l.user_role?.replace(/_/g,' ') ?? '—'}</td>
+                  <td className="px-4 py-2.5">
+                    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full capitalize ${l.action === 'created' ? 'bg-green-50 text-green-700' : 'bg-amber-50 text-amber-700'}`}>{l.action}</span>
+                  </td>
+                  <td className="px-4 py-2.5 text-xs text-gray-500">{l.admin_name ?? 'Super Admin'}</td>
+                  <td className="px-4 py-2.5 text-xs text-gray-400">{l.notes ?? '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {showCreateUser && selectedTenant && (
+        <CreateUserModal tenantId={selectedTenant} onClose={() => { setShowCreateUser(false); refetchUsers(); refetchLog(); }} />
+      )}
+      {editUser && (
+        <EditUserModal user={editUser} onClose={() => { setEditUser(null); refetchUsers(); refetchLog(); }} />
+      )}
     </div>
   );
 }
@@ -1556,22 +2550,7 @@ export function SuperAdmin() {
   if (!isSuperAdmin) return <Navigate to="/dashboard" replace />;
 
   const qc = useQueryClient();
-  // Hash-synced tab so the SuperAdminSidebar links (e.g. /super-admin#tenants)
-  // actually switch tabs instead of just changing the URL fragment silently.
-  const location = useLocation();
-  const tabFromHash = (h: string): 'dashboard' | 'tenants' | 'roles' | 'sub-admins' | 'billing' => {
-    const v = h.replace(/^#/, '');
-    return (['dashboard','tenants','roles','sub-admins','billing'] as const).includes(v as any)
-      ? (v as any) : 'dashboard';
-  };
-  const [activeTab, setActiveTabState] = useState<'dashboard' | 'tenants' | 'roles' | 'sub-admins' | 'billing'>(tabFromHash(location.hash));
-  // Keep state and URL hash in lockstep: clicking a sidebar link updates state;
-  // clicking a tab button updates the URL hash so deep-links + back/forward work.
-  useEffect(() => { setActiveTabState(tabFromHash(location.hash)); }, [location.hash]);
-  const setActiveTab = (t: typeof activeTab) => {
-    setActiveTabState(t);
-    if (location.hash !== `#${t}`) window.history.replaceState(null, '', `#${t}`);
-  };
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'tenants' | 'roles' | 'sub-admins' | 'billing' | 'reports' | 'settings'>('dashboard');
   const [search, setSearch] = useState('');
   const [planFilter, setPlanFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
@@ -1585,6 +2564,7 @@ export function SuperAdmin() {
     queryFn: () => api.get('/super-admin/tenants', {
       params: { page, pageSize: 20, search: search || undefined, plan: planFilter || undefined, status: statusFilter || undefined },
     }).then((r) => r.data),
+    enabled: activeTab === 'tenants' || activeTab === 'billing',
   });
 
   const tenants = data?.data ?? [];
@@ -1620,11 +2600,13 @@ export function SuperAdmin() {
         {/* Tabs */}
         <div className="flex gap-1">
           {([
-            { key: 'dashboard',  label: 'Dashboard',        icon: BarChart3  },
-            { key: 'tenants',    label: 'Tenants',          icon: Building2  },
-            { key: 'billing',    label: 'Billing',          icon: TrendingUp },
-            { key: 'roles',      label: 'Sub-Admin Roles',  icon: Shield     },
-            { key: 'sub-admins', label: 'Sub-Admins',       icon: Users      },
+            { key: 'dashboard',  label: 'Dashboard',        icon: BarChart3   },
+            { key: 'tenants',    label: 'Tenants',          icon: Building2   },
+            { key: 'billing',    label: 'Billing',          icon: TrendingUp  },
+            { key: 'roles',      label: 'Sub-Admin Roles',  icon: Shield      },
+            { key: 'sub-admins', label: 'Sub-Admins',       icon: Users       },
+            { key: 'reports',    label: 'Reports',          icon: BarChart2   },
+            { key: 'settings',   label: 'Settings',         icon: Lock        },
           ] as const).map(({ key, label, icon: Icon }) => (
             <button key={key} onClick={() => setActiveTab(key)}
               className={`flex items-center gap-1.5 px-4 py-2 text-sm rounded-lg transition-colors ${
@@ -1644,6 +2626,8 @@ export function SuperAdmin() {
         {activeTab === 'billing'    && <PlatformBillingTab tenants={tenants} />}
         {activeTab === 'roles'      && <PlatformRolesTab />}
         {activeTab === 'sub-admins' && <SubAdminsTab />}
+        {activeTab === 'reports'    && <SuperAdminReports />}
+        {activeTab === 'settings'   && <SuperAdminSettings />}
 
         {/* Filters */}
         {activeTab === 'tenants' && <div className="flex gap-3 flex-wrap">
