@@ -4,6 +4,7 @@ import type { DatabaseClient } from '@crm/core';
 import type { EventBus } from '@crm/core';
 import { CRM_EVENTS } from '@crm/core';
 import { requireScope } from '../middlewares/auth.middleware';
+import { getVisibleUserIds, ownerScopeSql } from '../lib/visibility';
 
 const CreateContactSchema = z.object({
   firstName: z.string().min(1),
@@ -44,9 +45,17 @@ export function contactRoutes(db: DatabaseClient, eventBus: EventBus) {
       const tenantId = req.tenant.id;
       const offset = (query.page - 1) * query.pageSize;
 
+      // Hard visibility filter: a user only sees contacts owned by themselves or
+      // anyone beneath them in the reporting tree. Managers see their department.
+      const scopeIds = await db.withTenant(tenantId, (client) =>
+        getVisibleUserIds(client, req.user.sub, req.user.role),
+      );
+      const scopeClause = ownerScopeSql('c.owner_id', scopeIds);
+      const scopeClauseNoAlias = ownerScopeSql('owner_id', scopeIds);
+
       const [{ count }] = await db.withTenant(tenantId, async (client) => {
         const result = await client.query(
-          buildCountQuery(query),
+          buildCountQuery(query, scopeClauseNoAlias),
           buildQueryParams(query),
         );
         return result.rows;
@@ -54,7 +63,7 @@ export function contactRoutes(db: DatabaseClient, eventBus: EventBus) {
 
       const contacts = await db.withTenant(tenantId, async (client) => {
         const result = await client.query(
-          buildListQuery(query, offset),
+          buildListQuery(query, offset, scopeClause),
           buildQueryParams(query, query.pageSize, offset),
         );
         return result.rows;
@@ -105,7 +114,7 @@ export function contactRoutes(db: DatabaseClient, eventBus: EventBus) {
       });
 
       const customFields = body.customFields ?? {};
-      const missingFields = requiredFields.filter(
+      const missingFields = req.user.role === 'super_admin' ? [] : requiredFields.filter(
         (name: string) => customFields[name] === undefined || customFields[name] === null || customFields[name] === '',
       );
 
@@ -314,7 +323,7 @@ export function contactRoutes(db: DatabaseClient, eventBus: EventBus) {
   };
 }
 
-function buildListQuery(query: any, offset: number): string {
+function buildListQuery(query: any, offset: number, scopeClause = ''): string {
   let idx = 1;
   const searchClause  = query.search  ? `AND (c.first_name || ' ' || COALESCE(c.last_name,'') || ' ' || COALESCE(c.email,'')) ILIKE $${idx++}` : '';
   const statusClause  = query.status  ? `AND c.status = $${idx++}` : '';
@@ -326,6 +335,7 @@ function buildListQuery(query: any, offset: number): string {
     LEFT JOIN companies comp ON c.company_id = comp.id
     LEFT JOIN users u ON c.owner_id = u.id
     WHERE 1=1
+    ${scopeClause}
     ${searchClause}
     ${statusClause}
     ${ownerClause}
@@ -334,12 +344,12 @@ function buildListQuery(query: any, offset: number): string {
   `;
 }
 
-function buildCountQuery(query: any): string {
+function buildCountQuery(query: any, scopeClause = ''): string {
   let idx = 1;
   const searchClause  = query.search  ? `AND (first_name || ' ' || COALESCE(last_name,'') || ' ' || COALESCE(email,'')) ILIKE $${idx++}` : '';
   const statusClause  = query.status  ? `AND status = $${idx++}` : '';
   const ownerClause   = query.ownerId ? `AND owner_id = $${idx++}` : '';
-  return `SELECT COUNT(*) FROM contacts WHERE 1=1 ${searchClause} ${statusClause} ${ownerClause}`;
+  return `SELECT COUNT(*) FROM contacts WHERE 1=1 ${scopeClause} ${searchClause} ${statusClause} ${ownerClause}`;
 }
 
 function buildQueryParams(query: any, ...extra: unknown[]): unknown[] {

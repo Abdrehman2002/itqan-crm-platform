@@ -101,7 +101,6 @@ const ROLE_LEVEL: Record<string, number> = {
   super_admin:  50,
   tenant_admin: 40,
   manager:      30,
-  line_manager: 25,   // department-scoped sub-manager — between manager and agent
   agent:        20,
   viewer:       10,
 };
@@ -180,6 +179,48 @@ export function requireScope(...scopes: ApiScope[]) {
         }
       }
     }
+  };
+}
+
+// Entitlement guard — enforces the tenant's licensed feature allow-list
+// (tenants.entitled_features) as the hard ceiling. Passes if the tenant is entitled
+// to ANY of the given features. Legacy tenants with no recorded entitlement are
+// allowed through so existing workspaces keep working.
+export function requireEntitlement(...features: string[]) {
+  return async (req: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    const entitled = (req.tenant as any)?.entitled_features;
+    if (!Array.isArray(entitled) || entitled.length === 0) return; // legacy → allow
+    if (features.some((f) => entitled.includes(f))) return;
+    return reply.code(403).send({
+      success: false,
+      error: {
+        code: 'NOT_LICENSED',
+        message: 'This feature is not included in your workspace licence. Contact your provider.',
+      },
+    });
+  };
+}
+
+// Granular permission guard — enforces a specific action key (e.g. 'invoices:edit')
+// against the user's role permission map carried in the JWT.
+//   • super_admin / tenant_admin → full access (bypass)
+//   • key present & true (or legacy 'full'/'view') → allow
+//   • key explicitly false → deny
+//   • key ABSENT from the map → allow (backward-compat: the role predates this
+//     permission key, so we don't retroactively lock existing workspaces out)
+export function requirePermission(key: string) {
+  return async (req: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    const role = req.user?.role;
+    if (role === 'super_admin' || role === 'tenant_admin') return;
+    const perms = (req.user as any)?.permissions as Record<string, unknown> | undefined;
+    if (!perms) return; // no map at all → don't block
+    const v = perms[key];
+    if (v === undefined) return;                 // key not in this role → allow (legacy)
+    if (v === true || v === 'full' || v === 'view') return;
+    return reply.code(403).send({
+      success: false,
+      error: { code: 'FORBIDDEN', message: 'You do not have permission for this action.' },
+    });
   };
 }
 

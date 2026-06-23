@@ -1,11 +1,11 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { DatabaseClient } from '@crm/core';
-import { requireScope } from '../../middlewares/auth.middleware';
+import { requireScope, requireEntitlement, requirePermission } from '../../middlewares/auth.middleware';
 import { EmailService } from '../../services/email.service';
 
 const LineItemSchema = z.object({
-  description: z.string().min(1),
+  description: z.string(),
   quantity: z.number().positive(),
   unitPrice: z.number().min(0),
   taxRate: z.number().min(0).max(100).default(0),
@@ -47,13 +47,64 @@ const ListQuerySchema = z.object({
   search: z.string().optional(),
 });
 
+function rowToInvoice(row: Record<string, any>) {
+  const total = Number(row.total);
+  const payments = Array.isArray(row.payments) ? row.payments : [];
+
+  // Amount paid: either from payments array (GET single) or amount_paid field (LIST)
+  let amountPaid: number;
+  if (payments.length > 0) {
+    amountPaid = payments.reduce((sum, p) => sum + Number(p.amount ?? 0), 0);
+  } else {
+    amountPaid = Number(row.amount_paid ?? 0);
+  }
+
+  const amountDue = total - amountPaid;
+
+  let status = row.status;
+  if (amountPaid > 0 && amountDue > 0) {
+    status = 'partially paid';
+  } else if (amountDue <= 0) {
+    status = 'paid';
+  }
+
+  return {
+    id: row.id,
+    number: row.invoice_number,
+    status,
+    billingContactId: row.billing_contact_id,
+    contactName: row.contact_name ?? row.client_name,
+    contactEmail: row.contact_email ?? row.client_email,
+    contactCompany: row.contact_company,
+    contactBillingAddress: row.contact_billing_address,
+    issueDate: row.issue_date ?? row.created_at,
+    dueDate: row.due_date,
+    poReference: row.po_reference,
+    currency: row.currency,
+    templateId: row.template_id,
+    subtotal: Number(row.subtotal),
+    totalTax: Number(row.tax),
+    total,
+    amountPaid,
+    amountDue: amountDue > 0 ? amountDue : 0,
+    notes: row.notes,
+    terms: row.terms,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lineItems: Array.isArray(row.lineItems) ? row.lineItems : [],
+    payments,
+  };
+}
+
 export function invoiceRoutes(db: DatabaseClient) {
   const emailSvc = new EmailService(db);
 
   return async function (fastify: FastifyInstance) {
+    // Hard ceiling: workspace must be licensed for the Invoices feature.
+    fastify.addHook('preHandler', requireEntitlement('sales.invoices'));
 
     // LIST
-    fastify.get('/', { preHandler: requireScope('contacts:read') }, async (req, reply) => {
+    fastify.get('/', { preHandler: [requireScope('contacts:read'), requirePermission('invoices:read')] }, async (req, reply) => {
       const q = ListQuerySchema.parse(req.query);
       const tenantId = req.tenant.id;
       const offset = (q.page - 1) * q.pageSize;
@@ -68,9 +119,11 @@ export function invoiceRoutes(db: DatabaseClient) {
       const { rows } = await db.withTenant(tenantId, (client) =>
         client.query(
           `SELECT i.*, bc.name as contact_name, bc.email as contact_email, bc.company as contact_company,
-                  bc.billing_address as contact_billing_address, bc.currency as contact_currency
+                  bc.billing_address as contact_billing_address, bc.currency as contact_currency,
+                  COALESCE(p.total_paid, 0) as amount_paid
            FROM invoices i
            LEFT JOIN billing_contacts bc ON bc.id = i.billing_contact_id
+           LEFT JOIN (SELECT invoice_id, SUM(amount) as total_paid FROM invoice_payments GROUP BY invoice_id) p ON p.invoice_id = i.id
            WHERE ${where}
            ORDER BY i.created_at DESC
            LIMIT $${vals.length + 1} OFFSET $${vals.length + 2}`,
@@ -80,11 +133,11 @@ export function invoiceRoutes(db: DatabaseClient) {
       const { rows: [{ count }] } = await db.withTenant(tenantId, (client) =>
         client.query(`SELECT COUNT(*) FROM invoices i LEFT JOIN billing_contacts bc ON bc.id = i.billing_contact_id WHERE ${where}`, vals)
       );
-      return reply.send({ success: true, data: rows, total: Number(count), page: q.page, pageSize: q.pageSize });
+      return reply.send({ success: true, data: rows.map(rowToInvoice), total: Number(count), page: q.page, pageSize: q.pageSize });
     });
 
     // GET single
-    fastify.get('/:id', { preHandler: requireScope('contacts:read') }, async (req, reply) => {
+    fastify.get('/:id', { preHandler: [requireScope('contacts:read'), requirePermission('invoices:read')] }, async (req, reply) => {
       const { id } = req.params as { id: string };
       const tenantId = req.tenant.id;
       const [inv] = await db.withTenant(tenantId, (client) =>
@@ -94,21 +147,21 @@ export function invoiceRoutes(db: DatabaseClient) {
            FROM invoices i LEFT JOIN billing_contacts bc ON bc.id = i.billing_contact_id
            WHERE i.tenant_id=$1 AND i.id=$2`,
           [tenantId, id]
-        )
+        ).then(r => r.rows)
       );
       if (!inv) return reply.status(404).send({ success: false, error: 'Not found' });
 
       const lineItems = await db.withTenant(tenantId, (client) =>
-        client.query(`SELECT * FROM invoice_line_items WHERE invoice_id=$1 ORDER BY sort_order`, [id])
+        client.query(`SELECT * FROM invoice_line_items WHERE invoice_id=$1 ORDER BY sort_order`, [id]).then(r => r.rows)
       );
       const payments = await db.withTenant(tenantId, (client) =>
-        client.query(`SELECT * FROM invoice_payments WHERE invoice_id=$1 ORDER BY payment_date DESC`, [id])
+        client.query(`SELECT * FROM invoice_payments WHERE invoice_id=$1 ORDER BY payment_date DESC`, [id]).then(r => r.rows)
       );
-      return reply.send({ success: true, data: { ...inv, lineItems, payments } });
+      return reply.send({ success: true, data: rowToInvoice({ ...inv, lineItems, payments }) });
     });
 
     // CREATE
-    fastify.post('/', { preHandler: requireScope('contacts:write') }, async (req, reply) => {
+    fastify.post('/', { preHandler: [requireScope('contacts:write'), requirePermission('invoices:create')] }, async (req, reply) => {
       const body = CreateInvoiceSchema.parse(req.body);
       const tenantId = req.tenant.id;
 
@@ -121,14 +174,47 @@ export function invoiceRoutes(db: DatabaseClient) {
       const nextNum = settings?.next_invoice_number ?? 1;
       const invoiceNumber = `${prefix}${String(nextNum).padStart(4, '0')}`;
 
+      // If billingContactId is a CRM contact (not yet in billing_contacts), auto-create it
+      let resolvedContactId = body.billingContactId ?? null;
+      if (resolvedContactId) {
+        const existing = await db.withTenant(tenantId, (client) =>
+          client.query(`SELECT id FROM billing_contacts WHERE id=$1`, [resolvedContactId])
+        );
+        if (!existing.rows.length) {
+          // Try to find in CRM contacts
+          const [crmContact] = await db.withTenant(tenantId, (client) =>
+            client.query(
+              `SELECT c.*, comp.name as company_name FROM contacts c
+               LEFT JOIN companies comp ON comp.id = c.company_id
+               WHERE c.id=$1`,
+              [resolvedContactId]
+            ).then(r => r.rows)
+          );
+          if (crmContact) {
+            const [newBc] = await db.withTenant(tenantId, (client) =>
+              client.query(
+                `INSERT INTO billing_contacts (tenant_id, name, email, phone, company, currency, billing_address)
+                 VALUES ($1,$2,$3,$4,$5,'USD','{}') RETURNING id`,
+                [tenantId,
+                 `${crmContact.first_name} ${crmContact.last_name ?? ''}`.trim(),
+                 crmContact.email ?? '',
+                 crmContact.phone ?? null,
+                 crmContact.company_name ?? null]
+              ).then(r => r.rows)
+            );
+            resolvedContactId = newBc?.id ?? null;
+          }
+        }
+      }
+
       const [inv] = await db.withTenant(tenantId, async (client) => {
         const insertResult = await client.query(
-          `INSERT INTO invoices (tenant_id, invoice_number, status, billing_contact_id, due_at, due_date,
+          `INSERT INTO invoices (tenant_id, invoice_number, status, billing_contact_id, issue_date, due_at, due_date,
             currency, po_reference, template_id, subtotal, tax, total, provider, notes, terms)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
           [tenantId, invoiceNumber, body.status === 'draft' ? 'open' : body.status,
-           body.billingContactId ?? null,
-           body.dueDate, body.dueDate, body.currency, body.poReference ?? null,
+           resolvedContactId,
+           body.issueDate, body.dueDate, body.dueDate, body.currency, body.poReference ?? null,
            body.templateId, body.subtotal, body.totalTax, body.total, 'manual',
            body.notes ?? null, body.terms ?? null]
         );
@@ -153,11 +239,11 @@ export function invoiceRoutes(db: DatabaseClient) {
         )
       );
 
-      return reply.status(201).send({ success: true, data: inv });
+      return reply.status(201).send({ success: true, data: rowToInvoice({ ...inv, lineItems: [], payments: [] }) });
     });
 
     // UPDATE (status, notes, etc.)
-    fastify.patch('/:id', { preHandler: requireScope('contacts:write') }, async (req, reply) => {
+    fastify.patch('/:id', { preHandler: [requireScope('contacts:write'), requirePermission('invoices:edit')] }, async (req, reply) => {
       const body = UpdateInvoiceSchema.parse(req.body);
       const { id } = req.params as { id: string };
       const tenantId = req.tenant.id;
@@ -176,7 +262,7 @@ export function invoiceRoutes(db: DatabaseClient) {
     });
 
     // DELETE
-    fastify.delete('/:id', { preHandler: requireScope('contacts:write') }, async (req, reply) => {
+    fastify.delete('/:id', { preHandler: [requireScope('contacts:write'), requirePermission('invoices:delete')] }, async (req, reply) => {
       const { id } = req.params as { id: string };
       const tenantId = req.tenant.id;
       await db.withTenant(tenantId, (client) =>
@@ -186,7 +272,7 @@ export function invoiceRoutes(db: DatabaseClient) {
     });
 
     // RECORD PAYMENT
-    fastify.post('/:id/payments', { preHandler: requireScope('contacts:write') }, async (req, reply) => {
+    fastify.post('/:id/payments', { preHandler: [requireScope('contacts:write'), requirePermission('payments:record')] }, async (req, reply) => {
       const { id } = req.params as { id: string };
       const tenantId = req.tenant.id;
       const body = z.object({
@@ -223,7 +309,7 @@ export function invoiceRoutes(db: DatabaseClient) {
 
     // EMAIL INVOICE TO BILLING CONTACT
     // POST /api/v1/sales/invoices/:id/send
-    fastify.post('/:id/send', { preHandler: requireScope('billing:manage') }, async (req, reply) => {
+    fastify.post('/:id/send', { preHandler: [requireScope('billing:manage'), requirePermission('invoices:send')] }, async (req, reply) => {
       const { id } = req.params as { id: string };
       const tenantId = req.tenant.id;
 

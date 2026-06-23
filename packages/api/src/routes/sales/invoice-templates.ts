@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { DatabaseClient } from '@crm/core';
-import { requireScope } from '../../middlewares/auth.middleware';
+import { requireScope, requireEntitlement, requirePermission } from '../../middlewares/auth.middleware';
 import { buildFileStorage } from '../../lib/file-storage';
 
 const storage = buildFileStorage();
@@ -45,16 +45,18 @@ const UpdateSchema = z.object({
 
 export function invoiceTemplateRoutes(db: DatabaseClient) {
   return async function (fastify: FastifyInstance) {
+    // Hard ceiling: workspace must be licensed for the Invoice Templates feature.
+    fastify.addHook('preHandler', requireEntitlement('sales.templates'));
 
     // List merge fields — any authenticated user can view
-    fastify.get('/merge-fields', { preHandler: requireScope('contacts:read') }, async (_req, reply) => {
+    fastify.get('/merge-fields', { preHandler: [requireScope('contacts:read'), requirePermission('invoice_templates:read')] }, async (_req, reply) => {
       return reply.send({ success: true, data: MERGE_FIELDS });
     });
 
     // List templates for tenant
-    fastify.get('/', { preHandler: requireScope('billing:read') }, async (req, reply) => {
+    fastify.get('/', { preHandler: [requireScope('billing:read'), requirePermission('invoice_templates:read')] }, async (req, reply) => {
       const tenantId = req.tenant.id;
-      const { rows } = await db.withTenant(tenantId, (client) =>
+      const rows = await db.withTenant(tenantId, (client) =>
         client.query(
           `SELECT id, name, type, is_default, file_name, created_at, updated_at,
                   CASE WHEN type='builder' THEN layout ELSE NULL END as layout
@@ -66,7 +68,7 @@ export function invoiceTemplateRoutes(db: DatabaseClient) {
     });
 
     // Save builder template
-    fastify.post('/', { preHandler: requireScope('billing:manage') }, async (req, reply) => {
+    fastify.post('/', { preHandler: [requireScope('billing:manage'), requirePermission('invoice_templates:manage')] }, async (req, reply) => {
       const body = SaveBuilderSchema.parse(req.body);
       const tenantId = req.tenant.id;
 
@@ -88,7 +90,7 @@ export function invoiceTemplateRoutes(db: DatabaseClient) {
     });
 
     // Update (rename, set default, update layout)
-    fastify.patch('/:id', { preHandler: requireScope('billing:manage') }, async (req, reply) => {
+    fastify.patch('/:id', { preHandler: [requireScope('billing:manage'), requirePermission('invoice_templates:manage')] }, async (req, reply) => {
       const body = UpdateSchema.parse(req.body);
       const { id } = req.params as { id: string };
       const tenantId = req.tenant.id;
@@ -117,7 +119,7 @@ export function invoiceTemplateRoutes(db: DatabaseClient) {
     });
 
     // Delete
-    fastify.delete('/:id', { preHandler: requireScope('billing:manage') }, async (req, reply) => {
+    fastify.delete('/:id', { preHandler: [requireScope('billing:manage'), requirePermission('invoice_templates:manage')] }, async (req, reply) => {
       const { id } = req.params as { id: string };
       const tenantId = req.tenant.id;
 
@@ -138,7 +140,7 @@ export function invoiceTemplateRoutes(db: DatabaseClient) {
     });
 
     // Upload DOCX template
-    fastify.post('/upload', { preHandler: requireScope('billing:manage') }, async (req, reply) => {
+    fastify.post('/upload', { preHandler: [requireScope('billing:manage'), requirePermission('invoice_templates:manage')] }, async (req, reply) => {
       const tenantId = req.tenant.id;
 
       const data = await req.file();
@@ -171,7 +173,7 @@ export function invoiceTemplateRoutes(db: DatabaseClient) {
     });
 
     // Render a DOCX template with invoice data — returns filled .docx binary
-    fastify.post('/:id/render', { preHandler: requireScope('billing:read') }, async (req, reply) => {
+    fastify.post('/:id/render', { preHandler: [requireScope('billing:read'), requirePermission('invoice_templates:read')] }, async (req, reply) => {
       const { id } = req.params as { id: string };
       const tenantId = req.tenant.id;
 

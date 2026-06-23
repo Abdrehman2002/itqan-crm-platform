@@ -432,6 +432,44 @@ async function assignByPushRouting(
   });
 }
 
+// ── Sales ticket → Deal conversion ──────────────────────────────────────────
+// A 'sales' enquiry follows a different lifecycle to a complaint: rather than
+// just being resolved & closed, it should feed the sales pipeline so it can be
+// forecast and worked as an opportunity. This creates (once) a deal in the
+// default pipeline, linked back to the ticket, owned by the handling agent.
+// Idempotent: if the ticket already has a linked deal, that deal is returned.
+// Returns null only when no pipeline/stage exists to place the deal into.
+// (Ported from Munir e69bd61 — preserves enquiry→revenue trail, no duplicates.)
+async function convertSalesTicketToDeal(
+  client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }> },
+  tenantId: string,
+  ticket: any,
+  ownerId: string,
+): Promise<{ deal: any; created: boolean } | null> {
+  if (ticket.deal_id) {
+    const ex = await client.query(`SELECT * FROM deals WHERE id = $1`, [ticket.deal_id]);
+    return ex.rows[0] ? { deal: ex.rows[0], created: false } : null;
+  }
+  const pipe = await client.query(
+    `SELECT id, stages FROM pipelines WHERE tenant_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1`,
+    [tenantId],
+  );
+  const pipeline = pipe.rows[0];
+  const firstStage = pipeline?.stages?.[0]?.id ?? null;
+  if (!pipeline || !firstStage) return null;
+  const ins = await client.query(
+    `INSERT INTO deals
+       (tenant_id, name, pipeline_id, stage_id, owner_id, contact_id, company_id, status, source, currency)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', 'ticket', 'USD')
+     RETURNING *`,
+    [tenantId, ticket.subject ?? 'Sales enquiry', pipeline.id, firstStage, ownerId,
+     ticket.contact_id ?? null, ticket.company_id ?? null],
+  );
+  const deal = ins.rows[0];
+  await client.query(`UPDATE tickets SET deal_id = $1, updated_at = NOW() WHERE id = $2`, [deal.id, ticket.id]);
+  return { deal, created: true };
+}
+
 export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
   const emailSvc = new EmailService(db);
   const smsSvc   = new SmsService(db);
@@ -1532,7 +1570,49 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
         ticketId: id, acceptedAt, slaDueAt, assigneeId: userId,
       });
 
-      return reply.send({ success: true, data: ticket });
+      // Sales enquiry → feed the pipeline. On acceptance of a 'sales' ticket,
+      // create (once) a linked deal so the opportunity is forecast and worked.
+      // Complaints/inquiries keep the normal resolve→close lifecycle untouched.
+      let convertedDeal: any = null;
+      if (ticket.ticket_type === 'sales') {
+        const conv = await db.withTenant(tenantId, (client) =>
+          convertSalesTicketToDeal(client, tenantId, ticket, userId),
+        );
+        if (conv?.created) {
+          convertedDeal = conv.deal;
+          await notify(db, tenantId, [userId], 'ticket_accepted',
+            `Deal created from ${ticket.ticket_number}`,
+            `A pipeline deal "${conv.deal.name}" was created from this sales enquiry.`,
+            id).catch(() => {});
+        } else if (conv) {
+          convertedDeal = conv.deal;
+        }
+      }
+
+      return reply.send({ success: true, data: { ...ticket, deal: convertedDeal } });
+    });
+
+    // ── Explicit: convert a sales ticket into a pipeline deal ───────────────
+    // Manual counterpart to the auto-conversion on accept. Idempotent.
+    fastify.post('/:id/convert-to-deal', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
+      const { id }   = req.params as { id: string };
+      const tenantId = req.tenant.id;
+      const userId   = req.user.sub;
+
+      const [ticket] = await db.withTenant(tenantId, (client) =>
+        client.query(`SELECT * FROM tickets WHERE id = $1`, [id]).then((r) => r.rows),
+      );
+      if (!ticket) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Ticket not found' } });
+      if (ticket.ticket_type !== 'sales') {
+        return reply.code(400).send({ success: false, error: { code: 'NOT_A_SALES_TICKET', message: 'Only sales enquiries can be converted into a deal.' } });
+      }
+      const conv = await db.withTenant(tenantId, (client) =>
+        convertSalesTicketToDeal(client, tenantId, ticket, ticket.assignee_id ?? userId),
+      );
+      if (!conv) {
+        return reply.code(409).send({ success: false, error: { code: 'NO_PIPELINE', message: 'No sales pipeline is configured to place the deal into.' } });
+      }
+      return reply.send({ success: true, data: conv.deal, created: conv.created });
     });
 
     // ── Resolve ticket ────────────────────────────────────────────────────

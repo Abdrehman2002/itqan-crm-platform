@@ -54,10 +54,19 @@ interface SendGridConfig {
   fromName?: string;
 }
 
+interface MicrosoftGraphConfig {
+  tenantId: string;
+  clientId: string;
+  clientSecret: string;
+  fromEmail: string;
+  fromName?: string;
+}
+
 type ConnectorConfig =
-  | { provider: 'smtp';      config: SmtpConfig }
-  | { provider: 'sendgrid';  config: SendGridConfig }
-  | { provider: null;        config: null };
+  | { provider: 'smtp';           config: SmtpConfig }
+  | { provider: 'sendgrid';       config: SendGridConfig }
+  | { provider: 'microsoft365';   config: MicrosoftGraphConfig }
+  | { provider: null;             config: null };
 
 // ── Email Service ─────────────────────────────────────────────────────────
 
@@ -74,8 +83,24 @@ export class EmailService {
 
     const connectors = (tenant?.settings as any)?.connectors ?? {};
 
+    // Priority: SendGrid > Microsoft 365 Graph > Gmail/SMTP
     if (connectors.sendgrid?.apiKey && connectors.sendgrid?.fromEmail) {
       return { provider: 'sendgrid', config: connectors.sendgrid as SendGridConfig };
+    }
+    if (connectors.microsoft365?.tenantId && connectors.microsoft365?.clientId && connectors.microsoft365?.clientSecret && connectors.microsoft365?.fromEmail) {
+      return { provider: 'microsoft365', config: connectors.microsoft365 as MicrosoftGraphConfig };
+    }
+    // Gmail connector stores in 'gmail' key but sends via SMTP
+    if (connectors.gmail?.user && connectors.gmail?.password) {
+      const gmailCfg: SmtpConfig = {
+        host: connectors.gmail.host || 'smtp.gmail.com',
+        port: connectors.gmail.port || '587',
+        user: connectors.gmail.user,
+        password: connectors.gmail.password,
+        fromName: connectors.gmail.fromName,
+        fromEmail: connectors.gmail.user,
+      };
+      return { provider: 'smtp', config: gmailCfg };
     }
     if (connectors.smtp?.host && connectors.smtp?.user && connectors.smtp?.password) {
       return { provider: 'smtp', config: connectors.smtp as SmtpConfig };
@@ -128,12 +153,18 @@ export class EmailService {
     }
 
     // Compute from address
-    const fromEmail = provider === 'sendgrid'
-      ? (config as SendGridConfig).fromEmail
-      : (config as SmtpConfig).fromEmail || (config as SmtpConfig).user;
-    const fromName = provider === 'sendgrid'
-      ? (config as SendGridConfig).fromName
-      : (config as SmtpConfig).fromName;
+    let fromEmail: string;
+    let fromName: string | undefined;
+    if (provider === 'sendgrid') {
+      fromEmail = (config as SendGridConfig).fromEmail;
+      fromName  = (config as SendGridConfig).fromName;
+    } else if (provider === 'microsoft365') {
+      fromEmail = (config as MicrosoftGraphConfig).fromEmail;
+      fromName  = (config as MicrosoftGraphConfig).fromName;
+    } else {
+      fromEmail = (config as SmtpConfig).fromEmail || (config as SmtpConfig).user;
+      fromName  = (config as SmtpConfig).fromName;
+    }
 
     // Update from fields in DB
     await this.db.withSuperAdmin(async (client) => {
@@ -150,6 +181,8 @@ export class EmailService {
 
       if (provider === 'smtp') {
         providerId = await this.sendViaSMTP(config as SmtpConfig, toList, opts, fromEmail, fromName);
+      } else if (provider === 'microsoft365') {
+        providerId = await this.sendViaMicrosoftGraph(config as MicrosoftGraphConfig, toList, opts);
       } else {
         providerId = await this.sendViaSendGrid(config as SendGridConfig, toList, opts);
       }
@@ -229,6 +262,82 @@ export class EmailService {
     });
 
     return info.messageId as string;
+  }
+
+  // ── Microsoft Graph API (OAuth 2.0 client credentials) ───────────────
+
+  private async getMicrosoftGraphToken(cfg: MicrosoftGraphConfig): Promise<string> {
+    const res = await fetch(
+      `https://login.microsoftonline.com/${cfg.tenantId}/oauth2/v2.0/token`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type:    'client_credentials',
+          client_id:     cfg.clientId,
+          client_secret: cfg.clientSecret,
+          scope:         'https://graph.microsoft.com/.default',
+        }),
+      },
+    );
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error(`Microsoft OAuth token error ${res.status}: ${txt}`);
+    }
+    const data = await res.json() as { access_token: string };
+    return data.access_token;
+  }
+
+  private async sendViaMicrosoftGraph(
+    cfg: MicrosoftGraphConfig,
+    toList: string[],
+    opts: SendEmailOpts,
+  ): Promise<string | undefined> {
+    const token = await this.getMicrosoftGraphToken(cfg);
+
+    const toRecipients = toList.map((e, i) => ({
+      emailAddress: { address: e, name: i === 0 && opts.toName ? opts.toName : undefined },
+    }));
+
+    const message: Record<string, unknown> = {
+      subject: opts.subject,
+      from: { emailAddress: { address: cfg.fromEmail, name: cfg.fromName ?? undefined } },
+      toRecipients,
+      body: {
+        contentType: opts.bodyHtml ? 'HTML' : 'Text',
+        content:     opts.bodyHtml ?? opts.bodyText ?? '',
+      },
+    };
+
+    if (opts.cc?.length) {
+      message.ccRecipients = opts.cc.map((e) => ({ emailAddress: { address: e } }));
+    }
+    if (opts.bcc?.length) {
+      message.bccRecipients = opts.bcc.map((e) => ({ emailAddress: { address: e } }));
+    }
+    if (opts.replyTo) {
+      message.replyTo = [{ emailAddress: { address: opts.replyTo } }];
+    }
+
+    const res = await fetch(
+      `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(cfg.fromEmail)}/sendMail`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization:  `Bearer ${token}`,
+        },
+        body: JSON.stringify({ message, saveToSentItems: true }),
+      },
+    );
+
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error(`Microsoft Graph sendMail ${res.status}: ${txt}`);
+    }
+
+    // Graph returns 202 with no body; use a synthetic ID
+    return `graph-${Date.now()}`;
   }
 
   // ── SendGrid v3 REST API ──────────────────────────────────────────────
@@ -313,6 +422,20 @@ export class EmailService {
         });
         if (!r.ok) return { ok: false, message: `SendGrid API error: ${r.status}` };
         return { ok: true, message: 'SendGrid API key valid' };
+      }
+      if (provider === 'microsoft365') {
+        const cfg = config as MicrosoftGraphConfig;
+        // Verify token acquisition and mailbox access
+        const token = await this.getMicrosoftGraphToken(cfg);
+        const r = await fetch(
+          `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(cfg.fromEmail)}/mailboxSettings`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+        if (!r.ok) {
+          const txt = await r.text();
+          return { ok: false, message: `Mailbox access error ${r.status}: ${txt}` };
+        }
+        return { ok: true, message: `Microsoft 365 connected — mailbox ${cfg.fromEmail} accessible` };
       }
       return { ok: false, message: 'Unknown provider' };
     } catch (err: any) {

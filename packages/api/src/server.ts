@@ -4,6 +4,7 @@ import FastifyJWT from '@fastify/jwt';
 import FastifyCors from '@fastify/cors';
 import FastifyHelmet from '@fastify/helmet';
 import FastifyRateLimit from '@fastify/rate-limit';
+import FastifyMultipart from '@fastify/multipart';
 import FastifySwagger from '@fastify/swagger';
 import FastifySwaggerUI from '@fastify/swagger-ui';
 import mercurius from 'mercurius';
@@ -40,12 +41,11 @@ import { invoiceRoutes } from './routes/sales/invoices';
 import { billingContactRoutes } from './routes/sales/billing-contacts';
 import { salesSettingsRoutes } from './routes/sales/sales-settings';
 import { salesDashboardRoutes } from './routes/sales/sales-dashboard';
+import { invoiceTemplateRoutes } from './routes/sales/invoice-templates';
 import { sectorRoutes } from './routes/sector';
 import { departmentRoutes } from './routes/departments';
 import { opportunityRoutes } from './routes/opportunities';
-import { invoiceTemplateRoutes } from './routes/sales/invoice-templates';
-import { startWebhookWorker } from './lib/webhook-worker';
-import { startAnalyticsRefreshWorker } from './lib/analytics-refresh-worker';
+import { teamMessageRoutes } from './routes/team-messages';
 
 // Feature modules (internal building blocks)
 import { ContactsModule } from '../../../modules/contacts/src';
@@ -62,6 +62,9 @@ import { TicketingPlatformModule } from '../../../modules/ticketing/src';
 import { SalesPlatformModule } from '../../../modules/sales/src';
 
 import { buildGraphQLSchema } from './graphql/schema';
+import { startWebhookWorker } from './lib/webhook-worker';
+import { startWebhookDispatcher } from './lib/webhook-dispatcher';
+import { startAnalyticsRefreshWorker } from './lib/analytics-refresh-worker';
 
 async function buildServer() {
   const fastify = Fastify({
@@ -81,6 +84,13 @@ async function buildServer() {
 
   await db.connect();
   logger.info('Infrastructure connected');
+
+  // Start webhook delivery worker (polls every 5 s, exponential backoff retries)
+  const stopWebhookWorker = startWebhookWorker(db);
+  // Start webhook dispatcher — BullMQ worker that fans out crm-events to tenant webhooks
+  const stopWebhookDispatcher = startWebhookDispatcher(db, redis.native);
+  // Start analytics MV refresh worker (warms up on boot, refreshes hourly)
+  const stopAnalyticsRefresh = startAnalyticsRefreshWorker(db);
 
   // ── Module registry ───────────────────────────────────────
   const moduleRegistry = new ModuleRegistry();
@@ -102,12 +112,6 @@ async function buildServer() {
   const moduleCtx = { db, redis, queue: null, eventBus, config: process.env as any };
   await moduleRegistry.loadAll(moduleCtx);
   await moduleRegistry.loadAllPlatform(moduleCtx);
-
-  // ── Background workers ─────────────────────────────────────
-  // Webhook delivery worker: retries failed deliveries with exponential backoff.
-  // Analytics refresh worker: refreshes materialized views every hour.
-  const stopWebhookWorker     = startWebhookWorker(db);
-  const stopAnalyticsRefresh  = startAnalyticsRefreshWorker(db);
 
   // ── Fastify plugins ───────────────────────────────────────
 
@@ -144,6 +148,10 @@ async function buildServer() {
   await fastify.register(FastifyJWT, {
     secret: process.env.JWT_SECRET!,
     sign: { expiresIn: '8h' },
+  });
+
+  await fastify.register(FastifyMultipart, {
+    limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB max for template uploads
   });
 
   await fastify.register(FastifyRateLimit, {
@@ -197,27 +205,6 @@ async function buildServer() {
       }
     } catch { /* handler itself threw — fall through to defaults */ }
 
-    // Postgres errors that are actually caller faults → return 400 instead of 500
-    // 22P02 = invalid_text_representation (e.g. bad UUID, bad date in :id path)
-    // 22001 = string_data_right_truncation (oversize value)
-    // 23502 = not_null_violation (missing required field that schema didn't catch)
-    // 23503 = foreign_key_violation (referencing a row that doesn't exist)
-    // 23505 = unique_violation (duplicate)
-    const pgCode = (err as any).code;
-    const PG_USER_ERRORS: Record<string, string> = {
-      '22P02': 'Invalid identifier or value format',
-      '22001': 'Value too long',
-      '23502': 'Missing required field',
-      '23503': 'Referenced record does not exist',
-      '23505': 'Duplicate — record already exists',
-    };
-    if (pgCode && PG_USER_ERRORS[pgCode]) {
-      return reply.code(400).send({
-        success: false,
-        error: { code: pgCode, message: PG_USER_ERRORS[pgCode] },
-      });
-    }
-
     // Postgres / known errors with a statusCode
     const status = (err as any).statusCode ?? reply.statusCode;
     if (status >= 400 && status < 500) {
@@ -260,10 +247,69 @@ async function buildServer() {
     if (isPublic) return;
     await authMiddleware(req, reply);
     if (reply.sent) return;
-    // Super admin is restricted to /super-admin/* routes only — not tenant-scoped /api/v1/*
-    if (req.url.startsWith('/api/v1/') && (req.user as any)?.role === 'super_admin') {
+    // Super admin may access specific tenant-scoped routes (integrations, settings, roles, modules)
+    // but is still blocked from data-mutating tenant routes to prevent accidental cross-tenant writes.
+    const SUPER_ADMIN_ALLOWED_PREFIXES = [
+      '/api/v1/connectors',
+      '/api/v1/webhooks',
+      '/api/v1/api-keys',
+      '/api/v1/settings',
+      '/api/v1/roles',
+      '/api/v1/modules',
+      '/api/v1/billing',
+      '/api/v1/messages',
+      '/api/v1/contacts',
+      '/api/v1/companies',
+      '/api/v1/deals',
+      '/api/v1/activities',
+      '/api/v1/analytics',
+      '/api/v1/tickets',
+      '/api/v1/sector',
+      '/api/v1/notifications',
+      '/api/v1/emails',
+      '/api/v1/voice',
+      '/api/v1/voice-bot',
+      '/api/v1/departments',
+      '/api/v1/opportunities',
+      '/api/v1/sales',
+    ];
+    if (
+      req.url.startsWith('/api/v1/') &&
+      (req.user as any)?.role === 'super_admin' &&
+      !SUPER_ADMIN_ALLOWED_PREFIXES.some((p) => req.url.startsWith(p))
+    ) {
       return reply.code(403).send({ success: false, error: { code: 'FORBIDDEN', message: 'Super admin cannot access tenant-scoped routes. Use /super-admin/* endpoints.' } });
     }
+
+    // Tenant admin is an ADMINISTRATIVE role only (manage users, roles, settings,
+    // integrations / keep the system live). They have NO visibility of operational
+    // data — contacts, deals, activities, tickets, sales/invoicing, analytics,
+    // emails, voice and billing are all off-limits. This is separation of duties:
+    // the person who manages accounts is not the person who sees the operations.
+    // Billing (both subscription AND customer invoicing) belongs to a Finance/Sales
+    // role, never the admin.
+    const TENANT_ADMIN_BLOCKED_PREFIXES = [
+      '/api/v1/contacts',
+      '/api/v1/companies',
+      '/api/v1/deals',
+      '/api/v1/activities',
+      '/api/v1/analytics',
+      '/api/v1/tickets',
+      '/api/v1/sales',
+      '/api/v1/opportunities',
+      '/api/v1/emails',
+      '/api/v1/voice',
+      '/api/v1/voice-bot',
+      '/api/v1/billing',
+    ];
+    if (
+      req.url.startsWith('/api/v1/') &&
+      (req.user as any)?.role === 'tenant_admin' &&
+      TENANT_ADMIN_BLOCKED_PREFIXES.some((p) => req.url.startsWith(p))
+    ) {
+      return reply.code(403).send({ success: false, error: { code: 'ADMIN_NO_OPERATIONS', message: 'Administrators manage users, roles, settings and integrations — operational and billing data is not accessible to this role.' } });
+    }
+
     await tenantMiddleware(req, reply);
   });
 
@@ -293,12 +339,13 @@ async function buildServer() {
   // Sales & Invoicing module routes
   await fastify.register(invoiceRoutes(db),        { prefix: '/api/v1/sales/invoices' });
   await fastify.register(billingContactRoutes(db), { prefix: '/api/v1/sales/billing-contacts' });
-  await fastify.register(salesSettingsRoutes(db),  { prefix: '/api/v1/sales/settings' });
-  await fastify.register(salesDashboardRoutes(db), { prefix: '/api/v1/sales/dashboard' });
+  await fastify.register(salesSettingsRoutes(db),      { prefix: '/api/v1/sales/settings' });
+  await fastify.register(salesDashboardRoutes(db),     { prefix: '/api/v1/sales/dashboard' });
+  await fastify.register(invoiceTemplateRoutes(db),    { prefix: '/api/v1/sales/templates' });
   await fastify.register(sectorRoutes(db),         { prefix: '/api/v1/sector' });
-  await fastify.register(invoiceTemplateRoutes(db),{ prefix: '/api/v1/sales/templates' });
   await fastify.register(departmentRoutes(db),     { prefix: '/api/v1/departments' });
   await fastify.register(opportunityRoutes(db),    { prefix: '/api/v1/opportunities' });
+  await fastify.register(teamMessageRoutes(db),    { prefix: '/api/v1/messages' });
 
   // Health check
   fastify.get('/health', async () => ({
@@ -312,6 +359,7 @@ async function buildServer() {
     logger.info('Shutting down...');
     stopWebhookWorker();
     stopAnalyticsRefresh();
+    await stopWebhookDispatcher();
     await moduleRegistry.unloadAll();
     await eventBus.shutdown();
     await db.end();

@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { DatabaseClient } from '@crm/core';
-import { requireScope } from '../../middlewares/auth.middleware';
+import { requireScope, requireEntitlement, requirePermission } from '../../middlewares/auth.middleware';
 
 const SettingsSchema = z.object({
   invoicePrefix: z.string().optional(),
@@ -41,17 +41,48 @@ const DEFAULT_SETTINGS = {
   smtp_configured: false,
 };
 
+function rowToSettings(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    invoicePrefix: row.invoice_prefix,
+    nextInvoiceNumber: row.next_invoice_number,
+    defaultCurrency: row.default_currency,
+    defaultPaymentTerms: row.default_payment_terms,
+    taxRates: row.tax_rates ?? [],
+    bankAccounts: row.bank_accounts ?? [],
+    paymentModes: row.payment_modes ?? [],
+    smtpConfigured: row.smtp_configured ?? false,
+    companyName: row.company_name,
+    companyEmail: row.company_email,
+    companyPhone: row.company_phone,
+    companyAddress: row.company_address,
+    logoUrl: row.logo_url,
+  };
+}
+
 export function salesSettingsRoutes(db: DatabaseClient) {
   return async function (fastify: FastifyInstance) {
-    fastify.get('/', { preHandler: requireScope('contacts:read') }, async (req, reply) => {
+    // Hard ceiling: workspace must be licensed for the Sales Settings feature.
+    fastify.addHook('preHandler', requireEntitlement('sales.settings'));
+    fastify.get('/', { preHandler: [requireScope('contacts:read'), requirePermission('sales_settings:read')] }, async (req, reply) => {
       const tenantId = req.tenant.id;
-      const [row] = await db.withTenant(tenantId, async (client) =>
-        (await client.query(`SELECT * FROM sales_settings WHERE tenant_id=$1`, [tenantId])).rows
+      const [row] = await db.withTenant(tenantId, (client) =>
+        client.query(`SELECT * FROM sales_settings WHERE tenant_id=$1`, [tenantId]).then(r => r.rows)
       );
-      return reply.send({ success: true, data: row ?? { ...DEFAULT_SETTINGS, tenant_id: tenantId } });
+      const data = row ? rowToSettings(row) : {
+        invoicePrefix: DEFAULT_SETTINGS.invoice_prefix,
+        nextInvoiceNumber: DEFAULT_SETTINGS.next_invoice_number,
+        defaultCurrency: DEFAULT_SETTINGS.default_currency,
+        defaultPaymentTerms: DEFAULT_SETTINGS.default_payment_terms,
+        taxRates: DEFAULT_SETTINGS.tax_rates,
+        bankAccounts: DEFAULT_SETTINGS.bank_accounts,
+        paymentModes: DEFAULT_SETTINGS.payment_modes,
+        smtpConfigured: DEFAULT_SETTINGS.smtp_configured,
+      };
+      return reply.send({ success: true, data });
     });
 
-    fastify.put('/', { preHandler: requireScope('contacts:write') }, async (req, reply) => {
+    fastify.put('/', { preHandler: [requireScope('contacts:write'), requirePermission('sales_settings:edit')] }, async (req, reply) => {
       const body = SettingsSchema.parse(req.body);
       const tenantId = req.tenant.id;
       const fields: Record<string, unknown> = {};
@@ -68,21 +99,22 @@ export function salesSettingsRoutes(db: DatabaseClient) {
       if (body.companyPhone !== undefined)        fields.company_phone          = body.companyPhone;
       if (body.companyAddress !== undefined)      fields.company_address        = JSON.stringify(body.companyAddress);
       if (body.logoUrl !== undefined)             fields.logo_url               = body.logoUrl;
+      fields.updated_at = 'NOW()';
 
       const keys = Object.keys(fields);
-      const setClauses = [...keys.map((k, i) => `${k} = $${i + 2}`), 'updated_at = NOW()'].join(', ');
+      const setClauses = keys.map((k, i) => `${k} = $${i + 2}`).join(', ');
       const vals = [tenantId, ...Object.values(fields)];
 
-      const [row] = await db.withTenant(tenantId, async (client) =>
-        (await client.query(
+      const [row] = await db.withTenant(tenantId, (client) =>
+        client.query(
           `INSERT INTO sales_settings (tenant_id, ${keys.join(', ')})
            VALUES ($1, ${keys.map((_, i) => `$${i + 2}`).join(', ')})
            ON CONFLICT (tenant_id) DO UPDATE SET ${setClauses}
            RETURNING *`,
           vals
-        )).rows
+        ).then(r => r.rows)
       );
-      return reply.send({ success: true, data: row });
+      return reply.send({ success: true, data: row ? rowToSettings(row) : null });
     });
   };
 }

@@ -64,7 +64,7 @@ export function buildRedisClient(url: string): RedisClient {
     // Dynamically require ioredis — won't crash if unavailable
     const Redis = require('ioredis');
     const redis = new Redis(url, {
-      maxRetriesPerRequest: 1,
+      maxRetriesPerRequest: null,
       enableReadyCheck: false,
       lazyConnect: true,
       connectTimeout: 3000,

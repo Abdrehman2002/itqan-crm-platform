@@ -47,6 +47,7 @@ const RolesPage       = lazy(() => import('./pages/Roles').then(m => ({ default:
 const OrgChart        = lazy(() => import('./pages/OrgChart').then(m => ({ default: m.OrgChart })));
 const TeamReports     = lazy(() => import('./pages/TeamReports').then(m => ({ default: m.TeamReports })));
 const PersonalSettings = lazy(() => import('./pages/PersonalSettings').then(m => ({ default: m.PersonalSettings })));
+const TeamMessaging    = lazy(() => import('./pages/TeamMessaging').then(m => ({ default: m.TeamMessaging })));
 // Sales & Invoicing module
 const SalesDashboard    = lazy(() => import('./pages/sales/SalesDashboard').then(m => ({ default: m.SalesDashboard })));
 const InvoiceList       = lazy(() => import('./pages/sales/InvoiceList').then(m => ({ default: m.InvoiceList })));
@@ -366,6 +367,7 @@ function AppLayout() {
           <Route path="/organization"    element={<OrgChart />} />
           <Route path="/team-reports"    element={<TeamReports />} />
           <Route path="/personal-settings" element={<PersonalSettings />} />
+          <Route path="/messages"          element={<TeamMessaging />} />
           <Route path="/emails"          element={<Emails />} />
           <Route path="/voice-bot"         element={<VoiceBotConfig />} />
           <Route path="/voice-bot/calls"   element={<VoiceBotCalls />} />

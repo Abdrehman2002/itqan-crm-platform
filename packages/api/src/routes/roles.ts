@@ -60,6 +60,37 @@ export const MODULE_DEFS = [
     { key: 'analytics:read',   label: 'View reports & dashboards',          type: 'read'  as ActionType },
     { key: 'analytics:export', label: 'Export reports & data',              type: 'write' as ActionType },
   ] as ModuleAction[] },
+  // ── Sales & Invoicing features (mapped to the licensing catalog) ──
+  { key: 'invoices', label: 'Invoices', icon: '🧾', actions: [
+    { key: 'invoices:read',   label: 'View invoices',                       type: 'read'   as ActionType },
+    { key: 'invoices:create', label: 'Create invoices',                     type: 'write'  as ActionType },
+    { key: 'invoices:edit',   label: 'Edit invoices',                       type: 'write'  as ActionType },
+    { key: 'invoices:send',   label: 'Send invoices to clients',            type: 'write'  as ActionType },
+    { key: 'invoices:delete', label: 'Delete invoices',                     type: 'danger' as ActionType },
+  ] as ModuleAction[] },
+  { key: 'billing_contacts', label: 'Billing Contacts', icon: '🏷️', actions: [
+    { key: 'billing_contacts:read',   label: 'View billing contacts',       type: 'read'   as ActionType },
+    { key: 'billing_contacts:create', label: 'Create billing contacts',     type: 'write'  as ActionType },
+    { key: 'billing_contacts:edit',   label: 'Edit billing contacts',       type: 'write'  as ActionType },
+    { key: 'billing_contacts:delete', label: 'Delete billing contacts',     type: 'danger' as ActionType },
+  ] as ModuleAction[] },
+  { key: 'payments', label: 'Payments', icon: '💰', actions: [
+    { key: 'payments:read',   label: 'View payments',                       type: 'read'   as ActionType },
+    { key: 'payments:record', label: 'Record payments',                     type: 'write'  as ActionType },
+    { key: 'payments:delete', label: 'Delete payments',                     type: 'danger' as ActionType },
+  ] as ModuleAction[] },
+  { key: 'sales_reports', label: 'Sales Reports', icon: '📑', actions: [
+    { key: 'sales_reports:read',   label: 'View sales reports',             type: 'read'  as ActionType },
+    { key: 'sales_reports:export', label: 'Export sales reports',           type: 'write' as ActionType },
+  ] as ModuleAction[] },
+  { key: 'invoice_templates', label: 'Invoice Templates', icon: '🎨', actions: [
+    { key: 'invoice_templates:read',   label: 'View invoice templates',     type: 'read'  as ActionType },
+    { key: 'invoice_templates:manage', label: 'Create & edit templates',    type: 'write' as ActionType },
+  ] as ModuleAction[] },
+  { key: 'sales_settings', label: 'Sales Settings', icon: '⚙️', actions: [
+    { key: 'sales_settings:read', label: 'View sales settings',             type: 'read'  as ActionType },
+    { key: 'sales_settings:edit', label: 'Modify sales settings',           type: 'write' as ActionType },
+  ] as ModuleAction[] },
   { key: 'voice', label: 'Voice Calls', icon: '📞', actions: [
     { key: 'voice:read',       label: 'View call logs',                     type: 'read'  as ActionType },
     { key: 'voice:call',       label: 'Make & receive calls',               type: 'write' as ActionType },
@@ -82,6 +113,43 @@ export const MODULE_DEFS = [
     { key: 'billing:manage', label: 'Manage billing & subscriptions',       type: 'write' as ActionType },
   ] as ModuleAction[] },
 ];
+
+// Which licensed feature(s) unlock each permission module. A module is offered in the
+// Roles screen only when the tenant is entitled to at least one of its features.
+//   null  → always available (core surfaces, not gated by licensing)
+// Feature keys come from the licensing catalog (MODULE_CATALOG in super-admin.ts).
+export const MODULE_LICENSE_REQUIREMENT: Record<string, string[] | null> = {
+  dashboard: null, settings: null, billing: null,
+  contacts:   ['crm.contacts'],
+  companies:  ['crm.companies'],
+  deals:      ['crm.deals'],
+  activities: ['crm.activities'],
+  emails:     ['emails.inbox', 'emails.compose'],
+  analytics:  ['analytics.reports', 'analytics.export'],
+  integrations: ['integrations.connectors', 'integrations.webhooks'],
+  // Modules whose licensing feature is no longer offered stay hidden unless entitled.
+  tickets:    ['ticketing.tickets'],
+  voice:      ['voice.calls'],
+  voicebot:   ['voicebot.config'],
+  // Sales & Invoicing
+  invoices:          ['sales.invoices'],
+  billing_contacts:  ['sales.contacts'],
+  payments:          ['sales.payments'],
+  sales_reports:     ['sales.reports'],
+  invoice_templates: ['sales.templates'],
+  sales_settings:    ['sales.settings'],
+};
+
+// Filter the permission modules to those the tenant is licensed for.
+// Legacy tenants with no recorded entitlement see everything (nothing breaks).
+export function entitledModuleDefs(entitledFeatures: string[]) {
+  if (!entitledFeatures || entitledFeatures.length === 0) return MODULE_DEFS;
+  return MODULE_DEFS.filter((m) => {
+    const req = MODULE_LICENSE_REQUIREMENT[m.key];
+    if (req == null) return true; // always-available or unmapped → keep
+    return req.some((f) => entitledFeatures.includes(f));
+  });
+}
 
 // Migrate old { module: 'none'|'view'|'full' } format to granular boolean map
 export function migrateLegacyPermissions(legacy: Record<string, string>): Record<string, boolean> {
@@ -222,9 +290,15 @@ export function rolesRoutes(db: DatabaseClient) {
       return reply.send({ success: true, data: [...SYSTEM_ROLES, ...customData] });
     });
 
-    // GET /api/v1/roles/modules — module definitions
-    fastify.get('/modules', async (_req, reply) => {
-      return reply.send({ success: true, data: MODULE_DEFS });
+    // GET /api/v1/roles/modules — permission modules, filtered to the tenant's
+    // licensed features. The tenant admin can only build roles within what was sold.
+    fastify.get('/modules', async (req, reply) => {
+      const [t] = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(`SELECT entitled_features FROM tenants WHERE id = $1`, [req.tenant.id]);
+        return r.rows;
+      });
+      const entitled: string[] = Array.isArray(t?.entitled_features) ? t.entitled_features : [];
+      return reply.send({ success: true, data: entitledModuleDefs(entitled) });
     });
 
     // GET /api/v1/roles/defaults/:baseRole — default permissions for a base role
@@ -277,9 +351,9 @@ export function rolesRoutes(db: DatabaseClient) {
         viewer:       { name: 'Viewer',  color: '#6b7280' },
       };
       if (id in SYSTEM_ROLE_META) {
-        // System roles have fixed names; the frontend still sends the current
-        // name/description in the PATCH body (echoing form state). Only reject
-        // if the user actually changed them — otherwise silently ignore.
+        // Re-applied after Munir overlay: frontend echoes name/description in
+        // the PATCH body even when only permissions changed. Only reject if
+        // the user ACTUALLY changed the system-role name.
         const meta = SYSTEM_ROLE_META[id];
         const triedToRename = (name && name !== meta.name)
                           || (description && description.trim() !== '');
@@ -287,7 +361,6 @@ export function rolesRoutes(db: DatabaseClient) {
           return reply.code(400).send({ success: false, error: { code: 'SYSTEM_ROLE', message: 'Cannot rename system roles. You can only edit their permissions.' } });
         }
         if (!permissions) return reply.send({ success: true, data: null });
-
         // Check if an override row already exists for this system role
         const existingOverride = await db.withSuperAdmin(async (client) => {
           const r = await client.query(
@@ -342,14 +415,14 @@ export function rolesRoutes(db: DatabaseClient) {
       if (permissions !== undefined) { updates.push(`permissions = $${i++}`); vals.push(JSON.stringify(permissions)); }
 
       // System roles: only permissions can be changed, not name/description.
-      // Only reject if the user ACTUALLY changed name/description (the frontend
-      // echoes existing values in the body even when only permissions changed).
+      // Re-applied after Munir overlay: only reject when user ACTUALLY changed
+      // the name/description (frontend echoes existing values either way).
       if (existing.is_system && ((name && name !== existing.name)
                               || (description && description !== existing.description))) {
         return reply.code(400).send({ success: false, error: { code: 'SYSTEM_ROLE', message: 'Cannot rename system roles. You can only edit their permissions.' } });
       }
-      // When system role: strip name/description from the update so a stale
-      // echo doesn't accidentally rewrite a column.
+      // When system role: strip name/description from update so a stale echo
+      // doesn't accidentally rewrite a column.
       if (existing.is_system) {
         for (let k = updates.length - 1; k >= 0; k--) {
           if (updates[k].startsWith('name =') || updates[k].startsWith('description =')) {
