@@ -42,6 +42,12 @@ export function useIsSuperAdmin(): boolean {
   return user?.role === 'super_admin';
 }
 
+/** tenant_admin only — strict (NOT super_admin, NOT manager) */
+export function useIsTenantAdmin(): boolean {
+  const { user } = useAuthStore();
+  return user?.role === 'tenant_admin';
+}
+
 /** manager, tenant_admin, or super_admin */
 export function useIsManager(): boolean {
   const { user } = useAuthStore();

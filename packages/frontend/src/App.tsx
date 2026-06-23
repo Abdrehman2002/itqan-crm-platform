@@ -1,84 +1,60 @@
-import { lazy, Suspense, useEffect } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, NavLink, useLocation } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, NavLink } from 'react-router-dom';
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import {
   LayoutDashboard, Users, Building2, TrendingUp, Phone,
   CheckSquare, BarChart3, Settings as SettingsIcon, Zap, Shield,
   LogOut, CreditCard, BarChart2, LifeBuoy, List, Clock, Mail, Bot,
-  FileText, Layers, UserCheck, ShieldCheck,
+  FileText, Layers, MessageCircle,
 } from 'lucide-react';
 import { useAuthStore } from './store/auth.store';
-import { useIsSuperAdmin, useIsAdmin } from './hooks/useRole';
+import { useIsSuperAdmin, useIsAdmin, useIsTenantAdmin } from './hooks/useRole';
 import { useApplyAppearance } from './hooks/useApplyAppearance';
-import { useHeartbeat } from './hooks/useHeartbeat';
 import { api } from './services/api';
 import { NotificationBell } from './components/NotificationBell';
 import { CallWidget } from './components/CallWidget';
-
-// Auth pages load eagerly (entry point — avoids a loading flash on login).
+import { Dashboard }    from './pages/Dashboard';
+import { VoiceCalls }   from './pages/VoiceCalls';
+import { Billing }      from './pages/Billing';
 import { LoginPage }    from './pages/Login';
 import { RegisterPage } from './pages/Register';
+import { Contacts }     from './pages/Contacts';
+import { Companies }    from './pages/Companies';
+import { Deals }        from './pages/Deals';
+import { Activities }   from './pages/Activities';
+import { Analytics }    from './pages/Analytics';
+import { Integrations } from './pages/Integrations';
+import { Settings }     from './pages/Settings';
+import { SuperAdmin }       from './pages/SuperAdmin';
+import { VoiceAnalytics }   from './pages/VoiceAnalytics';
+import { Tickets }          from './pages/Tickets';
+import { TicketQueues }     from './pages/TicketQueues';
+import { TicketSla }        from './pages/TicketSla';
+import { Emails }           from './pages/Emails';
+import { VoiceBotConfig }  from './pages/VoiceBotConfig';
+import { VoiceBotCalls }   from './pages/VoiceBotCalls';
+import { VoiceBotTickets } from './pages/VoiceBotTickets';
+import { ContactDetail }   from './pages/ContactDetail';
 import { ForgotPassword }  from './pages/ForgotPassword';
 import { ResetPassword }   from './pages/ResetPassword';
-
-// Authenticated app pages are code-split via React.lazy so the initial bundle
-// stays small and each route loads on demand. (Pages use named exports.)
-const Dashboard       = lazy(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })));
-const VoiceCalls      = lazy(() => import('./pages/VoiceCalls').then(m => ({ default: m.VoiceCalls })));
-const Billing         = lazy(() => import('./pages/Billing').then(m => ({ default: m.Billing })));
-const Contacts        = lazy(() => import('./pages/Contacts').then(m => ({ default: m.Contacts })));
-const Companies       = lazy(() => import('./pages/Companies').then(m => ({ default: m.Companies })));
-const Deals           = lazy(() => import('./pages/Deals').then(m => ({ default: m.Deals })));
-const Activities      = lazy(() => import('./pages/Activities').then(m => ({ default: m.Activities })));
-const Analytics       = lazy(() => import('./pages/Analytics').then(m => ({ default: m.Analytics })));
-const Integrations    = lazy(() => import('./pages/Integrations').then(m => ({ default: m.Integrations })));
-const Settings        = lazy(() => import('./pages/Settings').then(m => ({ default: m.Settings })));
-const SuperAdmin      = lazy(() => import('./pages/SuperAdmin').then(m => ({ default: m.SuperAdmin })));
-const VoiceAnalytics  = lazy(() => import('./pages/VoiceAnalytics').then(m => ({ default: m.VoiceAnalytics })));
-const Tickets         = lazy(() => import('./pages/Tickets').then(m => ({ default: m.Tickets })));
-const TicketQueues    = lazy(() => import('./pages/TicketQueues').then(m => ({ default: m.TicketQueues })));
-const TicketSla       = lazy(() => import('./pages/TicketSla').then(m => ({ default: m.TicketSla })));
-const Emails          = lazy(() => import('./pages/Emails').then(m => ({ default: m.Emails })));
-const VoiceBotConfig  = lazy(() => import('./pages/VoiceBotConfig').then(m => ({ default: m.VoiceBotConfig })));
-const VoiceBotCalls   = lazy(() => import('./pages/VoiceBotCalls').then(m => ({ default: m.VoiceBotCalls })));
-const VoiceBotTickets = lazy(() => import('./pages/VoiceBotTickets').then(m => ({ default: m.VoiceBotTickets })));
-const ContactDetail   = lazy(() => import('./pages/ContactDetail').then(m => ({ default: m.ContactDetail })));
-const RolesPage       = lazy(() => import('./pages/Roles').then(m => ({ default: m.RolesPage })));
-const OrgChart        = lazy(() => import('./pages/OrgChart').then(m => ({ default: m.OrgChart })));
-const TeamReports     = lazy(() => import('./pages/TeamReports').then(m => ({ default: m.TeamReports })));
-const PersonalSettings = lazy(() => import('./pages/PersonalSettings').then(m => ({ default: m.PersonalSettings })));
-const TeamMessaging    = lazy(() => import('./pages/TeamMessaging').then(m => ({ default: m.TeamMessaging })));
+import { RolesPage }          from './pages/Roles';
+import { PersonalSettings }   from './pages/PersonalSettings';
 // Sales & Invoicing module
-const SalesDashboard    = lazy(() => import('./pages/sales/SalesDashboard').then(m => ({ default: m.SalesDashboard })));
-const InvoiceList       = lazy(() => import('./pages/sales/InvoiceList').then(m => ({ default: m.InvoiceList })));
-const InvoiceCreate     = lazy(() => import('./pages/sales/InvoiceCreate').then(m => ({ default: m.InvoiceCreate })));
-const InvoiceDetail     = lazy(() => import('./pages/sales/InvoiceDetail').then(m => ({ default: m.InvoiceDetail })));
-const SalesContacts     = lazy(() => import('./pages/sales/SalesContacts').then(m => ({ default: m.SalesContacts })));
-const SalesPayments     = lazy(() => import('./pages/sales/SalesPayments').then(m => ({ default: m.SalesPayments })));
-const SalesReports      = lazy(() => import('./pages/sales/SalesReports').then(m => ({ default: m.SalesReports })));
-const SalesTemplates    = lazy(() => import('./pages/sales/SalesTemplates').then(m => ({ default: m.SalesTemplates })));
-const SalesBuilder      = lazy(() => import('./pages/sales/SalesBuilder').then(m => ({ default: m.SalesBuilder })));
-const SalesSettingsPage = lazy(() => import('./pages/sales/SalesSettings').then(m => ({ default: m.SalesSettingsPage })));
+import { SalesDashboard }    from './pages/sales/SalesDashboard';
+import { InvoiceList }       from './pages/sales/InvoiceList';
+import { InvoiceCreate }     from './pages/sales/InvoiceCreate';
+import { InvoiceDetail }     from './pages/sales/InvoiceDetail';
+import { SalesContacts }     from './pages/sales/SalesContacts';
+import { SalesPayments }     from './pages/sales/SalesPayments';
+import { SalesReports }      from './pages/sales/SalesReports';
+import { SalesTemplates }    from './pages/sales/SalesTemplates';
+import { SalesBuilder }      from './pages/sales/SalesBuilder';
+import { SalesSettingsPage } from './pages/sales/SalesSettings';
+import { TeamReports }       from './pages/TeamReports';
+import { TeamMessaging }     from './pages/TeamMessaging';
 
 const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 60_000,            // serve cached data for 1 min before refetching
-      gcTime: 5 * 60_000,           // keep unused data cached for 5 min
-      retry: 1,
-      refetchOnWindowFocus: false,  // avoid noisy refetches when tabbing back
-    },
-  },
+  defaultOptions: { queries: { staleTime: 30_000, retry: 1 } },
 });
-
-// Lightweight fallback shown while a lazy-loaded route chunk is fetched.
-function PageLoader() {
-  return (
-    <div className="flex items-center justify-center h-full w-full py-20">
-      <div className="h-8 w-8 animate-spin rounded-full border-2 border-gray-300 border-t-brand-400" />
-    </div>
-  );
-}
 
 // ── Icon resolver ─────────────────────────────────────────────────────────
 // Maps icon name strings (from the API) to Lucide components.
@@ -86,7 +62,7 @@ const ICON_MAP: Record<string, React.ElementType> = {
   LayoutDashboard, Users, Building2, TrendingUp, Phone,
   CheckSquare, BarChart3, BarChart2, Zap, CreditCard,
   LifeBuoy, List, Clock, Shield, Mail, Bot,
-  FileText, Layers, Settings: SettingsIcon,
+  FileText, Layers, MessageCircle, Settings: SettingsIcon,
 };
 function resolveIcon(name: string): React.ElementType {
   return ICON_MAP[name] ?? LayoutDashboard;
@@ -105,78 +81,16 @@ interface ActiveModule {
   navItems: NavItem[];
 }
 
-// ── Static bottom nav items (always visible) ──────────────────────────────
-const BOTTOM_NAV = [
-  { to: '/integrations', label: 'Integrations', icon: 'Zap' },
-  { to: '/billing',      label: 'Billing',      icon: 'CreditCard' },
-];
-
-// ── Super admin sidebar — minimal, platform-only nav (no tenant items) ──
-// Super admin is platform-scoped; /api/v1/modules returns 403 for them.
-// Avoid the regular Sidebar which renders cached tenant modules + workspace chip.
-function SuperAdminSidebar({ onLogout, userName }: { onLogout: () => void; userName: string }) {
-  // Hash matches SuperAdmin.tsx's activeTab keys exactly:
-  // 'dashboard' | 'tenants' | 'billing' | 'roles' | 'sub-admins'
-  const items = [
-    { path: '/super-admin#dashboard',  label: 'Dashboard',       icon: BarChart3 },
-    { path: '/super-admin#tenants',    label: 'Tenants',         icon: Building2 },
-    { path: '/super-admin#billing',    label: 'Platform Billing', icon: CreditCard },
-    { path: '/super-admin#roles',      label: 'Sub-Admin Roles', icon: ShieldCheck },
-    { path: '/super-admin#sub-admins', label: 'Sub-Admins',      icon: UserCheck },
-  ];
-  return (
-    <div className="w-56 flex flex-col h-full" style={{ background: 'linear-gradient(180deg, #1a0f2e 0%, #2b1750 60%, #3d2070 100%)' }}>
-      <div className="px-4 py-5 border-b border-white/10">
-        <div className="flex items-center gap-2.5 mb-2">
-          <div className="w-8 h-8 rounded-xl flex items-center justify-center shrink-0"
-               style={{ background: 'linear-gradient(135deg, #F5C518 0%, #f97316 100%)' }}>
-            <Shield className="w-4 h-4 text-white" />
-          </div>
-          <div className="min-w-0">
-            <p className="text-sm font-bold text-white leading-tight truncate">Vextria Platform</p>
-            <p className="text-[10px] text-amber-300 font-medium">Super Admin</p>
-          </div>
-        </div>
-      </div>
-      <nav className="flex-1 px-2 py-4 space-y-0.5 overflow-y-auto">
-        {items.map(({ path, label, icon: Icon }) => (
-          <NavLink key={path} to={path} end={path === '/super-admin'}
-            className={({ isActive }) =>
-              `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${
-                isActive ? 'text-white font-semibold bg-white/15' : 'text-white/70 hover:text-white hover:bg-white/10'
-              }`}>
-            <Icon className="w-4 h-4 shrink-0" />
-            {label}
-          </NavLink>
-        ))}
-      </nav>
-      <div className="px-3 py-3 border-t border-white/10 space-y-2">
-        <div className="text-[11px] text-white/60 px-1">{userName}</div>
-        <button onClick={onLogout}
-          className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm text-white/70 hover:text-white hover:bg-white/10 transition-all">
-          <LogOut className="w-4 h-4" /> Logout
-        </button>
-      </div>
-    </div>
-  );
-}
 
 function Sidebar() {
   const { user, tenant, logout } = useAuthStore();
-  const isSuperAdmin = useIsSuperAdmin();
-  const isAdmin      = useIsAdmin();
+  const isSuperAdmin  = useIsSuperAdmin();
+  const isAdmin       = useIsAdmin();
+  const isTenantAdmin = useIsTenantAdmin();
 
-  // Super admin lives at the platform layer — render a minimal sidebar with
-  // ONLY platform items. /api/v1/modules is 403 for super_admin anyway, so
-  // the regular dynamic sidebar would be polluted with cached/hardcoded items.
-  if (isSuperAdmin) return <SuperAdminSidebar onLogout={logout} userName={user?.name ?? user?.email ?? 'Super Admin'} />;
-
-  // Fetch active modules from the API — drives the sidebar dynamically.
-  // Key includes user.id + role so a role change (re-login, role swap) busts
-  // the cache. Without this, an old tenant_admin login could keep showing the
-  // operational sidebar until the 60s staleTime expired.
+  // Fetch active modules from the API — drives the sidebar dynamically
   const { data: modulesData } = useQuery<ActiveModule[]>({
-    queryKey: ['modules', user?.id, user?.role],
+    queryKey: ['modules'],
     queryFn: async () => {
       const res = await api.get('/api/v1/modules');
       return res.data.data;
@@ -217,8 +131,9 @@ function Sidebar() {
       </div>
 
       {/* ── Dynamic module navigation ─────────────────────────────── */}
+      {/* Tenant admin is administrative-only — no operational module nav. */}
       <nav className="flex-1 px-2 py-4 space-y-4 overflow-y-auto">
-        {modules.map((mod) => (
+        {!isTenantAdmin && modules.map((mod) => (
           <div key={mod.id}>
             {modules.length > 1 && (
               <p className="px-3 mb-1 text-[10px] font-bold text-brand-300/60 uppercase tracking-widest">
@@ -253,55 +168,158 @@ function Sidebar() {
           </div>
         ))}
 
-        {/*
-          Hardcoded bottom nav (Integrations, Billing) intentionally removed.
-          These items now flow through /api/v1/modules with role-based filtering
-          (tenant_admin sees them in their Admin module; nobody else does).
-        */}
-      </nav>
-
-      {/* ── Footer: Settings + Super Admin (Settings/Roles moved into the
-           dynamic Admin module for tenant_admin — keep this minimal). ── */}
-      <div className="px-2 py-3 border-t border-white/10 space-y-0.5">
-        {isSuperAdmin && (
-          <NavLink to="/super-admin"
+        {/* Team Messaging — operational staff only (not the administrative tenant admin) */}
+        {!isSuperAdmin && !isTenantAdmin && (
+          <NavLink to="/messages"
             className={({ isActive }) =>
               `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${
                 isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'
               }`
             }
             style={({ isActive }) => isActive ? {
-              background: 'rgba(245,197,24,0.15)', borderLeft: '2px solid #F5C518',
+              background: 'linear-gradient(135deg, rgba(41,171,226,0.25) 0%, rgba(77,139,60,0.15) 100%)',
+              borderLeft: '2px solid #29ABE2',
+            } : {}}
+          >
+            <MessageCircle className="w-4 h-4 shrink-0" />
+            Messaging
+          </NavLink>
+        )}
+
+        {/* Integrations — admin (keeps the system/network live) or permitted users.
+            Billing — Finance/Sales function only: granted by the 'billing:read'
+            permission, NOT the admin role. The tenant admin never sees billing. */}
+        {(() => {
+          const perms = (user as any)?.permissions ?? {};
+          const gatedLinks = [
+            { to: '/integrations', label: 'Integrations', icon: 'Zap',        key: 'integrations:read', adminBypass: true  },
+            { to: '/billing',      label: 'Billing',      icon: 'CreditCard', key: 'billing:read',      adminBypass: false },
+          ].filter((l) => (l.adminBypass && isAdmin) || perms[l.key] === true);
+          if (gatedLinks.length === 0) return null;
+          return (
+            <>
+              {modules.length > 0 && <div className="border-t border-white/10 mx-1" />}
+              <div className="space-y-0.5">
+                {gatedLinks.map(({ to, label, icon }) => {
+                  const Icon = resolveIcon(icon);
+                  return (
+                    <NavLink key={to} to={to}
+                      className={({ isActive }) =>
+                        `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${
+                          isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'
+                        }`
+                      }
+                      style={({ isActive }) => isActive ? {
+                        background: 'linear-gradient(135deg, rgba(41,171,226,0.25) 0%, rgba(77,139,60,0.15) 100%)',
+                        borderLeft: '2px solid #29ABE2',
+                      } : {}}
+                    >
+                      <Icon className="w-4 h-4 shrink-0" />
+                      {label}
+                    </NavLink>
+                  );
+                })}
+              </div>
+            </>
+          );
+        })()}
+      </nav>
+
+      {/* ── Footer: gated admin links + user chip ─────────────────── */}
+      <div className="px-2 py-3 border-t border-white/10 space-y-0.5">
+
+        {/* Super Admin — only for super_admin role */}
+        {isSuperAdmin && (
+          <>
+            <NavLink to="/super-admin"
+              className={({ isActive }) =>
+                `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${
+                  isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'
+                }`
+              }
+              style={({ isActive }) => isActive ? {
+                background: 'rgba(245,197,24,0.15)', borderLeft: '2px solid #F5C518',
+              } : {}}
+            >
+              <Shield className="w-4 h-4" />
+              Super Admin
+            </NavLink>
+            <NavLink to="/sales/dashboard"
+              className={({ isActive }) =>
+                `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${
+                  isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'
+                }`
+              }
+              style={({ isActive }) => isActive ? {
+                background: 'rgba(99,102,241,0.2)', borderLeft: '2px solid #818CF8',
+              } : {}}
+            >
+              <CreditCard className="w-4 h-4" />
+              Sales & Invoices
+            </NavLink>
+            <NavLink to="/sales/reports"
+              className={({ isActive }) =>
+                `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${
+                  isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'
+                }`
+              }
+              style={({ isActive }) => isActive ? {
+                background: 'rgba(99,102,241,0.2)', borderLeft: '2px solid #818CF8',
+              } : {}}
+            >
+              <BarChart2 className="w-4 h-4" />
+              Reports
+            </NavLink>
+          </>
+        )}
+
+
+        {/* Roles — admins only */}
+        {isAdmin && (
+          <NavLink to="/roles"
+            className={({ isActive }) =>
+              `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${
+                isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'
+              }`
+            }
+            style={({ isActive }) => isActive ? {
+              background: 'linear-gradient(135deg, rgba(41,171,226,0.25) 0%, rgba(77,139,60,0.15) 100%)',
+              borderLeft: '2px solid #29ABE2',
             } : {}}
           >
             <Shield className="w-4 h-4" />
-            Super Admin
+            Roles
           </NavLink>
         )}
-        <NavLink to="/personal-settings"
-          className={({ isActive }) =>
-            `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${
-              isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'
-            }`
-          }
-          style={({ isActive }) => isActive ? {
-            background: 'linear-gradient(135deg, rgba(41,171,226,0.25) 0%, rgba(77,139,60,0.15) 100%)',
-            borderLeft: '2px solid #29ABE2',
-          } : {}}
-        >
-          <SettingsIcon className="w-4 h-4" />
-          My Profile
-        </NavLink>
 
-        {/* User chip */}
-        <div className="mt-2 px-3 py-2.5 rounded-xl bg-white/10 flex items-center gap-2">
-          <div className="w-7 h-7 rounded-full shrink-0 flex items-center justify-center text-xs font-bold text-white"
-               style={{ background: 'linear-gradient(135deg, #29ABE2 0%, #4D8B3C 100%)' }}>
+        {/* System Settings — only if user has settings:read permission */}
+        {(isAdmin || (user as any)?.permissions?.['settings:read']) && (
+          <NavLink to="/settings"
+            className={({ isActive }) =>
+              `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${
+                isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'
+              }`
+            }
+            style={({ isActive }) => isActive ? {
+              background: 'linear-gradient(135deg, rgba(41,171,226,0.25) 0%, rgba(77,139,60,0.15) 100%)',
+              borderLeft: '2px solid #29ABE2',
+            } : {}}
+          >
+            <SettingsIcon className="w-4 h-4" />
+            Settings
+          </NavLink>
+        )}
+
+        {/* User chip — always visible; avatar links to Personal Settings */}
+        <div className="mt-2 px-2 py-2 rounded-xl bg-white/10 flex items-center gap-2">
+          <NavLink to="/settings/personal" title="My Settings"
+            className="w-7 h-7 rounded-full shrink-0 flex items-center justify-center text-xs font-bold text-white hover:ring-2 hover:ring-white/40 transition-all"
+            style={{ background: 'linear-gradient(135deg, #29ABE2 0%, #4D8B3C 100%)' }}>
             {user?.name?.[0]?.toUpperCase()}
-          </div>
+          </NavLink>
           <div className="flex-1 min-w-0">
             <p className="text-xs font-semibold text-white truncate">{user?.name}</p>
-            <p className="text-[10px] text-white/50 capitalize">{user?.role}</p>
+            <p className="text-[10px] text-white/50 capitalize">{user?.role?.replace('_', ' ')}</p>
           </div>
           <NotificationBell />
           <button onClick={logout} title="Log out"
@@ -314,92 +332,67 @@ function Sidebar() {
   );
 }
 
-// Warm the most-used route chunks during browser idle time so navigation to
-// them is instant. The dynamic imports are deduped, so this is cheap.
-function prefetchCommonRoutes() {
-  void import('./pages/Dashboard');
-  void import('./pages/Contacts');
-  void import('./pages/Companies');
-  void import('./pages/Deals');
-  void import('./pages/Tickets');
-  void import('./pages/Activities');
-  void import('./pages/Analytics');
-}
-
 function AppLayout() {
-  useHeartbeat();   // ping /auth/heartbeat every 30s while a tab is open (presence tracking)
-  const { isAuthenticated, user } = useAuthStore();
+  const { isAuthenticated } = useAuthStore();
+  const isSuperAdmin = useIsSuperAdmin();
+  const isTenantAdmin = useIsTenantAdmin();
   useApplyAppearance();
-  const location = useLocation();
-
-  useEffect(() => {
-    if (!isAuthenticated) return;
-    const ric = (window as any).requestIdleCallback ?? ((cb: () => void) => setTimeout(cb, 400));
-    const id = ric(prefetchCommonRoutes);
-    return () => (window as any).cancelIdleCallback?.(id);
-  }, [isAuthenticated]);
-
   if (!isAuthenticated) return <Navigate to="/login" replace />;
 
-  // Super admin can ONLY use /super-admin/* — server.ts blocks them from every
-  // /api/v1/* route. If they land on a tenant-scoped path (dashboard, tickets,
-  // anything else), bounce them to /super-admin so the layout doesn't fire a
-  // pile of 403'd queries.
-  if (user?.role === 'super_admin' && !location.pathname.startsWith('/super-admin')) {
-    return <Navigate to="/super-admin" replace />;
-  }
+  // Super admins have no operational (ticket/voice) dashboard — their home is the
+  // platform admin console. Tenant admins are administrative-only: their home is
+  // the workspace Settings console; all operational pages redirect away.
+  const homePath = isSuperAdmin ? '/super-admin' : isTenantAdmin ? '/settings' : '/dashboard';
+
+  // Operational pages are off-limits to the tenant admin (separation of duties).
+  // Wrap an operational element so it bounces the admin to their console.
+  const op = (el: JSX.Element) => (isTenantAdmin ? <Navigate to="/settings" replace /> : el);
 
   return (
     <div className="flex h-screen bg-gray-50 overflow-hidden">
       <Sidebar />
       <main className="flex-1 overflow-y-auto">
-        <Suspense fallback={<PageLoader />}>
         <Routes>
-          <Route path="/dashboard"    element={<Dashboard />} />
-          <Route path="/contacts"     element={<Contacts />} />
-          <Route path="/companies"   element={<Companies />} />
-          <Route path="/deals"       element={<Deals />} />
-          <Route path="/voice"           element={<VoiceCalls />} />
-          <Route path="/voice/analytics" element={<VoiceAnalytics />} />
-          <Route path="/tickets"         element={<Tickets />} />
-          <Route path="/tickets/queues"  element={<TicketQueues />} />
-          <Route path="/tickets/sla"     element={<TicketSla />} />
-          <Route path="/organization"    element={<OrgChart />} />
-          <Route path="/team-reports"    element={<TeamReports />} />
-          <Route path="/personal-settings" element={<PersonalSettings />} />
-          <Route path="/messages"          element={<TeamMessaging />} />
-          <Route path="/emails"          element={<Emails />} />
-          <Route path="/voice-bot"         element={<VoiceBotConfig />} />
-          <Route path="/voice-bot/calls"   element={<VoiceBotCalls />} />
-          <Route path="/voice-bot/tickets" element={<VoiceBotTickets />} />
-          <Route path="/contacts/:id"      element={<ContactDetail />} />
-          <Route path="/activities"  element={<Activities />} />
-          <Route path="/analytics"   element={<Analytics />} />
-          <Route path="/billing"     element={<Billing />} />
+          <Route path="/dashboard"    element={isSuperAdmin ? <Navigate to="/super-admin" replace /> : op(<Dashboard />)} />
+          <Route path="/contacts"     element={op(<Contacts />)} />
+          <Route path="/companies"   element={op(<Companies />)} />
+          <Route path="/deals"       element={op(<Deals />)} />
+          <Route path="/voice"           element={op(<VoiceCalls />)} />
+          <Route path="/voice/analytics" element={op(<VoiceAnalytics />)} />
+          <Route path="/tickets"         element={op(<Tickets />)} />
+          <Route path="/tickets/queues"  element={op(<TicketQueues />)} />
+          <Route path="/tickets/sla"     element={op(<TicketSla />)} />
+          <Route path="/emails"          element={op(<Emails />)} />
+          <Route path="/messages"        element={<TeamMessaging />} />
+          <Route path="/voice-bot"         element={op(<VoiceBotConfig />)} />
+          <Route path="/voice-bot/calls"   element={op(<VoiceBotCalls />)} />
+          <Route path="/voice-bot/tickets" element={op(<VoiceBotTickets />)} />
+          <Route path="/contacts/:id"      element={op(<ContactDetail />)} />
+          <Route path="/activities"  element={op(<Activities />)} />
+          <Route path="/analytics"   element={op(<Analytics />)} />
+          <Route path="/team-reports" element={op(<TeamReports />)} />
+          <Route path="/billing"     element={op(<Billing />)} />
           <Route path="/integrations" element={<Integrations />} />
-          <Route path="/settings"     element={<Settings />} />
+          <Route path="/settings"          element={<Settings />} />
+          <Route path="/settings/personal" element={<PersonalSettings />} />
           <Route path="/roles"        element={<RolesPage />} />
-          {/* Tenant-admin sidebar deep-links — all surface inside the Settings page tabs for now */}
-          <Route path="/users"        element={<Settings />} />
-          <Route path="/departments"  element={<Settings />} />
-          <Route path="/modules"      element={<Settings />} />
           <Route path="/super-admin" element={<SuperAdmin />} />
           {/* Sales & Invoicing module */}
-          <Route path="/sales/dashboard"  element={<SalesDashboard />} />
-          <Route path="/sales/invoices"   element={<InvoiceList />} />
-          <Route path="/sales/invoices/new" element={<InvoiceCreate />} />
-          <Route path="/sales/invoices/:id" element={<InvoiceDetail />} />
-          <Route path="/sales/contacts"   element={<SalesContacts />} />
-          <Route path="/sales/payments"   element={<SalesPayments />} />
-          <Route path="/sales/reports"    element={<SalesReports />} />
-          <Route path="/sales/templates"  element={<SalesTemplates />} />
-          <Route path="/sales/builder"    element={<SalesBuilder />} />
-          <Route path="/sales/settings"   element={<SalesSettingsPage />} />
-          <Route path="*"            element={<Navigate to="/dashboard" replace />} />
+          <Route path="/sales/dashboard"  element={op(<SalesDashboard />)} />
+          <Route path="/sales/invoices"   element={op(<InvoiceList />)} />
+          <Route path="/sales/invoices/new" element={op(<InvoiceCreate />)} />
+          <Route path="/sales/invoices/:id" element={op(<InvoiceDetail />)} />
+          <Route path="/sales/contacts"   element={op(<SalesContacts />)} />
+          <Route path="/sales/payments"   element={op(<SalesPayments />)} />
+          <Route path="/sales/reports"    element={op(<SalesReports />)} />
+          <Route path="/sales/templates"  element={op(<SalesTemplates />)} />
+          <Route path="/sales/builder"    element={op(<SalesBuilder />)} />
+          <Route path="/sales/settings"   element={op(<SalesSettingsPage />)} />
+          <Route path="*"            element={<Navigate to={homePath} replace />} />
         </Routes>
-        </Suspense>
       </main>
-      <CallWidget />
+      {/* Voice call widget is operational — not for the administrative tenant admin. */}
+      {!isTenantAdmin && !isSuperAdmin && <CallWidget />}
     </div>
   );
 }
