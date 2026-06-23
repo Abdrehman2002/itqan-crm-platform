@@ -89,7 +89,7 @@ interface ComposeProps {
   prefill?: Partial<{ to: string; toName: string; subject: string; contactId: string; dealId: string; ticketId: string }>;
 }
 
-function ComposeModal({ onClose, prefill }: ComposeProps) {
+export function ComposeModal({ onClose, prefill }: ComposeProps) {
   const qc = useQueryClient();
   const [form, setForm] = useState({
     to:       prefill?.to       ?? '',
