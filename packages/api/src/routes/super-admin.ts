@@ -1360,23 +1360,26 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
     });
 
     // GET /super-admin/reports/audit — cross-tenant audit log
+    // QA fix: ticket_audit_log has no entity_type/entity_id columns (it's
+    // ticket-specific). Synthesize them: entity_type='ticket', entity_id=ticket_id.
+    // Ignore the ?entity= filter for now (only tickets are logged anyway).
     fastify.get('/reports/audit', async (req, reply) => {
-      const { limit = '200', entity, action } = req.query as Record<string, string>;
+      const { limit = '200', action } = req.query as Record<string, string>;
       const rows = await db.withSuperAdmin(async (client) => {
         const r = await client.query(`
           SELECT
-            tal.id, tal.action, tal.entity_type, tal.entity_id,
+            tal.id, tal.action,
+            'ticket'::text AS entity_type, tal.ticket_id AS entity_id,
             tal.old_value, tal.new_value, tal.created_at,
             u.name  AS actor_name,  u.email AS actor_email, u.role AS actor_role,
             t.name  AS tenant_name, t.slug  AS tenant_slug
           FROM ticket_audit_log tal
           LEFT JOIN users   u ON u.id = tal.actor_id
           LEFT JOIN tenants t ON t.id = tal.tenant_id
-          WHERE ($1::text IS NULL OR tal.entity_type = $1)
-            AND ($2::text IS NULL OR tal.action = $2)
+          WHERE ($1::text IS NULL OR tal.action = $1)
           ORDER BY tal.created_at DESC
-          LIMIT $3
-        `, [entity || null, action || null, parseInt(limit, 10)]);
+          LIMIT $2
+        `, [action || null, parseInt(limit, 10)]);
         return r.rows;
       });
       return reply.send({ success: true, data: rows });

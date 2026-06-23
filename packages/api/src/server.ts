@@ -288,12 +288,16 @@ async function buildServer() {
     // the person who manages accounts is not the person who sees the operations.
     // Billing (both subscription AND customer invoicing) belongs to a Finance/Sales
     // role, never the admin.
+    // Separation of duties (Munir e69bd61): tenant_admin doesn't DO operational
+    // work. They oversee the org. But they DO need to see dashboards + KPIs to
+    // verify health → /api/v1/analytics stays allowed (read-only).
+    // Also allow GET requests on tickets/contacts/etc so admin can VIEW for
+    // oversight, but block any write (POST/PATCH/DELETE) on those prefixes.
     const TENANT_ADMIN_BLOCKED_PREFIXES = [
       '/api/v1/contacts',
       '/api/v1/companies',
       '/api/v1/deals',
       '/api/v1/activities',
-      '/api/v1/analytics',
       '/api/v1/tickets',
       '/api/v1/sales',
       '/api/v1/opportunities',
@@ -305,6 +309,7 @@ async function buildServer() {
     if (
       req.url.startsWith('/api/v1/') &&
       (req.user as any)?.role === 'tenant_admin' &&
+      req.method !== 'GET' &&
       TENANT_ADMIN_BLOCKED_PREFIXES.some((p) => req.url.startsWith(p))
     ) {
       return reply.code(403).send({ success: false, error: { code: 'ADMIN_NO_OPERATIONS', message: 'Administrators manage users, roles, settings and integrations — operational and billing data is not accessible to this role.' } });
