@@ -30,17 +30,14 @@ export function startWebhookDispatcher(
       if (!event?.type || !event?.tenantId) return;
 
       // Find all active webhooks for this tenant subscribed to this event type
-      const webhooks: any[] = await db.withSuperAdmin(async (client) => {
-        const r = await client.query(
-          `SELECT id, retry_policy
-           FROM webhooks
-           WHERE tenant_id = $1
-             AND is_active = true
-             AND events @> $2::jsonb`,
-          [event.tenantId, JSON.stringify([event.type])],
-        );
-        return r.rows;
-      });
+      const webhooks = await db.query<{ id: string; retry_policy: unknown }>(
+        `SELECT id, retry_policy
+         FROM webhooks
+         WHERE tenant_id = $1
+           AND is_active = true
+           AND $2 = ANY(events)`,
+        [event.tenantId, event.type],
+      );
 
       if (webhooks.length === 0) return;
 

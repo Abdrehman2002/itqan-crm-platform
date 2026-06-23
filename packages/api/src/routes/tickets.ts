@@ -46,21 +46,12 @@ const CreateTicketSchema = z.object({
   contactId:     z.string().uuid().optional(),
   companyId:     z.string().uuid().optional(),
   assigneeId:    z.string().uuid().optional(),
-  // Accept empty strings (forms send "" not undefined). Coerce to undefined.
-  reporterEmail: z.preprocess(v => (v === '' ? undefined : v),
-                              z.string().email().optional()),
+  reporterEmail: z.string().email().optional(),
   reporterName:  z.string().optional(),
   reporterPhone:     z.string().optional(),
   reporterWhatsapp:  z.string().optional(),
-  // Multi-select channel — accept array OR legacy single value
-  preferredChannel:  z.union([
-                       z.enum(['email','sms','whatsapp','phone']),
-                       z.array(z.enum(['email','sms','whatsapp','phone'])),
-                     ]).default('email'),
-  // ticket_type now includes 'support' (was missing — broke support agent manual ticket creation)
-  ticketType:        z.enum(['complaint','inquiry','sales','support']).default('complaint'),
-  // Optional preset issue category (loan type, complaint reason, etc.)
-  issueCategory:     z.string().optional(),
+  preferredChannel:  z.enum(['email','sms','whatsapp']).default('email'),
+  ticketType:        z.enum(['complaint','inquiry','sales']).default('complaint'),
   tags:              z.array(z.string()).optional(),
   customFields:  z.record(z.unknown()).optional(),
 });
@@ -322,48 +313,33 @@ async function assignByPushRouting(
   const queueId = ticket.queue_id;
   let candidateIds: string[] = [];
 
-  // Department-aware routing: map ticket_type → department_type so a complaints ticket
-  // only routes to agents/line_managers in the Complaints department, etc.
-  const TICKET_TYPE_TO_DEPT: Record<string, string> = {
-    complaint: 'complaint',
-    sales:     'sales',
-    inquiry:   'support',   // generic inquiries fall into Support by default
-    support:   'support',
-  };
-  const requiredDept = TICKET_TYPE_TO_DEPT[ticket.ticket_type ?? 'support'] ?? null;
-  const deptFilter = requiredDept ? ' AND (u.department_type = $3 OR u.role IN (\'tenant_admin\'))' : '';
-
   if (queueId) {
     const qm = await db.withSuperAdmin(async (client) => {
-      const params: unknown[] = [queueId, ticket.assignee_id ?? '00000000-0000-0000-0000-000000000000'];
-      if (requiredDept) params.push(requiredDept);
       const r = await client.query(
         `SELECT qm.user_id
          FROM queue_members qm
          JOIN users u ON u.id = qm.user_id
          WHERE qm.queue_id = $1
            AND u.is_active = true
-           AND u.role IN ('agent','line_manager','manager')
-           AND u.id != $2${deptFilter}`,
-        params,
+           AND u.role IN ('agent','manager')
+           AND u.id != $2`,
+        [queueId, ticket.assignee_id ?? '00000000-0000-0000-0000-000000000000'],
       );
       return r.rows.map((u: any) => u.user_id as string);
     });
     candidateIds = qm;
   }
 
-  // Fallback: if queue has no members, use all active agents in the matching department
+  // Fallback: if queue has no members, use all active agents in tenant
   if (candidateIds.length === 0) {
     const all = await db.withSuperAdmin(async (client) => {
-      const params: unknown[] = [tenantId, ticket.assignee_id ?? '00000000-0000-0000-0000-000000000000'];
-      if (requiredDept) params.push(requiredDept);
       const r = await client.query(
-        `SELECT id FROM users u
+        `SELECT id FROM users
          WHERE tenant_id = $1
            AND is_active = true
-           AND role IN ('agent','line_manager','manager')
-           AND id != $2${deptFilter.replace(/u\./g, '')}`,
-        params,
+           AND role IN ('agent','manager')
+           AND id != $2`,
+        [tenantId, ticket.assignee_id ?? '00000000-0000-0000-0000-000000000000'],
       );
       return r.rows.map((u: any) => u.id as string);
     });
@@ -439,31 +415,41 @@ async function assignByPushRouting(
 // default pipeline, linked back to the ticket, owned by the handling agent.
 // Idempotent: if the ticket already has a linked deal, that deal is returned.
 // Returns null only when no pipeline/stage exists to place the deal into.
-// (Ported from Munir e69bd61 — preserves enquiry→revenue trail, no duplicates.)
 async function convertSalesTicketToDeal(
   client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }> },
   tenantId: string,
   ticket: any,
   ownerId: string,
 ): Promise<{ deal: any; created: boolean } | null> {
+  // Already linked → return the existing deal (no duplicate).
   if (ticket.deal_id) {
     const ex = await client.query(`SELECT * FROM deals WHERE id = $1`, [ticket.deal_id]);
     return ex.rows[0] ? { deal: ex.rows[0], created: false } : null;
   }
+
+  // Place into the tenant's default pipeline, first stage.
   const pipe = await client.query(
     `SELECT id, stages FROM pipelines WHERE tenant_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1`,
     [tenantId],
   );
   const pipeline = pipe.rows[0];
   const firstStage = pipeline?.stages?.[0]?.id ?? null;
-  if (!pipeline || !firstStage) return null;
+  if (!pipeline || !firstStage) return null; // no pipeline configured yet
+
   const ins = await client.query(
     `INSERT INTO deals
        (tenant_id, name, pipeline_id, stage_id, owner_id, contact_id, company_id, status, source, currency)
      VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', 'ticket', 'USD')
      RETURNING *`,
-    [tenantId, ticket.subject ?? 'Sales enquiry', pipeline.id, firstStage, ownerId,
-     ticket.contact_id ?? null, ticket.company_id ?? null],
+    [
+      tenantId,
+      ticket.subject ?? 'Sales enquiry',
+      pipeline.id,
+      firstStage,
+      ownerId,
+      ticket.contact_id ?? null,
+      ticket.company_id ?? null,
+    ],
   );
   const deal = ins.rows[0];
   await client.query(`UPDATE tickets SET deal_id = $1, updated_at = NOW() WHERE id = $2`, [deal.id, ticket.id]);
@@ -477,102 +463,12 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
 
   return async function (fastify: FastifyInstance) {
 
-    /**
-     * Guard: an agent/viewer can only mutate a ticket they are assigned to.
-     * Managers/line_managers can act on anyone in their reporting subtree.
-     * Tenant/super admins can act on anything.
-     *
-     * Returns the ticket row if allowed; replies 403 + returns null otherwise.
-     * Replies 404 + returns null if ticket doesn't exist.
-     */
-    async function assertCanMutate(req: any, reply: any, ticketId: string): Promise<any | null> {
-      const tenantId = req.tenant.id;
-      const userId   = req.user.sub as string;
-      const role     = req.user.role as string;
-
-      const [t] = await db.withTenant(tenantId, async (c) =>
-        (await c.query(`SELECT id, assignee_id, status FROM tickets WHERE id = $1`, [ticketId])).rows);
-      if (!t) { reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Ticket not found' } }); return null; }
-
-      // Admins always allowed
-      if (role === 'super_admin' || role === 'tenant_admin') return t;
-
-      // Manager/line_manager: allowed if assignee is in their reporting subtree (or they are unassigned, or self)
-      if (role === 'manager' || role === 'line_manager') {
-        if (!t.assignee_id || t.assignee_id === userId) return t;
-        const [{ in_subtree }] = await db.withTenant(tenantId, async (c) =>
-          (await c.query(
-            `WITH RECURSIVE h AS (
-               SELECT id FROM users WHERE id = $1
-               UNION ALL
-               SELECT u.id FROM users u INNER JOIN h ON u.manager_id = h.id
-             )
-             SELECT EXISTS(SELECT 1 FROM h WHERE id = $2) AS in_subtree`,
-            [userId, t.assignee_id])).rows);
-        if (in_subtree) return t;
-        reply.code(403).send({ success: false, error: { code: 'FORBIDDEN', message: 'This ticket is owned by someone outside your team' } });
-        return null;
-      }
-
-      // Agent/viewer: must be the assignee
-      if (t.assignee_id === userId) return t;
-      reply.code(403).send({
-        success: false,
-        error: { code: 'NOT_ASSIGNEE', message: 'Only the agent who accepted this ticket can modify it' },
-      });
-      return null;
-    }
-
     // ── Stats (dashboard) ─────────────────────────────────────────────────
     fastify.get('/stats', { preHandler: requireScope('tickets:read') }, async (req, reply) => {
       const tenantId = req.tenant.id;
       const userId   = req.user.sub;
-      const role     = (req.user as any).role as string;
-      const deptType = (req.user as any).department_type as string | null;
-
-      // Build scope filter per role:
-      //   tenant_admin / super_admin → all tickets (whole tenant)
-      //   manager / line_manager     → tickets owned by anyone in their reporting subtree
-      //                                (recursive CTE down manager_id), OR sitting in their dept queue
-      //   agent / viewer             → tickets assigned to them OR sitting unassigned in their dept queue
-      //                                (so they see what they can pick up)
-      let scopeSql = '';
-      const scopeParams: any[] = [userId];
-
-      if (role === 'agent' || role === 'viewer') {
-        // Their work + the dept queue they could claim from + tickets they created
-        // (so a ticket they manually created shows on their dashboard even if
-        // push_random auto-routed it to someone else).
-        scopeSql = `WHERE (assignee_id = $1
-                      OR created_by  = $1
-                      OR (assignee_id IS NULL AND queue_id IN (
-                            SELECT id FROM ticket_queues WHERE LOWER(name) LIKE '%' || $2 || '%')))`;
-        scopeParams.push((deptType ?? '').toLowerCase());
-      } else if (role === 'manager' || role === 'line_manager') {
-        // Recursive subtree of users reporting up to me + tickets in my dept queue
-        scopeSql = `WHERE (
-          assignee_id IN (
-            WITH RECURSIVE h AS (
-              SELECT id FROM users WHERE id = $1
-              UNION ALL
-              SELECT u.id FROM users u INNER JOIN h ON u.manager_id = h.id
-            ) SELECT id FROM h
-          )
-          OR queue_id IN (
-            SELECT id FROM ticket_queues WHERE LOWER(name) LIKE '%' || $2 || '%'
-          )
-        )`;
-        scopeParams.push((deptType ?? '').toLowerCase());
-      }
-      // tenant_admin/super_admin: no WHERE, sees everything
 
       const [stats] = await db.withTenant(tenantId, async (client) => {
-        // Two-tab dashboard split: every counted aggregate is also broken
-        // down by ticket ORIGIN (channel='voice_bot' vs anything else).
-        // Munir feedback: 'AI Voice Bot tab shows tickets generated by the
-        // bot, Manually Handled tab shows tickets created by humans.'
-        const BOT = `channel = 'voice_bot'`;
-        const MAN = `channel <> 'voice_bot'`;
         const r = await client.query(
           `SELECT
              COUNT(*)                                                            AS total,
@@ -590,27 +486,9 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
                                AND status NOT IN ('resolved','closed'))         AS within_tat,
              COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24 hours') AS created_today,
              COUNT(*) FILTER (WHERE status IN ('accepted','in_progress')
-                               AND assignee_id IS NOT NULL)                     AS claimed,
-             -- Bot-originated bucket (tickets created by Nadia/Sara/Zara)
-             COUNT(*) FILTER (WHERE ${BOT})                                                      AS bot_total,
-             COUNT(*) FILTER (WHERE ${BOT} AND status = 'open')                                 AS bot_open,
-             COUNT(*) FILTER (WHERE ${BOT} AND status = 'assigned')                             AS bot_assigned,
-             COUNT(*) FILTER (WHERE ${BOT} AND status IN ('accepted','in_progress'))             AS bot_in_progress,
-             COUNT(*) FILTER (WHERE ${BOT} AND status = 'pending')                              AS bot_pending,
-             COUNT(*) FILTER (WHERE ${BOT} AND status = 'resolved')                             AS bot_resolved,
-             COUNT(*) FILTER (WHERE ${BOT} AND created_at >= NOW() - INTERVAL '24 hours')        AS bot_created_today,
-             COUNT(*) FILTER (WHERE ${BOT} AND assignee_id = $1 AND status NOT IN ('resolved','closed')) AS bot_mine,
-             -- Manually-created bucket (channel = manual/email/phone/api/chat — anything not voice_bot)
-             COUNT(*) FILTER (WHERE ${MAN})                                                      AS manual_total,
-             COUNT(*) FILTER (WHERE ${MAN} AND status = 'open')                                 AS manual_open,
-             COUNT(*) FILTER (WHERE ${MAN} AND status = 'assigned')                             AS manual_assigned,
-             COUNT(*) FILTER (WHERE ${MAN} AND status IN ('accepted','in_progress'))             AS manual_in_progress,
-             COUNT(*) FILTER (WHERE ${MAN} AND status = 'pending')                              AS manual_pending,
-             COUNT(*) FILTER (WHERE ${MAN} AND status = 'resolved')                             AS manual_resolved,
-             COUNT(*) FILTER (WHERE ${MAN} AND created_at >= NOW() - INTERVAL '24 hours')        AS manual_created_today,
-             COUNT(*) FILTER (WHERE ${MAN} AND assignee_id = $1 AND status NOT IN ('resolved','closed')) AS manual_mine
-           FROM tickets ${scopeSql}`,
-          scopeParams,
+                               AND assignee_id IS NOT NULL)                     AS claimed
+           FROM tickets`,
+          [userId],
         );
         return r.rows;
       });
@@ -887,74 +765,35 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
     fastify.post('/', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const body       = CreateTicketSchema.parse(req.body);
       const tenantId   = req.tenant.id;
-      const userId     = req.user.sub as string;
-      const userDept   = (req.user as any).department_type as string | null;
-
-      // Auto-default ticketType from user's department if frontend didn't specify.
-      // Sales agent → 'sales', Complaints agent → 'complaint', Support agent → 'support'.
-      // Maps both 'complaints' and 'complaint' to 'complaint' (DB enum value).
-      const ticketType = body.ticketType !== 'complaint' ? body.ticketType
-        : userDept === 'sales'      ? 'sales'
-        : userDept === 'support'    ? 'support'
-        : 'complaint';
-
       const ticketNum  = await nextTicketNumber(db, tenantId);
       const sla        = await findSlaPolicy(db, tenantId, body.slaPolicyId, body.priority);
 
       const [ticket] = await db.withTenant(tenantId, async (client) => {
-        // For non-admin roles: FORCE the queue to match the user's department,
-        // regardless of what the frontend sent. Prevents a Sales agent from
-        // accidentally dumping a ticket into Complaints Queue. Tenant/super
-        // admins can still override via body.queueId.
-        const wantedDept = ticketType === 'complaint' ? 'complaint'
-                         : ticketType === 'sales'     ? 'sales'
-                         : ticketType === 'support'   ? 'support' : null;
-        const isAdmin = (req.user as any).role === 'tenant_admin' || (req.user as any).role === 'super_admin';
-        let queueId = isAdmin ? body.queueId : undefined;
+        // Auto-assign to default queue if none given
+        let queueId = body.queueId;
         if (!queueId) {
-          // Match the dept queue strictly first (no fallback to default for
-          // non-admins — a Sales ticket MUST go to Sales Queue).
-          const qr = await client.query(
-            `SELECT id FROM ticket_queues
-             WHERE ($1::text IS NULL OR department_type = $1)
-             ORDER BY (department_type = $1) DESC NULLS LAST
-             LIMIT 1`,
-            [wantedDept],
-          );
+          const qr = await client.query('SELECT id FROM ticket_queues WHERE is_default = true LIMIT 1');
           queueId = qr.rows[0]?.id;
-          // Last-resort fallback to default queue only if absolutely no dept match
-          if (!queueId) {
-            const def = await client.query(`SELECT id FROM ticket_queues WHERE is_default = true LIMIT 1`);
-            queueId = def.rows[0]?.id;
-          }
         }
 
-        // Normalize preferredChannel — DB column is text, store as comma-joined
-        // string when multi-select (preserves all channels the customer wants).
-        const prefChan = Array.isArray(body.preferredChannel)
-          ? body.preferredChannel.join(',')
-          : (body.preferredChannel ?? 'email');
-
         const status = body.assigneeId ? 'assigned' : 'open';
-        const customFields = { ...(body.customFields ?? {}),
-          ...(body.issueCategory ? { issue_category: body.issueCategory } : {}) };
-
         const r = await client.query(
           `INSERT INTO tickets
              (tenant_id, ticket_number, subject, description, status, priority, channel,
-              queue_id, sla_policy_id, contact_id, company_id, assignee_id, created_by,
+              queue_id, sla_policy_id, contact_id, company_id, assignee_id,
               reporter_email, reporter_name, reporter_phone, reporter_whatsapp,
               preferred_channel, ticket_type, tags, custom_fields)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
            RETURNING *`,
           [tenantId, ticketNum, body.subject, body.description ?? null,
            status, body.priority, body.channel,
            queueId ?? null, sla?.id ?? null,
            body.contactId ?? null, body.companyId ?? null,
-           body.assigneeId ?? null, userId,
+           body.assigneeId ?? null,
            body.reporterEmail ?? null, body.reporterName ?? null, body.reporterPhone ?? null,
-            body.reporterWhatsapp ?? null, prefChan, ticketType,
-            body.tags ?? [], JSON.stringify(customFields)],
+            body.reporterWhatsapp ?? null, body.preferredChannel ?? 'email',
+            body.ticketType ?? 'complaint',
+            body.tags ?? [], JSON.stringify(body.customFields ?? {})],
         );
         return r.rows;
       });
@@ -1058,59 +897,15 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
       const query    = ListQuerySchema.parse(req.query);
       const tenantId = req.tenant.id;
       const userId   = req.user.sub;
-      const role     = (req.user as any).role as string;
-      const deptType = (req.user as any).department_type as string | null;
       const offset   = (query.page - 1) * query.pageSize;
 
       const params: unknown[] = [];
       const where: string[] = ['1=1'];
       let idx = 1;
 
-      // ── Department-isolation rules ─────────────────────────────────────
-      // super_admin / tenant_admin → see all tickets in tenant
-      // manager / line_manager     → tickets owned by anyone in their reporting
-      //                              subtree (recursive CTE down manager_id) OR
-      //                              UNASSIGNED tickets in their dept queue
-      // agent / viewer             → tickets assigned to ME OR UNASSIGNED in my
-      //                              dept queue (so I see only what's mine + what
-      //                              I can pick up — once another agent accepts a
-      //                              ticket, it disappears from my view since it
-      //                              has an assignee_id != me)
-      if (role === 'agent' || role === 'viewer') {
-        // Mine + unassigned in dept queue + ones I created (so my own manual
-        // tickets show even if push_random handed them to a teammate).
-        where.push(`(t.assignee_id = $${idx}
-                    OR t.created_by  = $${idx}
-                    OR (t.assignee_id IS NULL AND t.queue_id IN (
-                        SELECT id FROM ticket_queues WHERE department_type = $${idx + 1})))`);
-        params.push(userId, deptType ?? null);
-        idx += 2;
-      } else if (role === 'manager' || role === 'line_manager') {
-        // Manager scope: my whole reporting subtree's tickets + unassigned in my dept queue
-        where.push(`(
-          t.assignee_id IN (
-            WITH RECURSIVE h AS (
-              SELECT id FROM users WHERE id = $${idx}
-              UNION ALL
-              SELECT u.id FROM users u INNER JOIN h ON u.manager_id = h.id
-            ) SELECT id FROM h
-          )
-          OR (t.assignee_id IS NULL AND t.queue_id IN (
-            SELECT id FROM ticket_queues WHERE department_type = $${idx + 1}))
-          OR t.created_by = $${idx}
-        )`);
-        params.push(userId, deptType ?? null);
-        idx += 2;
-      }
-
       if (query.status) {
-        // Allow comma-separated multi-status: "open,assigned".
-        // Expand 'in_progress' to match what /stats counts as in-progress
-        // (status IN ('accepted','in_progress')) — otherwise the "In Progress N"
-        // tab click filters out tickets that were accepted but not yet started,
-        // causing a count/list mismatch ("In Progress 1" but list shows empty).
-        const raw = query.status.split(',').map(s => s.trim());
-        const statuses = raw.flatMap(s => s === 'in_progress' ? ['accepted', 'in_progress'] : [s]);
+        // Allow comma-separated multi-status: "open,assigned"
+        const statuses = query.status.split(',').map(s => s.trim());
         where.push(`t.status = ANY($${idx++}::text[])`);
         params.push(statuses);
       }
@@ -1239,7 +1034,6 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
     // ── Update ticket ─────────────────────────────────────────────────────
     fastify.patch('/:id', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const { id } = req.params as { id: string };
-      if (!(await assertCanMutate(req, reply, id))) return;
       const body  = UpdateTicketSchema.parse(req.body);
 
       const sets: string[] = ['updated_at = NOW()'];
@@ -1300,7 +1094,6 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
      */
     fastify.post('/:id/assign', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const { id } = req.params as { id: string };
-      if (!(await assertCanMutate(req, reply, id))) return;
       const body   = z.object({
         assigneeId: z.string().uuid(),
         note:       z.string().max(500).optional(),  // manager can add a note explaining the reassignment
@@ -1402,102 +1195,6 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
       return reply.send({ success: true, data: ticket });
     });
 
-    // ── Overview — everything an agent needs the moment they accept ──────
-    // GET /:id/overview returns: the ticket, full voice transcript (if any),
-    // prior tickets from the same reporter/contact, related resolved tickets
-    // (by category), and contact summary. One request, ready to render.
-    fastify.get('/:id/overview', { preHandler: requireScope('tickets:read') }, async (req, reply) => {
-      const { id }   = req.params as { id: string };
-      const tenantId = req.tenant.id;
-
-      const data = await db.withTenant(tenantId, async (client) => {
-        // 1. The ticket itself with all related fields
-        const [ticket] = (await client.query(
-          `SELECT t.*, q.name AS queue_name, q.color AS queue_color,
-                  s.name AS sla_name, s.resolution_hours,
-                  c.first_name || ' ' || COALESCE(c.last_name,'') AS contact_name,
-                  c.phone AS contact_phone, c.email AS contact_email,
-                  c.company_id, c.status AS contact_status, c.score AS contact_score,
-                  co.name AS company_name,
-                  ua.name AS assignee_name, ua.email AS assignee_email,
-                  uc.name AS creator_name
-           FROM tickets t
-           LEFT JOIN ticket_queues q ON q.id = t.queue_id
-           LEFT JOIN sla_policies s ON s.id = t.sla_policy_id
-           LEFT JOIN contacts c ON c.id = t.contact_id
-           LEFT JOIN companies co ON co.id = c.company_id
-           LEFT JOIN users ua ON ua.id = t.assignee_id
-           LEFT JOIN users uc ON uc.id = t.created_by
-           WHERE t.id = $1`,
-          [id],
-        )).rows;
-        if (!ticket) return null;
-
-        // 2. Linked voice call (if this ticket came from a call)
-        const [voiceCall] = (await client.query(
-          `SELECT id, transcript, summary, sentiment, duration_seconds,
-                  from_number, started_at, ended_at, recording_url,
-                  extracted_reporter_name, extracted_category, extracted_priority
-           FROM voice_bot_calls
-           WHERE ticket_id = $1
-           LIMIT 1`,
-          [id],
-        )).rows;
-
-        // 3. Prior tickets from the same contact (or same phone if no contact)
-        const priorTicketsParams: unknown[] = [id];
-        let priorWhere = 'id != $1 AND ';
-        if (ticket.contact_id) {
-          priorTicketsParams.push(ticket.contact_id);
-          priorWhere += `contact_id = $${priorTicketsParams.length}`;
-        } else if (ticket.reporter_phone) {
-          priorTicketsParams.push(ticket.reporter_phone);
-          priorWhere += `reporter_phone = $${priorTicketsParams.length}`;
-        } else {
-          priorWhere += 'false';
-        }
-        const priorTickets = (await client.query(
-          `SELECT id, ticket_number, subject, status, priority, ticket_type,
-                  channel, created_at, resolved_at
-           FROM tickets
-           WHERE ${priorWhere}
-           ORDER BY created_at DESC
-           LIMIT 10`,
-          priorTicketsParams,
-        )).rows;
-
-        // 4. Related resolved tickets — same ticket_type, similar subject keywords
-        // (cheap version: same type + status='resolved' or 'closed', recent first)
-        const related = (await client.query(
-          `SELECT id, ticket_number, subject, ticket_type, resolved_at
-           FROM tickets
-           WHERE ticket_type = COALESCE($1, ticket_type)
-             AND status IN ('resolved', 'closed')
-             AND id != $2
-           ORDER BY resolved_at DESC NULLS LAST
-           LIMIT 5`,
-          [ticket.ticket_type ?? null, id],
-        )).rows;
-
-        // 5. Recent comments
-        const comments = (await client.query(
-          `SELECT tc.id, tc.body, tc.is_internal, tc.created_at,
-                  u.name AS author_name, u.role AS author_role
-           FROM ticket_comments tc
-           LEFT JOIN users u ON u.id = tc.author_id
-           WHERE tc.ticket_id = $1
-           ORDER BY tc.created_at DESC
-           LIMIT 20`,
-          [id],
-        )).rows;
-
-        return { ticket, voiceCall, priorTickets, related, comments };
-      });
-
-      if (!data) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Ticket not found' } });
-      return reply.send({ success: true, data });
-    });
-
     // ── Accept ticket (agent confirms they will work on it) ───────────────
     // This starts the SLA resolution timer.
     fastify.post('/:id/accept', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
@@ -1518,15 +1215,6 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
       });
 
       if (!existing) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Ticket not found' } });
-      // Already-claimed guard: if another agent has set themselves as assignee,
-      // block. Covers race conditions where two agents click Accept in the same
-      // 10s poll window and the loser's UI hasn't refreshed yet.
-      if (existing.assignee_id && existing.assignee_id !== userId) {
-        return reply.code(409).send({
-          success: false,
-          error: { code: 'ALREADY_CLAIMED', message: 'This ticket was just accepted by another agent' },
-        });
-      }
       if (existing.status === 'accepted' || existing.accepted_at) {
         return reply.code(409).send({ success: false, error: { code: 'ALREADY_ACCEPTED', message: 'Ticket already accepted' } });
       }
@@ -1535,31 +1223,19 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
       const resHours   = existing.resolution_hours ?? 24;
       const slaDueAt   = new Date(acceptedAt.getTime() + resHours * 3_600_000);
 
-      // Conditional UPDATE — close the TOCTOU race between the SELECT above
-      // and the UPDATE here. If another agent claimed in this window the row
-      // will be 0 and we return 409 instead of silently overwriting state.
       const [ticket] = await db.withTenant(tenantId, async (client) => {
         const r = await client.query(
           `UPDATE tickets
            SET status = 'accepted',
                accepted_at = $1,
                sla_due_at  = $2,
-               assignee_id = $3,
+               assignee_id = COALESCE(assignee_id, $3),
                updated_at  = NOW()
-           WHERE id = $4
-             AND (assignee_id IS NULL OR assignee_id = $3)
-             AND accepted_at IS NULL
-           RETURNING *`,
+           WHERE id = $4 RETURNING *`,
           [acceptedAt, slaDueAt, userId, id],
         );
         return r.rows;
       });
-      if (!ticket) {
-        return reply.code(409).send({
-          success: false,
-          error: { code: 'ALREADY_CLAIMED', message: 'This ticket was just accepted by another agent' },
-        });
-      }
 
       await notify(db, tenantId, [userId], 'ticket_accepted',
         `You accepted ticket ${ticket.ticket_number}`,
@@ -1570,8 +1246,8 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
         ticketId: id, acceptedAt, slaDueAt, assigneeId: userId,
       });
 
-      // Sales enquiry → feed the pipeline. On acceptance of a 'sales' ticket,
-      // create (once) a linked deal so the opportunity is forecast and worked.
+      // Sales enquiry → feed the pipeline. On acceptance of a 'sales' ticket we
+      // create a linked deal (once) so the opportunity is forecast and worked.
       // Complaints/inquiries keep the normal resolve→close lifecycle untouched.
       let convertedDeal: any = null;
       if (ticket.ticket_type === 'sales') {
@@ -1580,10 +1256,11 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
         );
         if (conv?.created) {
           convertedDeal = conv.deal;
+          await eventBus.publish(tenantId, CRM_EVENTS.DEAL_CREATED, { deal: conv.deal, fromTicketId: id });
           await notify(db, tenantId, [userId], 'ticket_accepted',
             `Deal created from ${ticket.ticket_number}`,
             `A pipeline deal "${conv.deal.name}" was created from this sales enquiry.`,
-            id).catch(() => {});
+            id);
         } else if (conv) {
           convertedDeal = conv.deal;
         }
@@ -1592,9 +1269,10 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
       return reply.send({ success: true, data: { ...ticket, deal: convertedDeal } });
     });
 
-    // ── Explicit: convert a sales ticket into a pipeline deal ───────────────
-    // Manual counterpart to the auto-conversion on accept. Idempotent.
-    fastify.post('/:id/convert-to-deal', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
+    // ── Explicit: convert a sales ticket into a pipeline deal ─────────────────
+    // Manual counterpart to the auto-conversion on accept. Idempotent — returns
+    // the existing linked deal if one was already created.
+    fastify.post('/:id/convert-to-deal', { preHandler: requireScope('deals:write') }, async (req, reply) => {
       const { id }   = req.params as { id: string };
       const tenantId = req.tenant.id;
       const userId   = req.user.sub;
@@ -1606,127 +1284,22 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
       if (ticket.ticket_type !== 'sales') {
         return reply.code(400).send({ success: false, error: { code: 'NOT_A_SALES_TICKET', message: 'Only sales enquiries can be converted into a deal.' } });
       }
+
       const conv = await db.withTenant(tenantId, (client) =>
         convertSalesTicketToDeal(client, tenantId, ticket, ticket.assignee_id ?? userId),
       );
       if (!conv) {
         return reply.code(409).send({ success: false, error: { code: 'NO_PIPELINE', message: 'No sales pipeline is configured to place the deal into.' } });
       }
+      if (conv.created) {
+        await eventBus.publish(tenantId, CRM_EVENTS.DEAL_CREATED, { deal: conv.deal, fromTicketId: id });
+      }
       return reply.send({ success: true, data: conv.deal, created: conv.created });
     });
 
     // ── Resolve ticket ────────────────────────────────────────────────────
-    // ── Forward to next team (e.g. Onboarding, Field Sales, Field Complaints) ──
-    // Lightweight handoff: stores forwarded_to as free-form text (no new dept table
-    // needed) + adds an audit entry + posts an internal comment. The ticket stays
-    // assigned to the current agent but is flagged as forwarded for visibility.
-    fastify.post('/:id/forward', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
-      const { id } = req.params as { id: string };
-      if (!(await assertCanMutate(req, reply, id))) return;
-
-      const { team, note } = z.object({
-        team: z.string().min(1).max(120),
-        note: z.string().max(2000).optional(),
-      }).parse(req.body);
-      const tenantId = req.tenant.id;
-      const userId   = req.user.sub as string;
-
-      const [ticket] = await db.withTenant(tenantId, async (client) => {
-        const r = await client.query(
-          `UPDATE tickets
-              SET forwarded_to   = $1,
-                  forwarded_at   = NOW(),
-                  forwarded_by   = $2,
-                  forwarded_note = COALESCE($3, forwarded_note),
-                  updated_at     = NOW()
-            WHERE id = $4
-            RETURNING *`,
-          [team, userId, note ?? null, id],
-        );
-        // Audit comment so downstream visibility is preserved
-        await client.query(
-          `INSERT INTO ticket_comments (tenant_id, ticket_id, author_id, body, is_internal, comment_type)
-           VALUES ($1, $2, $3, $4, true, 'note')`,
-          [tenantId, id, userId,
-            `Forwarded to ${team}${note ? `\n\n${note}` : ''}`],
-        );
-        return r.rows;
-      });
-
-      await auditLog(db, {
-        tenantId, ticketId: id, actorId: userId,
-        action: 'forwarded',
-        newValue: { team, note },
-      });
-
-      return reply.send({ success: true, data: ticket });
-    });
-
-    // ── Manager: reassign ticket to any agent in their dept ─────────────────
-    // Different from /assign (which requires ownership). This is manager-only
-    // and bypasses the assignee-must-be-me check.
-    fastify.post('/:id/reassign', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
-      const { id } = req.params as { id: string };
-      const role     = (req.user as any).role as string;
-      const userDept = (req.user as any).department_type as string | null;
-      if (!['manager','line_manager','tenant_admin','super_admin'].includes(role)) {
-        return reply.code(403).send({ success: false, error: { code: 'FORBIDDEN', message: 'Only managers can reassign' } });
-      }
-
-      const { assigneeId } = z.object({ assigneeId: z.string().uuid() }).parse(req.body);
-      const tenantId = req.tenant.id;
-      const userId   = req.user.sub as string;
-
-      // Cross-department guard: a Sales manager must not be able to yank a
-      // Complaints ticket and dump it on a Sales agent. Verify the target
-      // assignee is in the same department as the manager (and that the
-      // existing ticket — if it had an assignee — was also same dept).
-      // Tenant/super admins skip this check.
-      if ((role === 'manager' || role === 'line_manager') && userDept) {
-        const [target] = await db.withTenant(tenantId, async (client) =>
-          (await client.query(`SELECT department_type FROM users WHERE id = $1 AND tenant_id = $2`,
-            [assigneeId, tenantId])).rows);
-        if (!target) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Target user not found in this tenant' } });
-        if (target.department_type && target.department_type !== userDept) {
-          return reply.code(403).send({ success: false, error: {
-            code: 'DEPT_MISMATCH',
-            message: `Cannot reassign across departments — you are in ${userDept}, target is in ${target.department_type}`,
-          }});
-        }
-      }
-
-      const [ticket] = await db.withTenant(tenantId, async (client) => {
-        const r = await client.query(
-          `UPDATE tickets
-              SET assignee_id = $1,
-                  status      = CASE WHEN status IN ('open','assigned') THEN 'assigned' ELSE status END,
-                  updated_at  = NOW()
-            WHERE id = $2
-            RETURNING *`,
-          [assigneeId, id],
-        );
-        return r.rows;
-      });
-      if (!ticket) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Ticket not found' } });
-
-      await auditLog(db, {
-        tenantId, ticketId: id, actorId: userId,
-        action: 'reassigned',
-        newValue: { newAssignee: assigneeId },
-      });
-
-      // Notify the new assignee
-      await notify(db, tenantId, [assigneeId], 'ticket_assigned',
-        `Ticket ${ticket.ticket_number} reassigned to you`,
-        `Reassigned by your manager — please review.`,
-        id).catch(() => {});
-
-      return reply.send({ success: true, data: ticket });
-    });
-
     fastify.post('/:id/resolve', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const { id }   = req.params as { id: string };
-      if (!(await assertCanMutate(req, reply, id))) return;
       const tenantId = req.tenant.id;
       const { note } = z.object({ note: z.string().optional() }).parse(req.body ?? {});
 
@@ -1780,7 +1353,6 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
     // body: { steps: [{id, label, completed, completed_at}] }
     fastify.patch('/:id/milestones', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const { id }   = req.params as { id: string };
-      if (!(await assertCanMutate(req, reply, id))) return;
       const tenantId = req.tenant.id;
       const userId   = req.user.sub;
       const { steps } = req.body as { steps: Array<{ id: string; label: string; completed: boolean; completed_at?: string }> };
@@ -1837,7 +1409,6 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
     // ── Close ticket ──────────────────────────────────────────────────────
     fastify.post('/:id/close', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const { id }   = req.params as { id: string };
-      if (!(await assertCanMutate(req, reply, id))) return;
       const tenantId = req.tenant.id;
       const userId   = req.user.sub;
 
@@ -1917,7 +1488,6 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
     // ── RCA — Root Cause Analysis ─────────────────────────────────────────
     fastify.post('/:id/rca', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const { id }   = req.params as { id: string };
-      if (!(await assertCanMutate(req, reply, id))) return;
       const tenantId = req.tenant.id;
       const userId   = req.user.sub;
       const body     = RcaSchema.parse(req.body);
@@ -2033,7 +1603,7 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
 
       const limit  = Math.min(Math.max(1, Number(pageSize) || 50), 200);
       const offset = (Math.max(1, Number(page) || 1) - 1) * limit;
-      conditions.push(`TRUE LIMIT $${idx++} OFFSET $${idx++}`);
+      const limitClause = `LIMIT $${idx++} OFFSET $${idx++}`;
       vals.push(limit, offset);
 
       const comments = await db.withTenant(tenantId, async (client) => {
@@ -2052,7 +1622,8 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
            LEFT JOIN ticket_comments rt ON tc.reply_to_id = rt.id
            LEFT JOIN users ru ON rt.author_id   = ru.id
            WHERE ${conditions.join(' AND ')}
-           ORDER BY tc.created_at ASC`,
+           ORDER BY tc.created_at ASC
+           ${limitClause}`,
           vals,
         );
         return r.rows;
@@ -2173,10 +1744,12 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
       return reply.code(201).send({ success: true, data: comment });
     });
 
-    // ── AGENT DASHBOARD — personal ticket counts + TAT health ──────────
+    // ── AGENT DASHBOARD — department-aware ticket counts ──────────────
+    // Returns counts bucketed by status + TAT health for the calling agent
+    // (or any user_id when called by a manager).
     fastify.get('/dashboard/agent', { preHandler: requireScope('tickets:read') }, async (req, reply) => {
       const tenantId = req.tenant.id;
-      const userId   = (req.query as any).user_id ?? req.user.sub;
+      const userId = (req.query as any).user_id ?? req.user.sub;
 
       const { rows } = await db.withTenant(tenantId, (client) =>
         client.query(
@@ -2203,26 +1776,26 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
       return reply.send({ success: true, data: rows[0] });
     });
 
-    // ── MANAGER ROLLUP — recursive team summary down the manager_id chain ──
+    // ── MANAGER ROLLUP — recursive team ticket summary ────────────────
+    // Walks the manager_id hierarchy from the given manager downward,
+    // returning aggregated counts for the entire reporting tree.
+    // Also returns per-agent breakdown for drill-down.
     fastify.get('/dashboard/team', { preHandler: requireScope('tickets:read') }, async (req, reply) => {
-      const tenantId  = req.tenant.id;
+      const tenantId = req.tenant.id;
       const managerId = (req.query as any).manager_id ?? req.user.sub;
 
-      // Reporting subtree EXCLUDING the manager themself (per product feedback —
-      // the manager shouldn't appear in their own team breakdown). Builds rows
-      // for every direct + indirect report so the Manager sees their full team
-      // (Sadia + Ali + Omar + Zoya), not just direct reports (Sadia alone).
+      // Aggregate totals for the whole tree
       const { rows: [totals] } = await db.withTenant(tenantId, (client) =>
         client.query(
           `WITH RECURSIVE team AS (
-             SELECT id FROM users WHERE tenant_id = $1 AND manager_id = $2
+             SELECT id FROM users WHERE tenant_id = $1 AND id = $2
              UNION ALL
              SELECT u.id FROM users u INNER JOIN team t ON u.manager_id = t.id
              WHERE u.tenant_id = $1
            )
            SELECT
              COUNT(*) FILTER (WHERE t.status = 'assigned')                                           AS assigned,
-             COUNT(*) FILTER (WHERE (t.status = 'accepted' OR t.accepted_at IS NOT NULL)
+             COUNT(*) FILTER (WHERE t.status = 'accepted' OR t.accepted_at IS NOT NULL
                                AND t.status NOT IN ('resolved','closed'))                             AS accepted,
              COUNT(*) FILTER (WHERE t.status IN ('pending','in_progress'))                           AS pending,
              COUNT(*) FILTER (WHERE t.status = 'resolved')                                           AS resolved,
@@ -2240,18 +1813,13 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
         )
       );
 
+      // Per-agent breakdown (direct reports only — drill further by calling with their id)
       const { rows: agents } = await db.withTenant(tenantId, (client) =>
         client.query(
-          `WITH RECURSIVE team AS (
-             SELECT id FROM users WHERE tenant_id = $1 AND manager_id = $2
-             UNION ALL
-             SELECT u.id FROM users u INNER JOIN team t ON u.manager_id = t.id
-             WHERE u.tenant_id = $1
-           )
-           SELECT
-             u.id, u.name, u.email, u.role, u.department, u.department_type,
+          `SELECT
+             u.id, u.name, u.email, u.department, u.department_type,
              COUNT(t.id) FILTER (WHERE t.status = 'assigned')                                        AS assigned,
-             COUNT(t.id) FILTER (WHERE (t.status = 'accepted' OR t.accepted_at IS NOT NULL)
+             COUNT(t.id) FILTER (WHERE t.status = 'accepted' OR t.accepted_at IS NOT NULL
                                   AND t.status NOT IN ('resolved','closed'))                          AS accepted,
              COUNT(t.id) FILTER (WHERE t.status IN ('pending','in_progress'))                        AS pending,
              COUNT(t.id) FILTER (WHERE t.status = 'resolved')                                        AS resolved,
@@ -2265,15 +1833,14 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
                                   AND t.status NOT IN ('resolved','closed'))                          AS breached_tat
            FROM users u
            LEFT JOIN tickets t ON t.assignee_id = u.id AND t.tenant_id = $1
-           WHERE u.id IN (SELECT id FROM team)
-           GROUP BY u.id, u.name, u.email, u.role, u.department, u.department_type
-           ORDER BY
-             CASE u.role WHEN 'line_manager' THEN 1 WHEN 'agent' THEN 2 ELSE 3 END,
-             u.name`,
+           WHERE u.tenant_id = $1 AND u.manager_id = $2
+           GROUP BY u.id, u.name, u.email, u.department, u.department_type
+           ORDER BY u.name`,
           [tenantId, managerId]
         )
       );
 
+      // Count sub-reports (people reporting to these agents)
       const { rows: [{ direct_reports }] } = await db.withTenant(tenantId, (client) =>
         client.query(
           `SELECT COUNT(*) AS direct_reports FROM users WHERE tenant_id = $1 AND manager_id = $2`,

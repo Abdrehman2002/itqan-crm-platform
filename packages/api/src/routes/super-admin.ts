@@ -4,6 +4,7 @@ import type { DatabaseClient, TenantService } from '@crm/core';
 import type { Plan } from '@crm/shared';
 import { requireRole } from '../middlewares/auth.middleware';
 import { defaultPermissions } from './roles';
+import { ensureDefaultPipeline } from '../lib/default-pipeline';
 
 // The four standard roles auto-seeded into every new workspace. Their default
 // permissions come from defaultPermissions(); the tenant admin tailors them later.
@@ -289,6 +290,12 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
         }
       });
 
+      // Seed a default sales pipeline so the Deals feature (and sales-ticket →
+      // deal conversion) works from day one. Without this, convert-to-deal fails.
+      await db.withSuperAdmin(async (client) => {
+        await ensureDefaultPipeline(client, tenant.id);
+      });
+
       // Provision the first tenant admin so the new customer can log in immediately.
       // If no password was supplied, generate a temporary one and return it once.
       const tempPassword = body.adminPassword ?? generateTempPassword();
@@ -447,34 +454,6 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
 
     // Reset the tenant admin password — generates a new temp password, updates the user,
     // emails it to the admin, and returns it in the response for the super admin to relay.
-    // POST /super-admin/users/:id/reset-password — reset ANY user's password
-    // Generic counterpart to /tenants/:id/reset-admin-password (which only
-    // hits the first tenant_admin of a tenant). This one accepts any user_id —
-    // works for tenant_admins, sub-admins, managers, agents, anyone.
-    // Re-added after Option A merge (it was wiped in the wholesale overlay).
-    fastify.post('/users/:id/reset-password', async (req, reply) => {
-      const { id } = req.params as { id: string };
-      const { password } = z.object({ password: z.string().min(8).max(200) }).parse(req.body);
-      const bcrypt = (await import('bcryptjs')).default;
-      const hash   = await bcrypt.hash(password, 12);
-
-      const [u] = await db.withSuperAdmin(async (c) => (await c.query(
-        `UPDATE users SET password_hash = $1, updated_at = NOW()
-         WHERE id = $2 RETURNING id, email, name, role, tenant_id`,
-        [hash, id],
-      )).rows);
-      if (!u) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'User not found' } });
-
-      // Audit: log via super_admin_password_log (migration 025)
-      await db.withSuperAdmin(async (c) =>
-        c.query(`INSERT INTO super_admin_password_log (tenant_id, user_id, action, changed_by, notes)
-                 VALUES ($1, $2, 'reset', $3, $4)`,
-          [u.tenant_id, u.id, (req.user as any)?.sub ?? null, `Password reset via /users/${id}/reset-password`]),
-      ).catch(() => {});
-
-      return reply.send({ success: true, data: u, message: `Password reset for ${u.email}` });
-    });
-
     fastify.post('/tenants/:id/reset-admin-password', async (req, reply) => {
       const { id } = req.params as { id: string };
 
@@ -978,82 +957,6 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
       return reply.send({ success: true, data: row });
     });
 
-    // POST /super-admin/platform-invoices/:id/send — email invoice to all
-    // tenant_admins of the target tenant + flip draft→sent on first success.
-    // Re-added after Munir overlay. Uses sendSystemEmail (platform SMTP/SendGrid),
-    // not per-tenant EmailService — invoices come FROM the platform, not the tenant.
-    fastify.post('/platform-invoices/:id/send', async (req, reply) => {
-      const { id } = req.params as { id: string };
-      const [inv] = await db.withSuperAdmin(async (c) => (await c.query(
-        `SELECT pi.*, t.name AS tenant_name
-         FROM platform_invoices pi
-         JOIN tenants t ON t.id = pi.tenant_id
-         WHERE pi.id = $1`, [id])).rows);
-      if (!inv) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Invoice not found' } });
-
-      const admins = await db.withSuperAdmin(async (c) => (await c.query(
-        `SELECT email, name FROM users
-         WHERE tenant_id = $1 AND role = 'tenant_admin' AND is_active = true`,
-        [inv.tenant_id])).rows);
-      if (admins.length === 0) {
-        return reply.code(400).send({ success: false, error: { code: 'NO_RECIPIENTS', message: 'No active tenant admins to email this invoice to' } });
-      }
-
-      // HTML-escape every dynamic value (security audit fix preserved from
-      // commit 6660f63 — protects against malformed item descriptions/notes).
-      const esc = (v: unknown) => String(v ?? '')
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-
-      const itemsHtml = (inv.items as any[]).map((i: any) =>
-        `<tr><td style="padding:6px 12px;border-bottom:1px solid #eee">${esc(i.description ?? '—')}</td><td style="padding:6px 12px;text-align:right;border-bottom:1px solid #eee">${esc(i.quantity ?? 1)}</td><td style="padding:6px 12px;text-align:right;border-bottom:1px solid #eee">${esc(inv.currency)} ${esc(i.amount ?? 0)}</td></tr>`
-      ).join('');
-      const html = `
-        <h2>Invoice ${esc(inv.invoice_number)}</h2>
-        <p>Workspace: ${esc(inv.tenant_name)}</p>
-        <p>Billing period: ${esc(inv.period_start)} → ${esc(inv.period_end)}</p>
-        <p>Due: ${esc(inv.due_date)}</p>
-        <table style="border-collapse:collapse;width:100%;margin:16px 0">
-          <thead><tr style="background:#f5f5f5">
-            <th style="padding:8px 12px;text-align:left">Item</th>
-            <th style="padding:8px 12px;text-align:right">Qty</th>
-            <th style="padding:8px 12px;text-align:right">Amount</th>
-          </tr></thead>
-          <tbody>${itemsHtml}</tbody>
-          <tfoot><tr>
-            <td colspan="2" style="padding:12px;text-align:right;font-weight:600">Total</td>
-            <td style="padding:12px;text-align:right;font-weight:700">${esc(inv.currency)} ${esc(inv.amount)}</td>
-          </tr></tfoot>
-        </table>
-        ${inv.notes ? `<p style="color:#666"><em>${esc(inv.notes)}</em></p>` : ''}
-      `;
-
-      let sentCount = 0;
-      for (const a of admins) {
-        const ok = await sendSystemEmail({
-          to:       a.email,
-          toName:   a.name ?? a.email,
-          subject:  `Invoice ${inv.invoice_number} — ${inv.currency} ${inv.amount} due ${inv.due_date}`,
-          bodyHtml: html,
-          bodyText: `Invoice ${inv.invoice_number}\nTotal: ${inv.currency} ${inv.amount}\nDue: ${inv.due_date}`,
-        });
-        if (ok) sentCount++;
-      }
-
-      if (sentCount > 0 && inv.status === 'draft') {
-        await db.withSuperAdmin(async (c) =>
-          c.query(`UPDATE platform_invoices SET status='sent', updated_at=NOW() WHERE id=$1`, [id]));
-      }
-
-      return reply.send({
-        success: true,
-        data: { sent_to: sentCount, total_recipients: admins.length },
-        message: sentCount > 0
-          ? `Invoice emailed to ${sentCount} of ${admins.length} tenant admin(s)`
-          : `Platform email is not configured (set SENDGRID_API_KEY+SENDGRID_FROM_EMAIL or SYSTEM_SMTP_*). Invoice status unchanged.`,
-      });
-    });
-
     // DELETE /super-admin/platform-invoices/:id (draft only)
     fastify.delete('/platform-invoices/:id', async (req, reply) => {
       const { id } = req.params as { id: string };
@@ -1130,7 +1033,7 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
       const vals: any[] = [];
       if (body.name   !== undefined) { vals.push(body.name);   sets.push(`name = $${vals.length}`); }
       if (body.sector !== undefined) { vals.push(body.sector); sets.push(`sector = $${vals.length}`); }
-      if (body.status !== undefined) { vals.push(body.status); sets.push(`status = $${vals.length}`); }
+      if (body.status !== undefined) { vals.push(body.status === 'active'); sets.push(`is_active = $${vals.length}`); }
       if (!sets.length) return reply.code(400).send({ success: false, error: { code: 'NO_FIELDS', message: 'Nothing to update' } });
       vals.push(id);
       const [updated] = await db.withSuperAdmin(async (client) => {
@@ -1179,8 +1082,8 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
       const hash = await bcrypt.hash(body.password, 12);
       const [user] = await db.withSuperAdmin(async (client) => {
         const r = await client.query(
-          `INSERT INTO users (tenant_id, name, email, role, password_hash, status)
-           VALUES ($1, $2, $3, $4, $5, 'active') RETURNING id, name, email, role, status, created_at`,
+          `INSERT INTO users (tenant_id, name, email, role, password_hash, is_active)
+           VALUES ($1, $2, $3, $4, $5, true) RETURNING id, name, email, role, is_active, created_at`,
           [id, body.name, body.email, body.role, hash],
         );
         // Log password creation
@@ -1211,7 +1114,7 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
       if (body.name   !== undefined) { vals.push(body.name);   sets.push(`name = $${vals.length}`); }
       if (body.email  !== undefined) { vals.push(body.email);  sets.push(`email = $${vals.length}`); }
       if (body.role   !== undefined) { vals.push(body.role);   sets.push(`role = $${vals.length}`); }
-      if (body.status !== undefined) { vals.push(body.status); sets.push(`status = $${vals.length}`); }
+      if (body.status !== undefined) { vals.push(body.status === 'active'); sets.push(`is_active = $${vals.length}`); }
       if (body.password !== undefined) {
         const bcrypt = (await import('bcryptjs')).default;
         const hash = await bcrypt.hash(body.password, 12);
@@ -1222,7 +1125,7 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
       vals.push(uid);
       const [updated] = await db.withSuperAdmin(async (client) => {
         const r = await client.query(
-          `UPDATE users SET ${sets.join(', ')} WHERE id = $${vals.length} RETURNING id, name, email, role, status`,
+          `UPDATE users SET ${sets.join(', ')} WHERE id = $${vals.length} RETURNING id, name, email, role, is_active`,
           vals,
         );
         if (body.password && r.rows[0]) {
@@ -1293,7 +1196,7 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
             t.id, t.name, t.slug, t.plan, t.status, t.sector, t.active_modules,
             t.created_at,
             COUNT(DISTINCT u.id)::int           AS user_count,
-            COUNT(DISTINCT u.id) FILTER (WHERE u.status = 'active')::int AS active_users,
+            COUNT(DISTINCT u.id) FILTER (WHERE u.is_active = true)::int AS active_users,
             COUNT(DISTINCT c.id)::int           AS contact_count,
             COUNT(DISTINCT d.id) FILTER (WHERE d.status = 'open')::int AS open_deals,
             MAX(u.last_login_at)                AS last_activity,
@@ -1388,26 +1291,23 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
     });
 
     // GET /super-admin/reports/audit — cross-tenant audit log
-    // QA fix: ticket_audit_log has no entity_type/entity_id columns (it's
-    // ticket-specific). Synthesize them: entity_type='ticket', entity_id=ticket_id.
-    // Ignore the ?entity= filter for now (only tickets are logged anyway).
     fastify.get('/reports/audit', async (req, reply) => {
-      const { limit = '200', action } = req.query as Record<string, string>;
+      const { limit = '200', entity, action } = req.query as Record<string, string>;
       const rows = await db.withSuperAdmin(async (client) => {
         const r = await client.query(`
           SELECT
-            tal.id, tal.action,
-            'ticket'::text AS entity_type, tal.ticket_id AS entity_id,
+            tal.id, tal.action, tal.entity_type, tal.entity_id,
             tal.old_value, tal.new_value, tal.created_at,
             u.name  AS actor_name,  u.email AS actor_email, u.role AS actor_role,
             t.name  AS tenant_name, t.slug  AS tenant_slug
           FROM ticket_audit_log tal
           LEFT JOIN users   u ON u.id = tal.actor_id
           LEFT JOIN tenants t ON t.id = tal.tenant_id
-          WHERE ($1::text IS NULL OR tal.action = $1)
+          WHERE ($1::text IS NULL OR tal.entity_type = $1)
+            AND ($2::text IS NULL OR tal.action = $2)
           ORDER BY tal.created_at DESC
-          LIMIT $2
-        `, [action || null, parseInt(limit, 10)]);
+          LIMIT $3
+        `, [entity || null, action || null, parseInt(limit, 10)]);
         return r.rows;
       });
       return reply.send({ success: true, data: rows });

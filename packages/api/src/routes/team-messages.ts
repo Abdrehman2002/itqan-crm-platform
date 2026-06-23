@@ -87,7 +87,7 @@ export function teamMessageRoutes(db: DatabaseClient) {
       const { content } = req.body as { content: string };
       if (!content?.trim()) return reply.code(400).send({ success: false, error: { code: 'EMPTY', message: 'Message cannot be empty' } });
 
-      const senderName = [(req.user as any).first_name, (req.user as any).last_name].filter(Boolean).join(' ') || (req.user as any).email;
+      const senderName = (req.user as any).name || (req.user as any).email;
 
       const [row] = await db.withSuperAdmin(async (client) => {
         const res = await client.query(
@@ -104,9 +104,9 @@ export function teamMessageRoutes(db: DatabaseClient) {
     fastify.get('/team-members', async (req, reply) => {
       const rows = await db.withSuperAdmin(async (client) => {
         const res = await client.query(
-          `SELECT id, first_name, last_name, email, role
+          `SELECT id, name, email, role
            FROM users WHERE tenant_id = $1 AND is_active = true
-           ORDER BY first_name, last_name`,
+           ORDER BY name`,
           [req.tenant.id],
         );
         return res.rows;
@@ -142,7 +142,7 @@ export function teamMessageRoutes(db: DatabaseClient) {
       const { content } = req.body as { content: string };
       if (!content?.trim()) return reply.code(400).send({ success: false, error: { code: 'EMPTY', message: 'Message cannot be empty' } });
 
-      const senderName = [(req.user as any).first_name, (req.user as any).last_name].filter(Boolean).join(' ') || (req.user as any).email;
+      const senderName = (req.user as any).name || (req.user as any).email;
 
       const [row] = await db.withSuperAdmin(async (client) => {
         const res = await client.query(

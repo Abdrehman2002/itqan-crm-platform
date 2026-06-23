@@ -134,8 +134,7 @@ export function ticketAnalyticsRoutes(db: DatabaseClient) {
           COALESCE(a.via_voice,0) AS via_voice, COALESCE(a.via_email,0) AS via_email,
           COALESCE(a.via_manual,0) AS via_manual
         FROM periods p LEFT JOIN actuals a USING (period) ORDER BY p.period`
-        .replace('$3_period', `'${q.period}'`)
-        .replace('$3_period', `'${q.period}'`),
+        .replaceAll('$3_period', `'${q.period}'`),
         mvParams,
       );
       return reply.send({ success: true, data: result.rows });

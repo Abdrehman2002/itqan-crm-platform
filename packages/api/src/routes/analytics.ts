@@ -174,7 +174,7 @@ export function analyticsRoutes(db: DatabaseClient) {
         ORDER BY p.period`,
         [tenantId, period, months],
       );
-      return reply.send({ success: true, data: data.rows });
+      return reply.send({ success: true, data });
     });
 
     // Pipeline funnel
@@ -233,7 +233,7 @@ export function analyticsRoutes(db: DatabaseClient) {
         ORDER BY revenue DESC`,
         [tenantId, fromDate, toDate],
       );
-      return reply.send({ success: true, data: result.rows });
+      return reply.send({ success: true, data: result });
     });
 
     // Contact source breakdown — reads from MV
@@ -245,7 +245,7 @@ export function analyticsRoutes(db: DatabaseClient) {
          ORDER BY total DESC`,
         [req.tenant.id],
       );
-      return reply.send({ success: true, data: result.rows });
+      return reply.send({ success: true, data: result });
     });
 
     // MV refresh status — shows when each view was last refreshed and how long it took
@@ -253,7 +253,7 @@ export function analyticsRoutes(db: DatabaseClient) {
       const result = await db.query(
         `SELECT view_name, refreshed_at, duration_ms FROM analytics_refresh_log ORDER BY view_name`,
       );
-      return reply.send({ success: true, data: result.rows });
+      return reply.send({ success: true, data: result });
     });
 
     // ── Backward-compat aliases ──────────────────────────────────────────
@@ -288,19 +288,11 @@ export function analyticsRoutes(db: DatabaseClient) {
       });
 
       const isManager = isAdmin || (scopeIds !== null && scopeIds.length > 1);
-      // Hoisted from below so the humanStats block can skip itself for
-      // tenant_admin (they have their own dashboard component, don't need the
-      // heavy hierarchy leaderboard which was costing 15s of wall-clock).
-      const isTenantAdmin = role === 'tenant_admin';
       // Build safe SQL fragment for filtering by hierarchy (owner/assignee)
       const scopeLiteral = scopeIds
         ? `ARRAY[${scopeIds.map(id => `'${id}'::uuid`).join(',')}]`
         : 'NULL';
-      // NOTE: Qualified with `a.` because the activities recent-list query JOINs contacts,
-      // and contacts also has owner_id — unqualified would throw PG 42702 "ambiguous".
-      // The two unaliased usages (activityStats and humanStats acts) are FROM activities
-      // with no JOIN; the `a.` qualifier still works because we alias those FROM clauses below.
-      const scopeOwnerSql    = scopeIds ? `AND a.owner_id   = ANY(${scopeLiteral})` : '';
+      const scopeOwnerSql    = scopeIds ? `AND owner_id     = ANY(${scopeLiteral})` : '';
       const scopeAssigneeSql = scopeIds ? `AND (assignee_id = ANY(${scopeLiteral}) OR created_by = ANY(${scopeLiteral}))` : '';
       const scopeAgentSql    = scopeIds ? `AND agent_id     = ANY(${scopeLiteral})` : '';
 
@@ -338,9 +330,7 @@ export function analyticsRoutes(db: DatabaseClient) {
       // Agent queries use $1 = userId; manager queries have no params.
 
       // ── Ticket type breakdown ────────────────────────────────────────────
-      // PERF: tenant_admin's dashboard only uses tenantAdminStats. Skip the
-      // 5 agent/manager-flavoured query blocks below to keep response under 2s.
-      const ticketBreakdown = isTenantAdmin ? [] : await db.withTenant(tenantId, async (client) => {
+      const ticketBreakdown = await db.withTenant(tenantId, async (client) => {
         const [sql, params] = resolveDept(`
           SELECT
             COALESCE(ticket_type,'support')                 AS ticket_type,
@@ -361,7 +351,7 @@ export function analyticsRoutes(db: DatabaseClient) {
       });
 
       // ── Call stats ───────────────────────────────────────────────────────
-      const callStats = isTenantAdmin ? {} : await db.withTenant(tenantId, async (client) => {
+      const callStats = await db.withTenant(tenantId, async (client) => {
         const r = await client.query(`
           SELECT
             COUNT(*) FILTER (WHERE status = 'completed')                          AS completed_calls,
@@ -380,7 +370,7 @@ export function analyticsRoutes(db: DatabaseClient) {
       });
 
       // ── Ticket summary totals ────────────────────────────────────────────
-      const myTickets = isTenantAdmin ? {} : await db.withTenant(tenantId, async (client) => {
+      const myTickets = await db.withTenant(tenantId, async (client) => {
         const [sql1, params1] = resolveDept(`
           SELECT
             COUNT(*)                                                              AS total,
@@ -409,7 +399,7 @@ export function analyticsRoutes(db: DatabaseClient) {
       });
 
       // ── Sentiment / ratings ──────────────────────────────────────────────
-      const sentiment = isTenantAdmin ? {} : await db.withTenant(tenantId, async (client) => {
+      const sentiment = await db.withTenant(tenantId, async (client) => {
         const r = await client.query(`
           SELECT
             ROUND(AVG((sentiment->>'score')::numeric) FILTER (WHERE sentiment IS NOT NULL))::int AS avg_sentiment,
@@ -438,7 +428,7 @@ export function analyticsRoutes(db: DatabaseClient) {
       });
 
       // ── Recent tickets (hierarchy-scoped) ───────────────────────────────
-      const recentTickets = isTenantAdmin ? [] : await db.withTenant(tenantId, async (client) => {
+      const recentTickets = await db.withTenant(tenantId, async (client) => {
         const [sql, params] = resolveDept(`
           SELECT t.id, t.ticket_number, t.subject, t.status, t.priority,
                  t.ticket_type, t.created_at, t.sla_due_at, t.assignee_id,
@@ -461,7 +451,7 @@ export function analyticsRoutes(db: DatabaseClient) {
       });
 
       // ── CRM Activities (hierarchy-scoped) ────────────────────────────────
-      const activityStats = isTenantAdmin ? {} : await db.withTenant(tenantId, async (client) => {
+      const activityStats = await db.withTenant(tenantId, async (client) => {
         const r = await client.query(`
           SELECT
             COUNT(*)                                                             AS total,
@@ -475,13 +465,13 @@ export function analyticsRoutes(db: DatabaseClient) {
             COUNT(*) FILTER (WHERE type = 'meeting')                            AS meetings,
             COUNT(*) FILTER (WHERE type = 'task')                               AS tasks,
             COUNT(*) FILTER (WHERE type = 'note')                               AS notes
-          FROM activities a
+          FROM activities
           WHERE 1=1 ${scopeOwnerSql}
         `);
         return r.rows[0] ?? {};
       });
 
-      const recentActivities = isTenantAdmin ? [] : await db.withTenant(tenantId, async (client) => {
+      const recentActivities = await db.withTenant(tenantId, async (client) => {
         const r = await client.query(`
           SELECT a.id, a.type, a.subject, a.status, a.due_at, a.created_at,
                  u.name AS owner_name,
@@ -496,17 +486,11 @@ export function analyticsRoutes(db: DatabaseClient) {
       });
 
       // ════════════════════════════════════════════════════════════════════
-      // BOT STATS — exposed to ALL roles (not just managers).
-      // Agents need to see what the AI voice bot did in their department so
-      // the dashboard can show a clear "Voicebot vs Human Agent" split
-      // (per product feedback — was lumped together before).
-      // The deptBotFilter already scopes by department for non-admin roles.
+      // MANAGER-ONLY BLOCKS
       // ════════════════════════════════════════════════════════════════════
 
       // ── Bot stats (voice_bot_calls) ───────────────────────────────────────
-      // PERF: tenant_admin dashboard doesn't render bot stats — skip the
-      // 3-query block (bot summary + categories + config). Saves ~1-2s.
-      const botStats = isTenantAdmin ? null : await db.withTenant(tenantId, async (client) => {
+      const botStats = isManager ? await db.withTenant(tenantId, async (client) => {
         const [botSql, botParams] = resolveDept(`
           SELECT
             COUNT(*)                                                              AS total_calls,
@@ -547,14 +531,10 @@ export function analyticsRoutes(db: DatabaseClient) {
         `);
 
         return { ...r.rows[0], categories: cats.rows, config: cfg.rows[0] ?? null };
-      });
+      }) : null;
 
       // ── Human agent stats (hierarchy-scoped for managers) ────────────────
-      // PERF: tenant_admin doesn't render this block (TenantAdminDashboard
-      // only reads tenantAdminStats), but isManager is true for them via
-      // `isAdmin || scopeIds.length > 1` — so they were paying for the heavy
-      // leaderboard JOIN (15s). Skip when the caller is tenant_admin.
-      const humanStats = (isManager && !isTenantAdmin) ? await db.withTenant(tenantId, async (client) => {
+      const humanStats = isManager ? await db.withTenant(tenantId, async (client) => {
         const calls = await client.query(`
           SELECT
             COUNT(*) FILTER (WHERE status = 'completed')                         AS completed_calls,
@@ -595,7 +575,7 @@ export function analyticsRoutes(db: DatabaseClient) {
             COUNT(*) FILTER (WHERE type = 'email')   AS act_emails,
             COUNT(*) FILTER (WHERE type = 'meeting') AS act_meetings,
             COUNT(*) FILTER (WHERE type = 'task')    AS act_tasks
-          FROM activities a
+          FROM activities
           WHERE 1=1 ${scopeOwnerSql}
         `);
 
@@ -656,8 +636,9 @@ export function analyticsRoutes(db: DatabaseClient) {
       }) : null;
 
       // ════════════════════════════════════════════════════════════════════
-      // TENANT ADMIN BLOCK  (isTenantAdmin hoisted above for humanStats skip)
+      // TENANT ADMIN BLOCK
       // ════════════════════════════════════════════════════════════════════
+      const isTenantAdmin = role === 'tenant_admin';
       const tenantAdminStats = isTenantAdmin ? await db.withTenant(tenantId, async (client) => {
         // User stats (users table has no RLS — filter by tenant_id)
         const users = await client.query(`

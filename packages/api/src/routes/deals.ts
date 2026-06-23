@@ -235,10 +235,12 @@ export function dealRoutes(db: DatabaseClient, eventBus: EventBus) {
     // Delete deal
     fastify.delete('/:id', { preHandler: requireScope('deals:write') }, async (req, reply) => {
       const { id } = req.params as { id: string };
-      await db.withTenant(req.tenant.id, async (client) => {
+      const deleted = await db.withTenant(req.tenant.id, async (client) => {
         await client.query('UPDATE activities SET deal_id = NULL WHERE deal_id = $1', [id]);
-        await client.query('DELETE FROM deals WHERE id = $1', [id]);
+        const result = await client.query('DELETE FROM deals WHERE id = $1', [id]);
+        return result.rowCount ?? 0;
       });
+      if (!deleted) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Deal not found' } });
       return reply.code(204).send();
     });
 

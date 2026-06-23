@@ -129,9 +129,11 @@ export function companyRoutes(db: DatabaseClient, eventBus: EventBus) {
 
     fastify.delete('/:id', { preHandler: requireScope('contacts:write') }, async (req, reply) => {
       const { id } = req.params as { id: string };
-      await db.withTenant(req.tenant.id, async (client) => {
-        await client.query('DELETE FROM companies WHERE id = $1', [id]);
+      const deleted = await db.withTenant(req.tenant.id, async (client) => {
+        const result = await client.query('DELETE FROM companies WHERE id = $1', [id]);
+        return result.rowCount ?? 0;
       });
+      if (!deleted) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Company not found' } });
       return reply.code(204).send();
     });
   };

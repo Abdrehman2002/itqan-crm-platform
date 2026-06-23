@@ -124,6 +124,8 @@ const SCOPE_MIN_ROLE: Record<ApiScope, number> = {
   'admin:write':      ROLE_LEVEL.tenant_admin,
   'billing:read':     ROLE_LEVEL.agent,
   'billing:manage':   ROLE_LEVEL.manager,
+  'settings:read':    ROLE_LEVEL.manager,
+  'settings:write':   ROLE_LEVEL.tenant_admin,
 };
 
 // Maps scope prefix → permissions map key

@@ -83,7 +83,7 @@ export function opportunityRoutes(db: DatabaseClient) {
         client.query(
           `SELECT o.*,
                   u.name  AS assignee_name,
-                  (c.first_name || ' ' || COALESCE(c.last_name,'')) AS contact_name,
+                  (c.first_name || ' ' || c.last_name) AS contact_name,
                   co.name AS company_name
            FROM sales_opportunities o
            LEFT JOIN users     u  ON u.id  = o.assignee_id
@@ -110,8 +110,7 @@ export function opportunityRoutes(db: DatabaseClient) {
         client.query(
           `SELECT o.*,
                   u.name  AS assignee_name,
-                  (c.first_name || ' ' || COALESCE(c.last_name,'')) AS contact_name,
-                  c.email AS contact_email,
+                  (c.first_name || ' ' || c.last_name) AS contact_name, c.email AS contact_email,
                   co.name AS company_name
            FROM sales_opportunities o
            LEFT JOIN users     u  ON u.id  = o.assignee_id
@@ -150,7 +149,7 @@ export function opportunityRoutes(db: DatabaseClient) {
       );
       const oppNumber = `OPP-${String(counter.current_val).padStart(5, '0')}`;
 
-      const { rows: [opp] } = await db.withTenant(tenantId, async (client) => {
+      const [opp] = await db.withTenant(tenantId, async (client) => {
         const r = await client.query(
           `INSERT INTO sales_opportunities
              (tenant_id, opportunity_number, title, description, assignee_id, contact_id, company_id,
@@ -198,7 +197,7 @@ export function opportunityRoutes(db: DatabaseClient) {
       if (body.kyc_notes       !== undefined) push('kyc_notes',       body.kyc_notes);
       if (body.close_notes     !== undefined) push('close_notes',     body.close_notes);
 
-      const { rows: [opp] } = await db.withTenant(tenantId, async (client) => {
+      const [opp] = await db.withTenant(tenantId, async (client) => {
         const r = await client.query(
           `UPDATE sales_opportunities SET ${sets.join(', ')} WHERE tenant_id=$1 AND id=$2 RETURNING *`,
           vals
