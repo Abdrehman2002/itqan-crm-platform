@@ -447,6 +447,34 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
 
     // Reset the tenant admin password — generates a new temp password, updates the user,
     // emails it to the admin, and returns it in the response for the super admin to relay.
+    // POST /super-admin/users/:id/reset-password — reset ANY user's password
+    // Generic counterpart to /tenants/:id/reset-admin-password (which only
+    // hits the first tenant_admin of a tenant). This one accepts any user_id —
+    // works for tenant_admins, sub-admins, managers, agents, anyone.
+    // Re-added after Option A merge (it was wiped in the wholesale overlay).
+    fastify.post('/users/:id/reset-password', async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const { password } = z.object({ password: z.string().min(8).max(200) }).parse(req.body);
+      const bcrypt = (await import('bcryptjs')).default;
+      const hash   = await bcrypt.hash(password, 12);
+
+      const [u] = await db.withSuperAdmin(async (c) => (await c.query(
+        `UPDATE users SET password_hash = $1, updated_at = NOW()
+         WHERE id = $2 RETURNING id, email, name, role, tenant_id`,
+        [hash, id],
+      )).rows);
+      if (!u) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'User not found' } });
+
+      // Audit: log via super_admin_password_log (migration 025)
+      await db.withSuperAdmin(async (c) =>
+        c.query(`INSERT INTO super_admin_password_log (tenant_id, user_id, action, changed_by, notes)
+                 VALUES ($1, $2, 'reset', $3, $4)`,
+          [u.tenant_id, u.id, (req.user as any)?.sub ?? null, `Password reset via /users/${id}/reset-password`]),
+      ).catch(() => {});
+
+      return reply.send({ success: true, data: u, message: `Password reset for ${u.email}` });
+    });
+
     fastify.post('/tenants/:id/reset-admin-password', async (req, reply) => {
       const { id } = req.params as { id: string };
 
