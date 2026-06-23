@@ -1275,7 +1275,8 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
       const rows = await db.withSuperAdmin(async (client) => {
         const r = await client.query(`
           SELECT
-            pp.id, pp.amount, pp.currency, pp.payment_date, pp.payment_method,
+            pp.id, pp.amount, pp.currency, pp.payment_date,
+            pp.method AS payment_method,
             pp.reference, pp.notes, pp.created_at,
             pi.invoice_number, t.name AS tenant_name, t.slug AS tenant_slug
           FROM platform_payments pp
@@ -1296,14 +1297,18 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
       const rows = await db.withSuperAdmin(async (client) => {
         const r = await client.query(`
           SELECT
-            tal.id, tal.action, tal.entity_type, tal.entity_id,
+            tal.id, tal.action,
+            'ticket'::text AS entity_type,
+            tal.ticket_id  AS entity_id,
             tal.old_value, tal.new_value, tal.created_at,
-            u.name  AS actor_name,  u.email AS actor_email, u.role AS actor_role,
-            t.name  AS tenant_name, t.slug  AS tenant_slug
+            COALESCE(u.name, tal.actor_name) AS actor_name,
+            u.email AS actor_email,
+            u.role  AS actor_role,
+            t.name  AS tenant_name, t.slug AS tenant_slug
           FROM ticket_audit_log tal
           LEFT JOIN users   u ON u.id = tal.actor_id
           LEFT JOIN tenants t ON t.id = tal.tenant_id
-          WHERE ($1::text IS NULL OR tal.entity_type = $1)
+          WHERE ($1::text IS NULL OR $1 = 'ticket')
             AND ($2::text IS NULL OR tal.action = $2)
           ORDER BY tal.created_at DESC
           LIMIT $3

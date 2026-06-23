@@ -128,15 +128,10 @@ export function modulesRoute(moduleRegistry: ModuleRegistry) {
         return reply.send({ success: true, data: [buildAdminModule()] });
       }
 
-      // ── Super Admin is blocked from /api/v1/* anyway, but be defensive ──
-      if (role === 'super_admin') {
-        return reply.send({ success: true, data: [{
-          id: 'super-admin', label: 'Platform', icon: 'Shield',
-          navItems: [{ path: '/super-admin', label: 'Super Admin', icon: 'Shield' }],
-        }] });
-      }
-
-      // ── Manager / Line Manager / Agent / Viewer: dynamic module list ──
+      // ── Super Admin / Manager / Line Manager / Agent / Viewer: dynamic module list ──
+      // Super admin sees the same operational sidebar as a manager (CRM / Voice / Sales
+      // sections from their own tenant's active_modules) PLUS the gold super_admin
+      // footer links that App.tsx renders. This matches Munir's reference UI.
       const activeModuleIds: string[] =
         (tenant as any).active_modules ?? tenant.activeModules ?? ['crm'];
 
@@ -147,8 +142,8 @@ export function modulesRoute(moduleRegistry: ModuleRegistry) {
           ...mod,
           navItems: (mod.navItems ?? []).filter((item: any) => {
             const allowed = PATH_ALLOWED_ROLES[item.path];
-            // Unknown paths default to: visible to everyone EXCEPT tenant_admin
-            if (!allowed) return true;
+            if (!allowed) return true; // unknown paths default visible
+            if (role === 'super_admin') return true; // super_admin sees every operational item
             return allowed.includes(role);
           }),
         }))
