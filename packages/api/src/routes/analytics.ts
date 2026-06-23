@@ -288,6 +288,10 @@ export function analyticsRoutes(db: DatabaseClient) {
       });
 
       const isManager = isAdmin || (scopeIds !== null && scopeIds.length > 1);
+      // Hoisted from below so the humanStats block can skip itself for
+      // tenant_admin (they have their own dashboard component, don't need the
+      // heavy hierarchy leaderboard which was costing 15s of wall-clock).
+      const isTenantAdmin = role === 'tenant_admin';
       // Build safe SQL fragment for filtering by hierarchy (owner/assignee)
       const scopeLiteral = scopeIds
         ? `ARRAY[${scopeIds.map(id => `'${id}'::uuid`).join(',')}]`
@@ -334,7 +338,9 @@ export function analyticsRoutes(db: DatabaseClient) {
       // Agent queries use $1 = userId; manager queries have no params.
 
       // ── Ticket type breakdown ────────────────────────────────────────────
-      const ticketBreakdown = await db.withTenant(tenantId, async (client) => {
+      // PERF: tenant_admin's dashboard only uses tenantAdminStats. Skip the
+      // 5 agent/manager-flavoured query blocks below to keep response under 2s.
+      const ticketBreakdown = isTenantAdmin ? [] : await db.withTenant(tenantId, async (client) => {
         const [sql, params] = resolveDept(`
           SELECT
             COALESCE(ticket_type,'support')                 AS ticket_type,
@@ -355,7 +361,7 @@ export function analyticsRoutes(db: DatabaseClient) {
       });
 
       // ── Call stats ───────────────────────────────────────────────────────
-      const callStats = await db.withTenant(tenantId, async (client) => {
+      const callStats = isTenantAdmin ? {} : await db.withTenant(tenantId, async (client) => {
         const r = await client.query(`
           SELECT
             COUNT(*) FILTER (WHERE status = 'completed')                          AS completed_calls,
@@ -374,7 +380,7 @@ export function analyticsRoutes(db: DatabaseClient) {
       });
 
       // ── Ticket summary totals ────────────────────────────────────────────
-      const myTickets = await db.withTenant(tenantId, async (client) => {
+      const myTickets = isTenantAdmin ? {} : await db.withTenant(tenantId, async (client) => {
         const [sql1, params1] = resolveDept(`
           SELECT
             COUNT(*)                                                              AS total,
@@ -403,7 +409,7 @@ export function analyticsRoutes(db: DatabaseClient) {
       });
 
       // ── Sentiment / ratings ──────────────────────────────────────────────
-      const sentiment = await db.withTenant(tenantId, async (client) => {
+      const sentiment = isTenantAdmin ? {} : await db.withTenant(tenantId, async (client) => {
         const r = await client.query(`
           SELECT
             ROUND(AVG((sentiment->>'score')::numeric) FILTER (WHERE sentiment IS NOT NULL))::int AS avg_sentiment,
@@ -432,7 +438,7 @@ export function analyticsRoutes(db: DatabaseClient) {
       });
 
       // ── Recent tickets (hierarchy-scoped) ───────────────────────────────
-      const recentTickets = await db.withTenant(tenantId, async (client) => {
+      const recentTickets = isTenantAdmin ? [] : await db.withTenant(tenantId, async (client) => {
         const [sql, params] = resolveDept(`
           SELECT t.id, t.ticket_number, t.subject, t.status, t.priority,
                  t.ticket_type, t.created_at, t.sla_due_at, t.assignee_id,
@@ -455,7 +461,7 @@ export function analyticsRoutes(db: DatabaseClient) {
       });
 
       // ── CRM Activities (hierarchy-scoped) ────────────────────────────────
-      const activityStats = await db.withTenant(tenantId, async (client) => {
+      const activityStats = isTenantAdmin ? {} : await db.withTenant(tenantId, async (client) => {
         const r = await client.query(`
           SELECT
             COUNT(*)                                                             AS total,
@@ -475,7 +481,7 @@ export function analyticsRoutes(db: DatabaseClient) {
         return r.rows[0] ?? {};
       });
 
-      const recentActivities = await db.withTenant(tenantId, async (client) => {
+      const recentActivities = isTenantAdmin ? [] : await db.withTenant(tenantId, async (client) => {
         const r = await client.query(`
           SELECT a.id, a.type, a.subject, a.status, a.due_at, a.created_at,
                  u.name AS owner_name,
@@ -498,7 +504,9 @@ export function analyticsRoutes(db: DatabaseClient) {
       // ════════════════════════════════════════════════════════════════════
 
       // ── Bot stats (voice_bot_calls) ───────────────────────────────────────
-      const botStats = await db.withTenant(tenantId, async (client) => {
+      // PERF: tenant_admin dashboard doesn't render bot stats — skip the
+      // 3-query block (bot summary + categories + config). Saves ~1-2s.
+      const botStats = isTenantAdmin ? null : await db.withTenant(tenantId, async (client) => {
         const [botSql, botParams] = resolveDept(`
           SELECT
             COUNT(*)                                                              AS total_calls,
@@ -542,7 +550,11 @@ export function analyticsRoutes(db: DatabaseClient) {
       });
 
       // ── Human agent stats (hierarchy-scoped for managers) ────────────────
-      const humanStats = isManager ? await db.withTenant(tenantId, async (client) => {
+      // PERF: tenant_admin doesn't render this block (TenantAdminDashboard
+      // only reads tenantAdminStats), but isManager is true for them via
+      // `isAdmin || scopeIds.length > 1` — so they were paying for the heavy
+      // leaderboard JOIN (15s). Skip when the caller is tenant_admin.
+      const humanStats = (isManager && !isTenantAdmin) ? await db.withTenant(tenantId, async (client) => {
         const calls = await client.query(`
           SELECT
             COUNT(*) FILTER (WHERE status = 'completed')                         AS completed_calls,
@@ -644,9 +656,8 @@ export function analyticsRoutes(db: DatabaseClient) {
       }) : null;
 
       // ════════════════════════════════════════════════════════════════════
-      // TENANT ADMIN BLOCK
+      // TENANT ADMIN BLOCK  (isTenantAdmin hoisted above for humanStats skip)
       // ════════════════════════════════════════════════════════════════════
-      const isTenantAdmin = role === 'tenant_admin';
       const tenantAdminStats = isTenantAdmin ? await db.withTenant(tenantId, async (client) => {
         // User stats (users table has no RLS — filter by tenant_id)
         const users = await client.query(`
