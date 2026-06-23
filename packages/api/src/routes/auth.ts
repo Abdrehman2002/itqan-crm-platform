@@ -174,23 +174,47 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
       // the email globally and accept only if the matching active user is a
       // super_admin. Any other role still requires the slug — protects tenant
       // login from accidental cross-tenant matches.
+      // PERF: collapse super_admin login from 3 Mumbai round-trips to 1.
+      // Slug-less super_admin path previously did SELECT user → SELECT tenant →
+      // SELECT user-with-role (3 sequential round-trips × ~150ms = 450ms wasted).
+      // Now: single JOIN that returns user + tenant in one trip.
       let tenant: any;
+      let preloadedUser: any = null;
       if (!tenantSlug) {
-        const [maybeSuper] = await db.withSuperAdmin(async (client) => {
+        const [row] = await db.withSuperAdmin(async (client) => {
           const r = await client.query(
-            `SELECT * FROM users WHERE email = $1 AND is_active = true AND role = 'super_admin' LIMIT 1`,
+            `SELECT u.id AS u_id, u.email AS u_email, u.name AS u_name, u.role AS u_role,
+                    u.password_hash, u.permissions, u.custom_role_id, u.tenant_id AS u_tenant,
+                    u.department, u.department_type, u.manager_id,
+                    t.id AS t_id, t.name AS t_name, t.slug AS t_slug,
+                    t.plan AS t_plan, t.status AS t_status, t.sector AS t_sector,
+                    t.settings AS t_settings, t.active_modules AS t_active_modules,
+                    t.entitled_features AS t_entitled_features,
+                    r.name AS role_name, r.color AS role_color, r.permissions AS role_permissions
+             FROM users u
+             JOIN tenants t      ON t.id = u.tenant_id
+             LEFT JOIN roles r   ON r.id = u.custom_role_id
+             WHERE u.email = $1 AND u.is_active = true AND u.role = 'super_admin'
+             LIMIT 1`,
             [body.email],
           );
           return r.rows;
         });
-        if (!maybeSuper) {
+        if (!row) {
           return reply.code(400).send({ success: false, error: { code: 'TENANT_REQUIRED', message: 'Workspace slug required' } });
         }
-        // Load the tenant the super_admin is anchored to (used only for JWT claims)
-        [tenant] = await db.withSuperAdmin(async (client) => {
-          const r = await client.query('SELECT * FROM tenants WHERE id = $1', [maybeSuper.tenant_id]);
-          return r.rows;
-        });
+        tenant = {
+          id: row.t_id, name: row.t_name, slug: row.t_slug, plan: row.t_plan,
+          status: row.t_status, sector: row.t_sector, settings: row.t_settings,
+          active_modules: row.t_active_modules, entitled_features: row.t_entitled_features,
+        };
+        preloadedUser = {
+          id: row.u_id, email: row.u_email, name: row.u_name, role: row.u_role,
+          password_hash: row.password_hash, permissions: row.permissions,
+          custom_role_id: row.custom_role_id, tenant_id: row.u_tenant,
+          department: row.department, department_type: row.department_type, manager_id: row.manager_id,
+          role_name: row.role_name, role_color: row.role_color, role_permissions: row.role_permissions,
+        };
       } else {
         [tenant] = await db.withSuperAdmin(async (client) => {
           const result = await client.query('SELECT * FROM tenants WHERE slug = $1', [tenantSlug]);
@@ -220,7 +244,9 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
         });
       }
 
-      const [user] = await db.withSuperAdmin(async (client) => {
+      // PERF: super_admin slug-less path already loaded user+tenant in one trip
+      // above. Skip the third query for them.
+      const [user] = preloadedUser ? [preloadedUser] : await db.withSuperAdmin(async (client) => {
         const result = await client.query(
           `SELECT u.*, r.name as role_name, r.color as role_color, r.permissions as role_permissions
            FROM users u
