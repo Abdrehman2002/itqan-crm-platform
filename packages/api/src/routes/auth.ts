@@ -468,6 +468,38 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
       }
     });
 
+    // Change password — Munir's PersonalSettings.tsx calls this at /api/v1/auth/change-password.
+    // We mount auth twice in server.ts so the same handler answers at both /auth/* and /api/v1/auth/*.
+    fastify.post('/change-password', async (req, reply) => {
+      try {
+        await req.jwtVerify();
+        const userId   = (req.user as any)?.sub;
+        const tenantId = (req.user as any)?.tenantId;
+        if (!userId || !tenantId) {
+          return reply.code(401).send({ success: false, error: { code: 'UNAUTHORIZED', message: 'Not authenticated' } });
+        }
+        const { currentPassword, newPassword } = req.body as { currentPassword?: string; newPassword?: string };
+        if (!currentPassword || !newPassword || newPassword.length < 8) {
+          return reply.code(400).send({ success: false, error: { code: 'WEAK_PASSWORD', message: 'Password must be at least 8 characters' } });
+        }
+        const bcrypt = await import('bcryptjs');
+        const [row] = await db.withSuperAdmin(async (client) => {
+          const r = await client.query('SELECT password_hash FROM users WHERE id = $1 AND tenant_id = $2', [userId, tenantId]);
+          return r.rows;
+        });
+        if (!row || !(await bcrypt.compare(currentPassword, row.password_hash))) {
+          return reply.code(400).send({ success: false, error: { code: 'WRONG_PASSWORD', message: 'Current password is incorrect' } });
+        }
+        const hash = await bcrypt.hash(newPassword, 12);
+        await db.withSuperAdmin(async (client) => {
+          await client.query('UPDATE users SET password_hash = $1 WHERE id = $2 AND tenant_id = $3', [hash, userId, tenantId]);
+        });
+        return reply.send({ success: true });
+      } catch {
+        return reply.code(401).send({ success: false, error: { code: 'UNAUTHORIZED', message: 'Not authenticated' } });
+      }
+    });
+
     // Heartbeat — frontend pings every 30s while a tab is open.
     // Updates users.last_active_at so manager dashboards can show online/idle/offline.
     // Cheap upsert — no logging, no eventBus, just a single UPDATE.

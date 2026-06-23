@@ -319,6 +319,24 @@ function TicketsTab({ contactId }: { contactId: string }) {
     urgent: 'bg-red-100 text-red-700',
   };
 
+  // Live TAT (turnaround/SLA) indicator for an open ticket. Returns null for
+  // resolved/closed tickets (the clock no longer applies) or when no TAT is set.
+  const tatLabel = (t: any): { text: string; cls: string } | null => {
+    if (['resolved', 'closed'].includes(t.status)) return null;
+    const secs = t.sla_seconds_remaining;
+    if (secs === undefined || secs === null) return null;
+    if (t.is_overdue || secs < 0) {
+      const m = Math.abs(Math.floor(secs / 60));
+      const h = Math.floor(m / 60);
+      return { text: h > 0 ? `TAT breached ${h}h ${m % 60}m` : `TAT breached ${m}m`, cls: 'text-red-600' };
+    }
+    const hrs = Math.floor(secs / 3600);
+    const mins = Math.floor((secs % 3600) / 60);
+    const text = hrs > 0 ? `${hrs}h ${mins}m to TAT` : `${mins}m to TAT`;
+    const cls = secs < 3600 ? 'text-orange-600' : secs < 7200 ? 'text-yellow-600' : 'text-emerald-600';
+    return { text, cls };
+  };
+
   if (tickets.length === 0) {
     return (
       <div className="text-center py-12 text-gray-400">
@@ -340,9 +358,15 @@ function TicketsTab({ contactId }: { contactId: string }) {
             <p className="text-sm font-medium text-gray-900 truncate">{t.subject}</p>
             <p className="text-xs text-gray-400 mt-0.5">{fmtRelative(t.created_at)}</p>
           </div>
-          <span className={`text-xs font-medium capitalize shrink-0 ml-3 ${t.status === 'resolved' || t.status === 'closed' ? 'text-emerald-600' : 'text-blue-600'}`}>
-            {t.status?.replace('_', ' ')}
-          </span>
+          <div className="flex flex-col items-end shrink-0 ml-3 gap-0.5">
+            <span className={`text-xs font-medium capitalize ${t.status === 'resolved' || t.status === 'closed' ? 'text-emerald-600' : 'text-blue-600'}`}>
+              {t.status?.replace('_', ' ')}
+            </span>
+            {(() => {
+              const tat = tatLabel(t);
+              return tat ? <span className={`text-[11px] font-medium ${tat.cls}`}>{tat.text}</span> : null;
+            })()}
+          </div>
         </div>
       ))}
     </div>

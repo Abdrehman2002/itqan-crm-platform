@@ -144,11 +144,6 @@ function InviteModal({ onClose }: { onClose: () => void }) {
   const [departmentType,  setDepartmentType] = useState('');
   const [selectedRoleId,  setSelectedRoleId] = useState('');
   const [managerId,       setManagerId]      = useState('');
-  // Optional: tenant admin can set a password directly → user can log in
-  // immediately without waiting for / depending on email invite delivery.
-  const [setPasswordNow,  setSetPasswordNow] = useState(false);
-  const [password,        setPassword]       = useState('');
-  const [success,         setSuccess]        = useState('');
   const [error,           setError]          = useState('');
 
   // Fetch all roles (system + custom)
@@ -183,21 +178,8 @@ function InviteModal({ onClose }: { onClose: () => void }) {
       department:     department || undefined,
       departmentType: departmentType || undefined,
       manager_id:     managerId || undefined,
-      // Only send a password if the admin enabled the "set now" toggle
-      // AND typed at least 8 chars (mirrors backend schema min).
-      password:       (setPasswordNow && password.length >= 8) ? password : undefined,
     }),
-    onSuccess: (resp: any) => {
-      qc.invalidateQueries({ queryKey: ['team-members'] });
-      // If immediate-login flow ran, show confirmation in modal so the admin
-      // sees that the password was set and can copy it before closing.
-      if (resp?.data?.data?.immediateLogin) {
-        setSuccess(`✓ ${name || email} created. They can log in now with their email + the password you set.`);
-        setTimeout(onClose, 2500);
-      } else {
-        onClose();
-      }
-    },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['team-members'] }); onClose(); },
     onError:   (e: any) => setError(e.response?.data?.error?.message ?? 'Failed to invite user'),
   });
 
@@ -314,33 +296,6 @@ function InviteModal({ onClose }: { onClose: () => void }) {
               </>
             )}
           </div>
-
-          {/* Optional password — sets user's login password directly, no email needed */}
-          <div className="border-t border-gray-100 pt-4 mt-2">
-            <label className="flex items-start gap-2 cursor-pointer">
-              <input type="checkbox" checked={setPasswordNow}
-                onChange={(e) => setSetPasswordNow(e.target.checked)}
-                className="mt-1" />
-              <div className="flex-1">
-                <p className="text-sm font-medium text-gray-900">Set password now</p>
-                <p className="text-xs text-gray-400">User can log in immediately without checking email. Recommended for in-office onboarding.</p>
-              </div>
-            </label>
-            {setPasswordNow && (
-              <div className="mt-2 ml-6">
-                <input type="text" value={password} onChange={(e) => setPassword(e.target.value)}
-                  placeholder="At least 8 characters"
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400 font-mono" />
-                <p className="text-[11px] text-gray-400 mt-1">
-                  Share this password with the user via WhatsApp / Slack / in person. They can change it later from their profile.
-                </p>
-              </div>
-            )}
-          </div>
-
-          {success && (
-            <div className="px-3 py-2 bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs rounded-lg">{success}</div>
-          )}
         </div>
 
         <div className="flex gap-2 px-6 py-4 border-t border-gray-100 shrink-0">
@@ -350,11 +305,11 @@ function InviteModal({ onClose }: { onClose: () => void }) {
           </button>
           <button
             onClick={() => mutation.mutate()}
-            disabled={!email || !roleId || mutation.isPending || (setPasswordNow && password.length < 8)}
+            disabled={!email || !roleId || mutation.isPending}
             className="flex-1 py-2 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700 disabled:opacity-50 flex items-center justify-center gap-2"
           >
             {mutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <UserPlus className="w-3.5 h-3.5" />}
-            {setPasswordNow ? 'Create User' : 'Send Invite'}
+            Send Invite
           </button>
         </div>
       </div>
@@ -1121,13 +1076,15 @@ const TAB_CONTENT: Record<Tab, React.FC> = {
 export function Settings() {
   const [tab, setTab] = useState<Tab>('workspace');
   const TabContent = TAB_CONTENT[tab];
+  const { user } = useAuthStore();
+  const visibleTabs = TABS.filter(t => !(user?.role === 'super_admin' && t.id === 'routing'));
 
   return (
     <div className="flex h-full">
       {/* Sidebar */}
       <div className="w-52 border-r border-gray-100 p-3 space-y-0.5">
         <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider px-3 mb-3">Workspace Settings</p>
-        {TABS.map(({ id, label, icon: Icon }) => (
+        {visibleTabs.map(({ id, label, icon: Icon }) => (
           <button key={id} onClick={() => setTab(id)}
             className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors text-left ${
               tab === id ? 'bg-brand-50 text-brand-700 font-medium' : 'text-gray-600 hover:bg-gray-50'

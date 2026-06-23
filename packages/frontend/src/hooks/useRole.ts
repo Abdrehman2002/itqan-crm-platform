@@ -42,7 +42,11 @@ export function useIsSuperAdmin(): boolean {
   return user?.role === 'super_admin';
 }
 
-/** tenant_admin only — strict (NOT super_admin, NOT manager) */
+/**
+ * tenant_admin only (NOT super_admin). Administrative-only role: manages users,
+ * roles, settings and integrations but has NO visibility of operational data
+ * (CRM, sales, tickets, analytics, billing).
+ */
 export function useIsTenantAdmin(): boolean {
   const { user } = useAuthStore();
   return user?.role === 'tenant_admin';

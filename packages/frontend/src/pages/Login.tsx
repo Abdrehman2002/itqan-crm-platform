@@ -24,11 +24,7 @@ export function LoginPage() {
     setLoading(true);
     try {
       await login(form.email, form.password, isSubdomain ? undefined : form.tenantSlug);
-      // Super admin lives at the platform layer — server.ts blocks them from all
-      // /api/v1/* routes, so /dashboard would 403 every widget. Send them straight
-      // to the super-admin surface.
-      const role = useAuthStore.getState().user?.role;
-      navigate(role === 'super_admin' ? '/super-admin' : '/dashboard');
+      navigate('/dashboard');
     } catch (err: any) {
       setError(err.response?.data?.error?.message ?? 'Invalid credentials. Please try again.');
     } finally {

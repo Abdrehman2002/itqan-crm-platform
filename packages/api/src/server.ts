@@ -315,6 +315,9 @@ async function buildServer() {
 
   // ── Routes ────────────────────────────────────────────────
   await fastify.register(authRoutes(db, redis), { prefix: '/auth' });
+  // Munir's frontend calls /api/v1/auth/change-password (PersonalSettings.tsx);
+  // dual-mount so the same handlers answer at both prefixes.
+  await fastify.register(authRoutes(db, redis), { prefix: '/api/v1/auth' });
   await fastify.register(contactRoutes(db, eventBus), { prefix: '/api/v1/contacts' });
   await fastify.register(dealRoutes(db, eventBus), { prefix: '/api/v1/deals' });
   await fastify.register(activityRoutes(db, eventBus), { prefix: '/api/v1/activities' });

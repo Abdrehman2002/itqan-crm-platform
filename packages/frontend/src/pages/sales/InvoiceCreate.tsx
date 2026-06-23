@@ -67,6 +67,8 @@ export function InvoiceCreate() {
   const totalTax = lines.reduce((s, li) => s + li.taxAmount, 0);
   const total = subtotal + totalTax;
 
+  const [saveError, setSaveError] = useState<string | null>(null);
+
   const createMut = useMutation({
     mutationFn: (status: 'draft' | 'sent') => api.post('/api/v1/sales/invoices', {
       billingContactId: contactId || undefined,
@@ -75,6 +77,10 @@ export function InvoiceCreate() {
       notes: notes || undefined, terms: terms || undefined, status,
     }),
     onSuccess: (res) => navigate(`/sales/invoices/${res.data.data.id}`),
+    onError: (err: any) => {
+      const msg = err?.response?.data?.error?.message ?? err?.response?.data?.message ?? err?.message ?? 'Failed to save invoice';
+      setSaveError(msg);
+    },
   });
 
   const taxOpts = (s.taxRates ?? []).map(t => ({ value: String(t.rate), label: `${t.name} (${t.rate}%)` }));
@@ -201,6 +207,14 @@ export function InvoiceCreate() {
             className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 min-h-[80px] resize-y focus:outline-none focus:ring-2 focus:ring-blue-500" />
         </div>
       </div>
+
+      {/* Save error */}
+      {saveError && (
+        <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-sm text-red-700 flex items-center justify-between">
+          <span>{saveError}</span>
+          <button onClick={() => setSaveError(null)} className="ml-4 text-red-400 hover:text-red-600 font-bold">×</button>
+        </div>
+      )}
 
       {/* Actions */}
       <div className="flex justify-end gap-3 pb-6">

@@ -6,54 +6,58 @@ export const api = axios.create({
   headers: { 'Content-Type': 'application/json' },
 });
 
-// Auto-refresh on 401
-// Guards against:
-//   1. infinite refresh loop — if /auth/refresh itself returns 401, the
-//      interceptor previously caught that 401, tried to refresh again, and
-//      spiralled. Now we skip the interceptor entirely for the refresh URL.
-//   2. parallel-request thundering herd — if 5 widgets all 401 at once, we
-//      previously fired 5 refresh calls. Now they all await the same in-flight
-//      refresh promise.
-let inflightRefresh: Promise<string> | null = null;
+// Single-flight token refresh — all concurrent 401s wait for one refresh attempt
+let isRefreshing = false;
+let pendingResolvers: Array<(token: string) => void> = [];
+let pendingRejectors: Array<(err: unknown) => void> = [];
+
+function flushQueue(err: unknown, token: string | null) {
+  if (token) pendingResolvers.forEach(fn => fn(token));
+  else pendingRejectors.forEach(fn => fn(err));
+  pendingResolvers = [];
+  pendingRejectors = [];
+}
 
 api.interceptors.response.use(
   (res) => res,
   async (error) => {
     const original = error.config;
-    const url = (original?.url ?? '') as string;
-
-    // Don't try to refresh on the refresh endpoint itself, or on login/logout —
-    // a 401 there means the refresh token is gone or invalid. Bounce to login.
-    const isAuthEndpoint = url.includes('/auth/refresh')
-                        || url.includes('/auth/login')
-                        || url.includes('/auth/logout');
-
-    if (error.response?.status === 401 && !original?._retry && !isAuthEndpoint) {
-      original._retry = true;
-      try {
-        // Coalesce concurrent 401s into ONE refresh call.
-        if (!inflightRefresh) {
-          inflightRefresh = api.post('/auth/refresh').then(r => {
-            inflightRefresh = null;
-            return r.data.data.token as string;
-          }).catch(e => { inflightRefresh = null; throw e; });
-        }
-        const newToken = await inflightRefresh;
-        api.defaults.headers.common['Authorization'] = `Bearer ${newToken}`;
-        original.headers['Authorization'] = `Bearer ${newToken}`;
-        import('../store/auth.store').then(({ useAuthStore }) => {
-          useAuthStore.getState().setToken(newToken);
-        });
-        return api(original);
-      } catch {
-        import('../store/auth.store').then(({ useAuthStore }) => {
-          useAuthStore.getState().logout();
-        });
-        if (!window.location.pathname.startsWith('/login')) {
-          window.location.href = '/login';
-        }
-      }
+    if (error.response?.status !== 401 || original._retry) {
+      return Promise.reject(error);
     }
-    return Promise.reject(error);
+
+    if (isRefreshing) {
+      // Another refresh is in flight — queue this request until it resolves
+      return new Promise((resolve, reject) => {
+        pendingResolvers.push((token) => {
+          original.headers['Authorization'] = `Bearer ${token}`;
+          resolve(api(original));
+        });
+        pendingRejectors.push(reject);
+      });
+    }
+
+    original._retry = true;
+    isRefreshing = true;
+
+    try {
+      const { data } = await api.post('/auth/refresh');
+      const newToken = data.data.token;
+      api.defaults.headers.common['Authorization'] = `Bearer ${newToken}`;
+      import('../store/auth.store').then(({ useAuthStore }) => {
+        useAuthStore.getState().setToken(newToken);
+      });
+      flushQueue(null, newToken);
+      return api(original);
+    } catch (err) {
+      flushQueue(err, null);
+      import('../store/auth.store').then(({ useAuthStore }) => {
+        useAuthStore.getState().logout();
+      });
+      window.location.href = '/login';
+      return Promise.reject(err);
+    } finally {
+      isRefreshing = false;
+    }
   },
 );

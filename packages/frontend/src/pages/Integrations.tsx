@@ -15,8 +15,8 @@ const SECTIONS = [
     label: 'Email Configuration',
     icon: Mail,
     color: 'blue',
-    description: 'Configure outbound email for ticket replies, invites and notifications.',
-    connectorIds: ['smtp', 'sendgrid'],
+    description: 'Connect Gmail, Microsoft 365/Outlook, or any SMTP server to send emails to customers and team.',
+    connectorIds: ['gmail', 'microsoft365', 'smtp', 'sendgrid'],
   },
   {
     key: 'sms',
@@ -112,11 +112,37 @@ function ConnectorModal({ connector, onClose }: { connector: any; onClose: () =>
         </div>
 
         <div className="px-6 py-5 space-y-4">
-          <a href={connector.docsUrl} target="_blank" rel="noreferrer"
-            className="inline-flex items-center gap-1.5 text-xs text-brand-600 hover:underline">
-            <ExternalLink className="w-3.5 h-3.5" />
-            Get credentials from {connector.name} dashboard
-          </a>
+          {connector.id === 'microsoft365' && (
+            <div className="bg-blue-50 border border-blue-100 rounded-xl p-3 text-xs text-blue-800 space-y-1.5">
+              <p className="font-semibold">One-time Azure AD setup (5 minutes):</p>
+              <ol className="list-decimal list-inside space-y-1 leading-relaxed">
+                <li>Go to <a href="https://portal.azure.com" target="_blank" rel="noreferrer" className="underline font-medium">portal.azure.com</a> → Azure Active Directory → App registrations → New registration</li>
+                <li>Name it (e.g. "CRM Email Sender"), click Register</li>
+                <li>Copy the <strong>Application (client) ID</strong> and <strong>Directory (tenant) ID</strong></li>
+                <li>Go to <strong>Certificates &amp; secrets</strong> → New client secret → copy the <strong>Value</strong></li>
+                <li>Go to <strong>API permissions</strong> → Add → Microsoft Graph → Application permissions → search <code className="bg-blue-100 px-1 rounded">Mail.Send</code> → Add</li>
+                <li>Click <strong>Grant admin consent</strong> for your organisation</li>
+              </ol>
+            </div>
+          )}
+          {connector.id === 'gmail' && (
+            <div className="bg-yellow-50 border border-yellow-100 rounded-xl p-3 text-xs text-yellow-800 space-y-1">
+              <p className="font-semibold">Gmail App Password required:</p>
+              <ol className="list-decimal list-inside space-y-1 leading-relaxed">
+                <li>Enable 2-Step Verification on your Google Account</li>
+                <li>Go to <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noreferrer" className="underline font-medium">myaccount.google.com/apppasswords</a></li>
+                <li>Select app: Mail → device: Other → Generate</li>
+                <li>Copy the 16-character password shown and paste it below</li>
+              </ol>
+            </div>
+          )}
+          {connector.id !== 'microsoft365' && connector.id !== 'gmail' && (
+            <a href={connector.docsUrl} target="_blank" rel="noreferrer"
+              className="inline-flex items-center gap-1.5 text-xs text-brand-600 hover:underline">
+              <ExternalLink className="w-3.5 h-3.5" />
+              Get credentials from {connector.name} dashboard
+            </a>
+          )}
           {connector.fields.map((field: any) => (
             <div key={field.key}>
               <label className="text-xs font-medium text-gray-600 mb-1 block">

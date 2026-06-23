@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { api } from '../services/api';
 import { useAuthStore } from '../store/auth.store';
+import { useIsSuperAdmin } from '../hooks/useRole';
 import {
   useAppearanceStore, FONT_OPTIONS, FONT_SIZE_OPTIONS, FONT_COLOR_PRESETS,
 } from '../store/appearance.store';
@@ -286,6 +287,7 @@ function NotificationSettings() {
 // ── Security ──────────────────────────────────────────────────────────────────
 
 function SecuritySettings() {
+  const isSuperAdmin = useIsSuperAdmin();
   const [currentPw, setCurrentPw] = useState('');
   const [newPw,     setNewPw]     = useState('');
   const [confirmPw, setConfirmPw] = useState('');
@@ -307,30 +309,40 @@ function SecuritySettings() {
         <h2 className="text-base font-semibold text-gray-900">Security</h2>
         <p className="text-sm text-gray-500 mt-0.5">Manage your password and active sessions.</p>
       </div>
-      <div className="space-y-4">
-        <h3 className="text-sm font-medium text-gray-700">Change Password</h3>
-        {[
-          { label: 'Current Password', value: currentPw, set: setCurrentPw },
-          { label: 'New Password',     value: newPw,     set: setNewPw     },
-          { label: 'Confirm Password', value: confirmPw, set: setConfirmPw },
-        ].map(({ label, value, set }) => (
-          <div key={label}>
-            <label className="text-xs font-medium text-gray-600 mb-1 block">{label}</label>
-            <input type="password" value={value} onChange={(e) => set(e.target.value)}
-              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400" />
+      {isSuperAdmin ? (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 flex gap-3">
+          <Shield className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+          <div>
+            <p className="text-sm font-semibold text-amber-800">Password changes disabled</p>
+            <p className="text-xs text-amber-700 mt-0.5">Super Admin account passwords are locked for security. Contact the platform owner to reset credentials.</p>
           </div>
-        ))}
-        <button
-          disabled={!currentPw || !newPw || newPw !== confirmPw || mutation.isPending}
-          onClick={() => mutation.mutate({ currentPassword: currentPw, newPassword: newPw })}
-          className="flex items-center gap-2 px-4 py-2 bg-brand-600 text-white text-sm rounded-lg hover:bg-brand-700 disabled:opacity-50">
-          {mutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : saved ? <Check className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />}
-          {saved ? 'Password Updated!' : 'Update Password'}
-        </button>
-        {mutation.isError && (
-          <p className="text-xs text-red-500">Failed to update password. Check your current password.</p>
-        )}
-      </div>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <h3 className="text-sm font-medium text-gray-700">Change Password</h3>
+          {[
+            { label: 'Current Password', value: currentPw, set: setCurrentPw },
+            { label: 'New Password',     value: newPw,     set: setNewPw     },
+            { label: 'Confirm Password', value: confirmPw, set: setConfirmPw },
+          ].map(({ label, value, set }) => (
+            <div key={label}>
+              <label className="text-xs font-medium text-gray-600 mb-1 block">{label}</label>
+              <input type="password" value={value} onChange={(e) => set(e.target.value)}
+                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400" />
+            </div>
+          ))}
+          <button
+            disabled={!currentPw || !newPw || newPw !== confirmPw || mutation.isPending}
+            onClick={() => mutation.mutate({ currentPassword: currentPw, newPassword: newPw })}
+            className="flex items-center gap-2 px-4 py-2 bg-brand-600 text-white text-sm rounded-lg hover:bg-brand-700 disabled:opacity-50">
+            {mutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : saved ? <Check className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />}
+            {saved ? 'Password Updated!' : 'Update Password'}
+          </button>
+          {mutation.isError && (
+            <p className="text-xs text-red-500">Failed to update password. Check your current password.</p>
+          )}
+        </div>
+      )}
       <div className="border-t border-gray-100 pt-6 space-y-4">
         <h3 className="text-sm font-medium text-gray-700">Active Sessions</h3>
         <div className="space-y-2">

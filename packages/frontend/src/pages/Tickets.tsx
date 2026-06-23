@@ -32,7 +32,7 @@ import {
   LifeBuoy, PhoneCall, ChevronRight,
   Calendar, TrendingUp, ShieldAlert, Timer,
   Circle, ArrowRightLeft, CornerUpLeft, StickyNote,
-  Reply,
+  Reply, CreditCard,
 } from 'lucide-react';
 import { api } from '../services/api';
 import { useCan } from '../hooks/useRole';
@@ -61,6 +61,8 @@ interface Ticket {
   accepted_at?: string;
   resolved_at?: string;
   created_at: string;
+  ticket_type?: string;
+  deal_id?: string | null;
 }
 
 interface Comment {
@@ -392,14 +394,10 @@ function TicketCard({
 // ── Create ticket modal ────────────────────────────────────────────────────
 function CreateTicketModal({ queues, onClose }: { queues: Queue[]; onClose: () => void }) {
   const qc = useQueryClient();
-  // preferredChannels is multi-select now (customer can pick email + WhatsApp etc.)
-  // issueCategory is the dropdown picked from a preset list per dept (or "Other")
   const [form, setForm] = useState({
     subject: '', description: '', priority: 'medium',
     queueId: '', reporterName: '', reporterEmail: '', reporterPhone: '',
-    reporterWhatsapp: '',
-    preferredChannels: ['email'] as Array<'email' | 'sms' | 'whatsapp' | 'phone'>,
-    issueCategory: '',
+    reporterWhatsapp: '', preferredChannel: 'email' as 'email' | 'sms' | 'whatsapp',
   });
 
   const mutation = useMutation({
@@ -413,18 +411,13 @@ function CreateTicketModal({ queues, onClose }: { queues: Queue[]; onClose: () =
       reporterEmail:    form.reporterEmail    || undefined,
       reporterPhone:     form.reporterPhone     || undefined,
       reporterWhatsapp:  form.reporterWhatsapp  || undefined,
-      // Multi-select: send as array if more than one channel chosen, else single value
-      preferredChannel:  form.preferredChannels.length > 1
-                           ? form.preferredChannels
-                           : (form.preferredChannels[0] ?? 'email'),
-      issueCategory:     form.issueCategory || undefined,
+      preferredChannel:  form.preferredChannel,
     }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['tickets'] });
       qc.invalidateQueries({ queryKey: ['ticket-stats'] });
       onClose();
     },
-    // No onError needed — error.message is rendered in the modal footer below.
   });
 
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
@@ -456,70 +449,34 @@ function CreateTicketModal({ queues, onClose }: { queues: Queue[]; onClose: () =
             </div>
           </div>
 
-          {/* Preferred response channels — MULTI-select (customer can pick more than one) */}
+          {/* Preferred response channel */}
           <div>
-            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Preferred Response Channels</p>
-            <p className="text-xs text-gray-400 mb-2">Tap one or more — customer can prefer multiple ways to be reached</p>
-            <div className="grid grid-cols-4 gap-2">
+            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Preferred Response Channel</p>
+            <p className="text-xs text-gray-400 mb-2">How would the customer like to receive replies?</p>
+            <div className="grid grid-cols-3 gap-2">
               {([
-                { val: 'email',    label: 'Email',    icon: '✉️',  desc: 'Email' },
-                { val: 'sms',      label: 'SMS',      icon: '💬',  desc: 'Text' },
-                { val: 'whatsapp', label: 'WhatsApp', icon: '📱',  desc: 'WhatsApp' },
-                { val: 'phone',    label: 'Phone',    icon: '📞',  desc: 'Call' },
-              ] as const).map(({ val, label, icon, desc }) => {
-                const isSelected = form.preferredChannels.includes(val);
-                return (
+                { val: 'email',    label: 'Email',    icon: '✉️',  desc: 'Reply by email' },
+                { val: 'sms',      label: 'SMS',      icon: '💬',  desc: 'Text message' },
+                { val: 'whatsapp', label: 'WhatsApp', icon: '📱',  desc: 'WhatsApp message' },
+              ] as const).map(({ val, label, icon, desc }) => (
                 <button key={val} type="button"
-                  onClick={() => setForm(f => ({
-                    ...f,
-                    preferredChannels: isSelected
-                      ? f.preferredChannels.filter(c => c !== val)
-                      : [...f.preferredChannels, val],
-                  }))}
+                  onClick={() => setForm(f => ({ ...f, preferredChannel: val }))}
                   className={`flex flex-col items-center gap-1 p-3 rounded-xl border-2 transition-all text-center ${
-                    isSelected
+                    form.preferredChannel === val
                       ? 'border-brand-500 bg-brand-50'
                       : 'border-gray-200 hover:border-gray-300'
                   }`}>
                   <span className="text-lg">{icon}</span>
-                  <span className={`text-xs font-semibold ${isSelected ? 'text-brand-700' : 'text-gray-700'}`}>{label}</span>
+                  <span className={`text-xs font-semibold ${form.preferredChannel === val ? 'text-brand-700' : 'text-gray-700'}`}>{label}</span>
                   <span className="text-[10px] text-gray-400">{desc}</span>
                 </button>
-                );
-              })}
+              ))}
             </div>
           </div>
 
-          {/* Issue section — dropdown of common categories + custom (Other) */}
+          {/* Issue section */}
           <div>
             <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Issue Details</p>
-            <select value={form.issueCategory} onChange={set('issueCategory')}
-              className="w-full bg-white border border-gray-200 text-gray-700 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-brand-500/60 mb-3">
-              <option value="">Select issue category…</option>
-              <optgroup label="Sales">
-                <option value="home_loan">Home Loan inquiry</option>
-                <option value="auto_loan">Auto Loan inquiry</option>
-                <option value="personal_loan">Personal Loan inquiry</option>
-                <option value="gold_loan">Gold Loan inquiry</option>
-                <option value="credit_card">Credit Card inquiry</option>
-              </optgroup>
-              <optgroup label="Complaints">
-                <option value="fraud">Fraud / Unauthorized transaction</option>
-                <option value="wrong_charge">Wrong charge / Disputed transaction</option>
-                <option value="atm_issue">ATM card swallowed / stuck</option>
-                <option value="card_blocked">Card blocked (PIN attempts)</option>
-                <option value="unauth_sms">Unauthorized SMS banking transfer</option>
-              </optgroup>
-              <optgroup label="Support">
-                <option value="password_reset">Password reset</option>
-                <option value="beneficiary_add">Add beneficiary</option>
-                <option value="mobile_banking">Mobile banking issue</option>
-                <option value="statement_download">Statement download</option>
-                <option value="cheque_book">Cheque book request</option>
-                <option value="iban_query">IBAN / account info</option>
-              </optgroup>
-              <option value="other">Other (specify in subject)</option>
-            </select>
             <input value={form.subject} onChange={set('subject')} placeholder="Reason / Subject *"
               className="w-full bg-white border border-gray-200 text-gray-900 placeholder-gray-400 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-brand-500/60 mb-3" />
             <textarea value={form.description} onChange={set('description')} rows={3} placeholder="Describe the problem in detail…"
@@ -543,25 +500,15 @@ function CreateTicketModal({ queues, onClose }: { queues: Queue[]; onClose: () =
             </div>
             <div>
               <p className="text-xs font-medium text-gray-400 mb-1.5">Queue</p>
-              {/* For non-admins: queue is auto-routed to their dept queue server-side.
-                  The dropdown is shown disabled with a hint so users know where it'll land. */}
-              <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-500">
-                Auto-routed to your department queue
-              </div>
+              <select value={form.queueId} onChange={set('queueId')}
+                className="w-full bg-white border border-gray-200 text-gray-700 rounded-xl px-3 py-2 text-sm outline-none focus:border-brand-500/60">
+                <option value="">Default queue</option>
+                {queues.map(q => <option key={q.id} value={q.id}>{q.name}</option>)}
+              </select>
             </div>
           </div>
         </div>
 
-        {/* Inline error — show validation/server failures so user knows why submit silently no-ops */}
-        {mutation.isError && (
-          <div className="mx-6 mb-3 px-3 py-2 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
-            {(() => {
-              const err = mutation.error as any;
-              const resp = err?.response?.data?.error;
-              return resp?.message ?? err?.message ?? 'Failed to create ticket — check required fields.';
-            })()}
-          </div>
-        )}
         <div className="px-6 pb-5 flex gap-2">
           <button onClick={onClose} className="flex-1 py-2.5 border border-gray-200 rounded-xl text-sm text-gray-500 hover:bg-gray-50">Cancel</button>
           <button onClick={() => mutation.mutate()} disabled={!form.subject || mutation.isPending}
@@ -707,7 +654,7 @@ function TicketPanel({ ticketId, onClose }: { ticketId: string; onClose: () => v
   const { data: t, isLoading } = useQuery<TicketDetail>({
     queryKey: ['ticket', ticketId],
     queryFn: async () => (await api.get(`/api/v1/tickets/${ticketId}`)).data.data,
-    refetchInterval: 10_000,   // 10s — react to peer accepts/resolves quickly
+    refetchInterval: 20_000,
   });
 
   const allComments = t?.comments ?? [];
@@ -727,23 +674,7 @@ function TicketPanel({ ticketId, onClose }: { ticketId: string; onClose: () => v
 
   const acceptMutation  = useMutation({ mutationFn: () => api.post(`/api/v1/tickets/${ticketId}/accept`, {}),  onSuccess: invalidate });
   const resolveMutation = useMutation({ mutationFn: () => api.post(`/api/v1/tickets/${ticketId}/resolve`, {}), onSuccess: invalidate });
-  const forwardMutation = useMutation({
-    mutationFn: (team: string) => api.post(`/api/v1/tickets/${ticketId}/forward`, { team }),
-    onSuccess: invalidate,
-  });
-  const reassignMutation = useMutation({
-    mutationFn: (assigneeId: string) => api.post(`/api/v1/tickets/${ticketId}/reassign`, { assigneeId }),
-    onSuccess: invalidate,
-  });
-
-  // Manager-only: list of team members for the Reassign dropdown
-  const isMgr = can.role === 'manager' || can.role === 'line_manager' || can.role === 'tenant_admin' || can.role === 'super_admin';
-  const { data: teamMembers } = useQuery<any[]>({
-    queryKey: ['settings-team-list'],
-    queryFn: async () => (await api.get('/api/v1/settings/team')).data.data,
-    enabled: isMgr,
-    staleTime: 60_000,
-  });
+  const convertMutation = useMutation({ mutationFn: () => api.post(`/api/v1/tickets/${ticketId}/convert-to-deal`, {}), onSuccess: invalidate });
 
   const commentMutation = useMutation({
     mutationFn: () => api.post(`/api/v1/tickets/${ticketId}/comments`, {
@@ -926,44 +857,27 @@ function TicketPanel({ ticketId, onClose }: { ticketId: string; onClose: () => v
                   Mark Resolved
                 </button>
               )}
-              {/* Forward to next team — visible once accepted, hand-off to field/onboarding/etc */}
-              {['accepted','in_progress','pending'].includes(t.status) && (
-                <select
-                  value=""
-                  onChange={(e) => { if (e.target.value) forwardMutation.mutate(e.target.value); e.target.value=''; }}
-                  disabled={forwardMutation.isPending}
-                  className="px-3 py-2 rounded-xl text-xs font-semibold bg-amber-700/60 text-amber-100 hover:bg-amber-700/80 border border-amber-600/40 disabled:opacity-40 cursor-pointer">
-                  <option value="" disabled>📤 Forward to…</option>
-                  <option value="Onboarding Team">🆕 Onboarding Team</option>
-                  <option value="Field Sales Team">🚗 Field Sales Team</option>
-                  <option value="Field Complaints Team">📋 Field Complaints Team</option>
-                  <option value="Operations / Back Office">🏢 Operations / Back Office</option>
-                  <option value="Branch Manager">👔 Branch Manager</option>
-                </select>
-              )}
-              {t.forwarded_to && (
-                <span className="text-[11px] px-2.5 py-1 bg-amber-50 text-amber-700 rounded-full border border-amber-200 flex items-center gap-1">
-                  📤 Forwarded to {t.forwarded_to}
-                </span>
-              )}
-              {/* Manager-only: Reassign to any agent in their dept */}
-              {isMgr && teamMembers && teamMembers.length > 0 && (
-                <select
-                  value={t.assignee_id ?? ''}
-                  onChange={(e) => { if (e.target.value) reassignMutation.mutate(e.target.value); }}
-                  disabled={reassignMutation.isPending}
-                  className="px-3 py-2 rounded-xl text-xs font-semibold bg-cyan-700/60 text-cyan-100 hover:bg-cyan-700/80 border border-cyan-600/40 disabled:opacity-40 cursor-pointer">
-                  <option value="" disabled>👥 Reassign to…</option>
-                  {teamMembers
-                    .filter(m => ['agent','line_manager'].includes(m.role) && m.is_active)
-                    .map(m => (
-                      <option key={m.id} value={m.id}>
-                        {m.name} {m.department ? `(${m.department})` : ''} {m.id === t.assignee_id ? '✓' : ''}
-                      </option>
-                    ))}
-                </select>
+              {/* Sales enquiry → pipeline deal. Shown only for sales tickets.
+                  Once converted, becomes a non-clickable "Deal created" marker. */}
+              {t.ticket_type === 'sales' && (
+                t.deal_id ? (
+                  <span className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-900/40 text-indigo-300 border border-indigo-700/40">
+                    <CheckCircle className="w-3.5 h-3.5" /> Deal created
+                  </span>
+                ) : (
+                  <button onClick={() => convertMutation.mutate()} disabled={convertMutation.isPending}
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600/70 text-white hover:bg-indigo-600 disabled:opacity-40 border border-indigo-500/50">
+                    {convertMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CreditCard className="w-3.5 h-3.5" />}
+                    Convert to Deal
+                  </button>
+                )
               )}
             </div>
+          )}
+          {convertMutation.isError && (
+            <p className="text-[11px] text-red-400">
+              {(convertMutation.error as any)?.response?.data?.error?.message ?? 'Could not convert to a deal.'}
+            </p>
           )}
 
           {/* Info grid */}
@@ -1173,7 +1087,7 @@ export function Tickets() {
 
   // Derive API params
   const params = useMemo(() => {
-    const p: Record<string, string> = { pageSize: '50' };
+    const p: Record<string, string> = { pageSize: '50', channel: 'manual' };
     if (tab !== 'all') p.status = tab;
     if (search)   p.search   = search;
     if (priority) p.priority = priority;
@@ -1183,7 +1097,7 @@ export function Tickets() {
   const { data: statsData } = useQuery<Stats>({
     queryKey: ['ticket-stats'],
     queryFn: async () => (await api.get('/api/v1/tickets/stats')).data.data,
-    refetchInterval: 10_000,   // 10s — keeps summary cards in sync with the list
+    refetchInterval: 30_000,
   });
   const { data: queuesData } = useQuery<Queue[]>({
     queryKey: ['ticket-queues'],
@@ -1195,7 +1109,7 @@ export function Tickets() {
       const qs = new URLSearchParams(params).toString();
       return (await api.get(`/api/v1/tickets?${qs}`)).data;
     },
-    refetchInterval: 10_000,   // 10s — tickets accepted by peer agents drop out within 10s
+    refetchInterval: 20_000,
   });
 
   const tickets = ticketsData?.data ?? [];
@@ -1228,7 +1142,7 @@ export function Tickets() {
             </div>
             <div>
               <h1 className="text-lg font-bold text-gray-900">Support Tickets</h1>
-              <p className="text-xs text-gray-400">All tickets across every channel</p>
+              <p className="text-xs text-gray-400">Manually created tickets</p>
             </div>
           </div>
           {can.writeRecords && (

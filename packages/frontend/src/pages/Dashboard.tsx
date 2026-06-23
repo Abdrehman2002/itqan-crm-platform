@@ -7,7 +7,6 @@
  * Tenant Admin → Users & Roles overview, Voice Bot health, Email health
  */
 
-import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import {
@@ -151,22 +150,8 @@ function AgentDashboard({ d, department, deptType }: { d: any; department: strin
   const { data: tatData } = useQuery({
     queryKey: ['agent-tat-dashboard'],
     queryFn: () => api.get('/api/v1/tickets/dashboard/agent').then(r => r.data.data),
-    refetchInterval: 60_000,
-    staleTime: 45_000,
-    placeholderData: (prev) => prev,
+    refetchInterval: 30_000,
   });
-
-  // /tickets/stats now returns bot_* and manual_* counters split by ticket
-  // origin (channel='voice_bot' vs not). Used by the two-tab dashboard so
-  // each tab shows the lifecycle of THAT tab's tickets.
-  const { data: ticketStats } = useQuery<any>({
-    queryKey: ['ticket-stats-bucketed'],
-    queryFn: () => api.get('/api/v1/tickets/stats').then(r => r.data.data),
-    refetchInterval: 60_000,
-    staleTime: 45_000,
-    placeholderData: (prev) => prev,
-  });
-  const ts = ticketStats ?? {};
 
   const callsToday     = Number(calls.calls_today     ?? 0);
   const completedToday = Number(calls.completed_today ?? 0);
@@ -186,77 +171,13 @@ function AgentDashboard({ d, department, deptType }: { d: any; department: strin
     { name: 'Resolved ✓', value: Number(tickets.resolved_today ?? 0), fill: C.green },
   ];
 
-  // Bot stats now exposed to all roles. Two-tab layout: Voice Bot (AI handled)
-  // vs Manual / Human (what the agent personally did). Per Munir's request —
-  // keeps the two completely separate so it's clear what's bot work vs human work.
-  const bot = d.botStats ?? {};
-  const botCallsToday = Number(bot.calls_today    ?? 0);
-  const botTicketsCreated = Number(bot.tickets_created ?? 0);
-  const botAvgDuration    = Number(bot.avg_duration_secs ?? 0);
-  const botUrgent         = Number(bot.urgent ?? 0) + Number(bot.negative ?? 0);
-  const botPositive       = Number(bot.positive ?? 0);
-  const botUntriaged      = Number(bot.untriaged ?? 0);
-
-  // Default tab is 'bot' — bot-generated tickets are the primary view
-  // per product feedback. Manual is secondary.
-  const [activeTab, setActiveTab] = useState<'manual' | 'bot'>('bot');
-
   return (
     <div className="space-y-5">
 
-      {/* Tab switcher — Tickets split by ORIGIN. Bot first per priority. */}
-      <div className="flex gap-1 p-1 bg-gray-100 rounded-xl w-fit">
-        <button onClick={() => setActiveTab('bot')}
-          className={`px-4 py-1.5 text-sm font-semibold rounded-lg transition-all ${
-            activeTab === 'bot' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-          }`}>
-          🤖 Bot-Generated ({ts.bot_total ?? 0})
-        </button>
-        <button onClick={() => setActiveTab('manual')}
-          className={`px-4 py-1.5 text-sm font-semibold rounded-lg transition-all ${
-            activeTab === 'manual' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-          }`}>
-          🧑 Manually Created ({ts.manual_total ?? 0})
-        </button>
-      </div>
-
-      {activeTab === 'bot' && (
-        <>
-          {/* Bot tab — tickets ORIGINATED by Nadia/Sara/Zara (handled by the team). */}
-          <SectionHeader icon={Ticket} label={`Bot-Originated Tickets — ${deptLabel ?? 'My Dept'}`} accent={C.cyan} />
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-            <StatCard label="Total (Bot)"  value={ts.bot_total       ?? 0} sub={`${ts.bot_created_today ?? 0} created today`} icon={Ticket}        accent={C.cyan}  />
-            <StatCard label="Open"         value={ts.bot_open        ?? 0} sub="Awaiting accept"                              icon={Inbox}         accent="#3b82f6" trend={Number(ts.bot_open) > 5 ? 'warn' : undefined} />
-            <StatCard label="In Progress"  value={ts.bot_in_progress ?? 0} sub="Being worked on"                              icon={Activity}      accent={C.gold}  />
-            <StatCard label="Resolved"     value={ts.bot_resolved    ?? 0} sub="Closed by team"                               icon={CheckCircle2}  accent={C.green} />
-          </div>
-          <SectionHeader icon={Phone} label={`Bot Call Health — ${deptLabel ?? 'My Dept'}`} accent={C.green} />
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-            <StatCard label="Bot Calls Today"   value={botCallsToday}           sub="Calls handled by AI"        icon={PhoneCall}   accent={C.cyan}   />
-            <StatCard label="Avg Bot Call Time" value={fmtSecs(botAvgDuration)} sub="per completed call"          icon={Timer}       accent={C.green}  />
-            <Link to="/voice-bot/calls?filter=untriaged" title="Bot calls where the AI couldn't categorize the issue and no ticket was created — click to review and manually triage">
-              <StatCard label="Untriaged"       value={botUntriaged} sub="Click → review uncategorised bot calls" icon={AlertTriangle} accent={botUntriaged > 0 ? C.gold : C.green} trend={botUntriaged > 0 ? 'warn' : undefined} />
-            </Link>
-            <StatCard label="Urgent / Negative" value={botUrgent}               sub="Flagged for follow-up"       icon={PhoneMissed} accent={botUrgent > 0 ? C.orange : C.green} trend={botUrgent > 0 ? 'warn' : undefined} />
-          </div>
-        </>
-      )}
-
-      {activeTab === 'manual' && (
-        <>
-      {/* Manual tab — tickets CREATED BY HUMANS (channel != voice_bot). */}
-      <SectionHeader icon={Ticket} label={`Manually-Created Tickets — ${deptLabel ?? 'My Dept'}`} accent={C.purple} />
+      {/* My Calls */}
+      <SectionHeader icon={Phone} label="My Calls — Today (Calls I Received)" />
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-        <StatCard label="Total (Manual)" value={ts.manual_total       ?? 0} sub={`${ts.manual_created_today ?? 0} created today`} icon={Ticket}       accent={C.purple} />
-        <StatCard label="Open"           value={ts.manual_open        ?? 0} sub="Awaiting accept"                                 icon={Inbox}        accent="#3b82f6"  trend={Number(ts.manual_open) > 5 ? 'warn' : undefined} />
-        <StatCard label="In Progress"    value={ts.manual_in_progress ?? 0} sub="Being worked on"                                 icon={Activity}     accent={C.gold}   />
-        <StatCard label="Resolved"       value={ts.manual_resolved    ?? 0} sub="Closed by team"                                  icon={CheckCircle2} accent={C.green}  />
-      </div>
-
-      {/* ── My Human Calls — Today (only what I personally handled) ── */}
-      <SectionHeader icon={Phone} label="My Calls — Today (Calls I Personally Handled)" accent={C.green} />
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-        <StatCard label="Calls I Handled" value={callsToday}       sub={`${completedToday} answered`}           icon={PhoneCall}   accent={C.cyan}  trend="up" />
+        <StatCard label="Calls Received"  value={callsToday}       sub={`${completedToday} answered`}           icon={PhoneCall}   accent={C.cyan}  trend="up" />
         <StatCard label="Avg Talk Time"   value={fmtSecs(calls.avg_duration_today)} sub="per answered call"     icon={Timer}       accent={C.green} />
         <StatCard label="In Queue Now"    value={inQueue}          sub={inQueue > 0 ? 'Waiting' : 'Queue clear'} icon={Headphones}  accent={inQueue > 0 ? C.orange : C.green} trend={inQueue > 0 ? 'warn' : undefined} />
         <StatCard label="Drop Rate"       value={`${dropRate}%`}   sub={`${droppedToday} unanswered`}           icon={PhoneMissed} accent={dropRate > 20 ? C.red : C.gold}   trend={dropRate > 20 ? 'warn' : undefined} />
@@ -469,8 +390,6 @@ function AgentDashboard({ d, department, deptType }: { d: any; department: strin
           }
         </div>
       </div>
-        </>
-      )}
     </div>
   );
 }
@@ -632,18 +551,8 @@ function ManagerDashboard({ d, department, deptType }: { d: any; department: str
   const { data: teamData } = useQuery({
     queryKey: ['manager-team-dashboard'],
     queryFn: () => api.get('/api/v1/tickets/dashboard/team').then(r => r.data.data),
-    refetchInterval: 60_000,
-    staleTime: 45_000,
-    placeholderData: (prev) => prev,
+    refetchInterval: 30_000,
   });
-
-  // Bot vs Manual ticket counts (channel-bucketed) for the tab badges
-  const { data: mTicketStats } = useQuery<any>({
-    queryKey: ['ticket-stats-mgr-bucketed'],
-    queryFn: () => api.get('/api/v1/tickets/stats').then(r => r.data.data),
-    refetchInterval: 60_000, staleTime: 45_000, placeholderData: (prev) => prev,
-  });
-  const mts = mTicketStats ?? {};
   const hCalls   = human.calls      ?? {};
   const hTickets = human.tickets    ?? {};
   const hActs    = human.activities ?? {};
@@ -672,52 +581,9 @@ function ManagerDashboard({ d, department, deptType }: { d: any; department: str
     { name: 'Complaint',  value: Number(hTickets.complaint_tickets ?? 0), color: C.orange },
   ].filter(x => x.value > 0);
 
-  // Default tab is 'bot' (per product feedback — bot-generated is shown first,
-  // manual is secondary). Bot tab carries all team operational widgets
-  // (TAT rollup, team breakdown, human agents, leaderboard, recent tickets)
-  // because those mostly reflect bot tickets accepted by the team.
-  const [activeTab, setActiveTab] = useState<'manual' | 'bot'>('bot');
-
   return (
     <div className="space-y-5">
 
-      {/* Tab switcher — Tickets split by ORIGIN. Bot first per priority. */}
-      <div className="flex gap-1 p-1 bg-gray-100 rounded-xl w-fit">
-        <button onClick={() => setActiveTab('bot')}
-          className={`px-4 py-1.5 text-sm font-semibold rounded-lg transition-all ${
-            activeTab === 'bot' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-          }`}>
-          🤖 Bot-Generated ({mts.bot_total ?? 0})
-        </button>
-        <button onClick={() => setActiveTab('manual')}
-          className={`px-4 py-1.5 text-sm font-semibold rounded-lg transition-all ${
-            activeTab === 'manual' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-          }`}>
-          🧑 Manually Created ({mts.manual_total ?? 0})
-        </button>
-      </div>
-
-      {/* Manual tab — minimal: ONLY manual ticket lifecycle counts.
-            No team breakdown, no leaderboard, no human agents section per
-            product feedback (those are about bot tickets accepted by team). */}
-      {activeTab === 'manual' && (
-        <>
-          <SectionHeader icon={Ticket} label={`Manually-Created Tickets — ${deptLabel ?? 'My Dept'}`} accent={C.purple} />
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-            <StatCard label="Total (Manual)" value={mts.manual_total       ?? 0} sub={`${mts.manual_created_today ?? 0} created today`} icon={Ticket}       accent={C.purple} />
-            <StatCard label="Open"           value={mts.manual_open        ?? 0} sub="Awaiting accept"                                  icon={Inbox}        accent="#3b82f6"  trend={Number(mts.manual_open) > 5 ? 'warn' : undefined} />
-            <StatCard label="In Progress"    value={mts.manual_in_progress ?? 0} sub="Being worked on"                                  icon={Activity}     accent={C.gold}   />
-            <StatCard label="Resolved"       value={mts.manual_resolved    ?? 0} sub="Closed by team"                                   icon={CheckCircle2} accent={C.green}  />
-          </div>
-          <div className="bg-white rounded-xl border border-gray-100 p-5 text-sm text-gray-500 text-center">
-            Tickets created manually by agents in this department.
-            For team performance on bot-routed tickets, switch to the <strong>Bot-Generated</strong> tab.
-          </div>
-        </>
-      )}
-
-      {activeTab === 'bot' && (
-        <>
       {/* ── Team TAT Rollup ────────────────────────────────── */}
       {teamData && (
         <>
@@ -725,11 +591,9 @@ function ManagerDashboard({ d, department, deptType }: { d: any; department: str
           <TeamBreakdownTable agents={teamData.agents ?? []} />
         </>
       )}
-        </>
-      )}
 
-      {activeTab === 'bot' && (
-      <div className="grid grid-cols-1 gap-5">
+      {/* ── Two-column panels: Bot | Human ─────────────────── */}
+      <div className="grid grid-cols-2 gap-5">
 
         {/* ── AI VOICE BOT ──────────────────────────────────── */}
         <div className="space-y-4">
@@ -753,9 +617,7 @@ function ManagerDashboard({ d, department, deptType }: { d: any; department: str
             <StatCard label="Total Bot Calls"   value={bot.calls_30d      ?? 0}  sub="Last 30 days"             icon={Bot}         accent={C.purple} />
             <StatCard label="Calls Today"        value={bot.calls_today    ?? 0}  sub={`${bot.completed ?? 0} completed`} icon={PhoneCall}   accent={C.cyan}   trend="up" />
             <StatCard label="Tickets Created"    value={bot.tickets_created ?? 0} sub="Auto-generated"           icon={Ticket}      accent={C.green}  trend="up" />
-            <Link to="/voice-bot/calls?filter=untriaged" title="Bot calls where the AI couldn't categorize the issue and no ticket was created — click to review and manually triage">
-              <StatCard label="Untriaged"          value={bot.untriaged      ?? 0}  sub="Click → review (no ticket linked)"         icon={AlertTriangle} accent={bot.untriaged > 0 ? C.orange : C.green} trend={Number(bot.untriaged) > 0 ? 'warn' : undefined} />
-            </Link>
+            <StatCard label="Untriaged"          value={bot.untriaged      ?? 0}  sub="No ticket linked"         icon={AlertTriangle} accent={bot.untriaged > 0 ? C.orange : C.green} trend={Number(bot.untriaged) > 0 ? 'warn' : undefined} />
             <StatCard label="Avg Call Duration"  value={fmtSecs(bot.avg_duration_secs)} sub="Bot handled"        icon={Timer}       accent={C.gold}   />
             <StatCard label="Failed Calls"       value={bot.failed         ?? 0}  sub="Error / no answer"        icon={PhoneMissed} accent={Number(bot.failed) > 0 ? C.red : C.green} trend={Number(bot.failed) > 0 ? 'warn' : undefined} />
           </div>
@@ -795,12 +657,8 @@ function ManagerDashboard({ d, department, deptType }: { d: any; department: str
             </div>
           )}
         </div>
-      </div>
-      )}
 
-      {activeTab === 'bot' && (
-        <>
-        {/* ── HUMAN AGENTS handling bot tickets (per product feedback) ───── */}
+        {/* ── HUMAN AGENTS ──────────────────────────────────── */}
         <div className="space-y-4">
           <div className="flex items-center gap-2">
             <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: `${C.cyan}18` }}>
@@ -883,6 +741,7 @@ function ManagerDashboard({ d, department, deptType }: { d: any; department: str
             </div>
           </div>
         </div>
+      </div>
 
       {/* ── Agent Leaderboard (full width) ─────────────────── */}
       {agents.length > 0 && (
@@ -977,8 +836,6 @@ function ManagerDashboard({ d, department, deptType }: { d: any; department: str
             ))}
           </div>
         </div>
-      )}
-        </>
       )}
     </div>
   );
@@ -1277,19 +1134,16 @@ export function Dashboard() {
   const { data, isLoading, dataUpdatedAt, refetch, isFetching } = useQuery({
     queryKey: ['ops-dashboard'],
     queryFn: () => api.get('/api/v1/analytics/ops-dashboard').then(r => r.data.data),
-    refetchInterval: 60_000,         // poll every 60s instead of 30s — endpoint is heavy (~15 sequential queries)
-    staleTime: 45_000,               // treat data as fresh for 45s — no refetch on tab/nav within that window
-    placeholderData: (prev) => prev, // show last result instantly on navigation, refetch silently in background
+    refetchInterval: 30_000,
   });
 
   const isTenantAdmin = role === 'tenant_admin';
-  const isManager     = ['manager','line_manager','super_admin'].includes(role);
+  const isManager     = ['manager','super_admin'].includes(role);
 
   const roleLabel = role === 'tenant_admin' ? 'Admin View'
-    : role === 'manager'      ? 'Manager View'
-    : role === 'line_manager' ? 'Line Manager View'
-    : role === 'super_admin'  ? 'Super Admin View'
-    : role === 'agent'        ? 'Agent View'
+    : role === 'manager'     ? 'Manager View'
+    : role === 'super_admin' ? 'Super Admin View'
+    : role === 'agent'       ? 'Agent View'
     : 'Viewer View';
 
   // Quick action bar varies by role

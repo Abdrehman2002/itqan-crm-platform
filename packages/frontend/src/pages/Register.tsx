@@ -149,12 +149,7 @@ export function RegisterPage() {
     e.preventDefault();
     setError('');
     if (form.password !== form.confirm) { setError('Passwords do not match'); return; }
-    // Match the API's full ruleset so users don't get a confusing server-side error after submit.
-    if (form.password.length < 8)              { setError('Password must be at least 8 characters'); return; }
-    if (!/[A-Z]/.test(form.password))           { setError('Password must contain at least one UPPERCASE letter (A-Z)'); return; }
-    if (!/[a-z]/.test(form.password))           { setError('Password must contain at least one lowercase letter (a-z)'); return; }
-    if (!/[0-9]/.test(form.password))           { setError('Password must contain at least one number (0-9)'); return; }
-    if (!/[^A-Za-z0-9]/.test(form.password))    { setError('Password must contain at least one special character (!, @, #, etc.)'); return; }
+    if (form.password.length < 8) { setError('Password must be at least 8 characters'); return; }
     setLoading(true);
     try {
       await api.post('/auth/register', {
@@ -276,37 +271,14 @@ export function RegisterPage() {
                 <div>
                   <label className="block text-xs text-blue-200 mb-1">Password *</label>
                   <input type="password" value={form.password} onChange={set('password')} required minLength={8}
-                    placeholder="At least 8 chars + upper + lower + number + symbol"
+                    placeholder="Min 8 characters"
                     className="w-full bg-white/10 border border-white/20 rounded-xl px-3 py-2.5 text-sm text-white placeholder-white/30 focus:outline-none focus:border-blue-400" />
-                  {/* Live password requirements — show only after user starts typing */}
-                  {form.password.length > 0 && (() => {
-                    const checks = [
-                      { label: '8+ characters',   ok: form.password.length >= 8 },
-                      { label: 'uppercase A-Z',   ok: /[A-Z]/.test(form.password) },
-                      { label: 'lowercase a-z',   ok: /[a-z]/.test(form.password) },
-                      { label: 'number 0-9',      ok: /[0-9]/.test(form.password) },
-                      { label: 'symbol !@#$',     ok: /[^A-Za-z0-9]/.test(form.password) },
-                    ];
-                    return (
-                      <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
-                        {checks.map((c) => (
-                          <span key={c.label} className={`flex items-center gap-1 ${c.ok ? 'text-emerald-300' : 'text-white/40'}`}>
-                            <span className="font-mono w-3">{c.ok ? '✓' : '○'}</span> {c.label}
-                          </span>
-                        ))}
-                      </div>
-                    );
-                  })()}
                 </div>
                 <div>
                   <label className="block text-xs text-blue-200 mb-1">Confirm Password *</label>
                   <input type="password" value={form.confirm} onChange={set('confirm')} required
                     placeholder="Repeat password"
                     className="w-full bg-white/10 border border-white/20 rounded-xl px-3 py-2.5 text-sm text-white placeholder-white/30 focus:outline-none focus:border-blue-400" />
-                  {/* Mismatch hint — only after user types in Confirm field */}
-                  {form.confirm.length > 0 && form.confirm !== form.password && (
-                    <p className="mt-1 text-[11px] text-amber-300 flex items-center gap-1">○ Passwords don't match yet</p>
-                  )}
                 </div>
               </div>
             </div>
