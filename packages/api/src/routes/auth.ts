@@ -170,14 +170,57 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
       if (!tenantSlug && host.endsWith(`.${platformDomain}`)) {
         tenantSlug = host.replace(`.${platformDomain}`, '');
       }
-      if (!tenantSlug) {
-        return reply.code(400).send({ success: false, error: { code: 'TENANT_REQUIRED', message: 'Workspace slug required' } });
-      }
 
-      const [tenant] = await db.withSuperAdmin(async (client) => {
-        const result = await client.query('SELECT * FROM tenants WHERE slug = $1', [tenantSlug]);
-        return result.rows;
-      });
+      // BUG-M fix: slug-less super_admin login.
+      // Super admin accounts don't belong to a single workspace, so the login
+      // form leaves the slug empty. Resolve their tenant via a single JOIN that
+      // requires role='super_admin' AND active. Returns same INVALID_CREDENTIALS
+      // as a wrong password to prevent enumerating super admin emails.
+      let tenant: any;
+      let preloadedUser: any = null;
+      if (!tenantSlug) {
+        const [row] = await db.withSuperAdmin(async (client) => {
+          const r = await client.query(
+            `SELECT u.id AS u_id, u.email AS u_email, u.name AS u_name, u.role AS u_role,
+                    u.password_hash, u.permissions, u.custom_role_id, u.tenant_id AS u_tenant,
+                    u.department, u.department_type, u.manager_id, u.is_active,
+                    t.id AS t_id, t.name AS t_name, t.slug AS t_slug,
+                    t.plan AS t_plan, t.status AS t_status, t.sector AS t_sector,
+                    t.settings AS t_settings, t.active_modules AS t_active_modules,
+                    t.entitled_features AS t_entitled_features,
+                    r.name AS role_name, r.color AS role_color, r.permissions AS role_permissions
+             FROM users u
+             JOIN tenants t      ON t.id = u.tenant_id
+             LEFT JOIN roles r   ON r.id = u.custom_role_id
+             WHERE u.email = $1 AND u.is_active = true AND u.role = 'super_admin'
+             LIMIT 1`,
+            [body.email],
+          );
+          return r.rows;
+        });
+        if (!row) {
+          return reply.code(401).send({ success: false, error: { code: 'INVALID_CREDENTIALS', message: 'Invalid credentials' } });
+        }
+        tenant = {
+          id: row.t_id, name: row.t_name, slug: row.t_slug, plan: row.t_plan,
+          status: row.t_status, sector: row.t_sector, settings: row.t_settings,
+          active_modules: row.t_active_modules, entitled_features: row.t_entitled_features,
+        };
+        preloadedUser = {
+          id: row.u_id, email: row.u_email, name: row.u_name, role: row.u_role,
+          password_hash: row.password_hash, permissions: row.permissions,
+          custom_role_id: row.custom_role_id, tenant_id: row.u_tenant,
+          department: row.department, department_type: row.department_type,
+          manager_id: row.manager_id, is_active: row.is_active,
+          role_name: row.role_name, role_color: row.role_color, role_permissions: row.role_permissions,
+        };
+      } else {
+        const [row] = await db.withSuperAdmin(async (client) => {
+          const result = await client.query('SELECT * FROM tenants WHERE slug = $1', [tenantSlug]);
+          return result.rows;
+        });
+        tenant = row;
+      }
       if (!tenant) {
         // Use same error as invalid credentials to prevent tenant enumeration
         return reply.code(401).send({ success: false, error: { code: 'INVALID_CREDENTIALS', message: 'Invalid credentials' } });
@@ -202,7 +245,10 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
         });
       }
 
-      const [user] = await db.withSuperAdmin(async (client) => {
+      // BUG-M: super_admin path pre-loaded user in the same JOIN as the tenant
+      // to save a DB round-trip and let slug-less login work. Skip this second
+      // lookup when we already have the user object.
+      const [user] = preloadedUser ? [preloadedUser] : await db.withSuperAdmin(async (client) => {
         const result = await client.query(
           `SELECT u.*, r.name as role_name, r.color as role_color, r.permissions as role_permissions
            FROM users u
