@@ -426,8 +426,20 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
     // Refresh token — re-validates user is still active before issuing new token
     fastify.post('/refresh', async (req, reply) => {
       try {
-        await req.jwtVerify();
+        // Refresh tokens MUST accept slightly-expired access tokens — that's
+        // the whole reason for the refresh flow. Default jwtVerify rejects
+        // expired tokens, which caused an infinite refresh→401→refresh loop
+        // on the frontend (browser had stale token, kept retrying).
+        // Allow tokens expired within the last 7 days; older than that
+        // requires a fresh login.
+        await (req as any).jwtVerify({ ignoreExpiration: true });
         const payload = req.user as any;
+        // Reject tokens that have been expired for more than 7 days —
+        // these are likely stolen / abandoned sessions, not real users.
+        const ageDays = payload.exp ? (Date.now() / 1000 - payload.exp) / 86400 : 0;
+        if (ageDays > 7) {
+          return reply.code(401).send({ success: false, error: { code: 'TOKEN_TOO_OLD', message: 'Session expired, please log in again' } });
+        }
 
         // Verify user and tenant are still active (prevents deactivated users from refreshing)
         const [row] = await db.withSuperAdmin(async (client) => {
