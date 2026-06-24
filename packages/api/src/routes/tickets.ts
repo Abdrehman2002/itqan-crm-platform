@@ -712,18 +712,39 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
 
     fastify.post('/sla-policies', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const body = CreateSlaSchema.parse(req.body);
+      // BUG-L fix: original INSERT silently dropped business_hours_schedule + pause_on_pending.
+      // Made the param positions explicit by name + added ::jsonb casts so pg never silently
+      // coerces the text payload to null.
+      const bhSched = body.businessHoursSchedule !== undefined
+        ? JSON.stringify(body.businessHoursSchedule)
+        : null;
+      const remSched = body.reminderSchedule !== undefined
+        ? JSON.stringify(body.reminderSchedule)
+        : null;
       const [policy] = await db.withTenant(req.tenant.id, async (client) => {
         const r = await client.query(
            `INSERT INTO sla_policies
               (tenant_id, name, description, priority, first_response_hours, resolution_hours,
                reminder_pct, l1_escalation_pct, l2_escalation_pct, business_hours_only,
                business_hours_schedule, pause_on_pending, is_active, reminder_schedule)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
-           [req.tenant.id, body.name, body.description ?? null, body.priority,
-            body.firstResponseHours, body.resolutionHours,
-            body.reminderPct, body.l1EscalationPct, body.l2EscalationPct,
-            body.businessHoursOnly, JSON.stringify(body.businessHoursSchedule ?? {}),
-            body.pauseOnPending, body.isActive, JSON.stringify(body.reminderSchedule ?? [])],
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14::jsonb)
+            RETURNING *`,
+           [
+             req.tenant.id,                  // $1
+             body.name,                      // $2
+             body.description ?? null,       // $3
+             body.priority,                  // $4
+             body.firstResponseHours,        // $5
+             body.resolutionHours,           // $6
+             body.reminderPct,               // $7
+             body.l1EscalationPct,           // $8
+             body.l2EscalationPct,           // $9
+             body.businessHoursOnly,         // $10
+             bhSched,                        // $11 → business_hours_schedule (jsonb)
+             body.pauseOnPending,            // $12 → pause_on_pending (bool, has Zod default false)
+             body.isActive,                  // $13
+             remSched,                       // $14 → reminder_schedule (jsonb)
+           ],
          );
         return r.rows;
       });
