@@ -273,10 +273,12 @@ export function settingsRoutes(db: DatabaseClient) {
       const deptFilter = (req.user as any).department_type as string | null;
 
       const params: unknown[] = [req.tenant.id];
-      let where = `tenant_id = $1 AND role != 'super_admin'`;
+      // FIX: must qualify with u.* — the LEFT JOIN to users m makes
+      // unqualified tenant_id / role / department_type ambiguous.
+      let where = `u.tenant_id = $1 AND u.role != 'super_admin'`;
       if ((role === 'manager' || role === 'line_manager') && deptFilter) {
         params.push(deptFilter);
-        where += ` AND (department_type = $${params.length} OR role = 'tenant_admin')`;
+        where += ` AND (u.department_type = $${params.length} OR u.role = 'tenant_admin')`;
       }
 
       const members = await db.withTenant(req.tenant.id, async (client) => {
