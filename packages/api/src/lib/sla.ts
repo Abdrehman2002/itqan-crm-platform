@@ -37,48 +37,71 @@ function hhmmToMinutes(s: string): number {
   return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
 }
 
-/** Day-of-week index 0..6 (mon=0) for a Date in a given IANA timezone. */
+/**
+ * Resolve a fixed UTC offset (in minutes) for an IANA tz at a given moment.
+ * On Node builds where `Intl.DateTimeFormat` is missing full tz data, falls
+ * back to 0 (UTC). This is reliable across Node versions because we only
+ * need the offset MINUTES, not the formatted string.
+ */
+function tzOffsetMinutes(tz: string, ref: Date): number {
+  if (tz === 'UTC' || !tz) return 0;
+  try {
+    // Format ref in target tz; then parse back the y/m/d/h/m and compare to UTC.
+    const dtf = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit',  minute: '2-digit', second: '2-digit',
+      hour12: false,
+    });
+    const parts = Object.fromEntries(
+      dtf.formatToParts(ref).filter(p => p.type !== 'literal').map(p => [p.type, p.value]),
+    ) as Record<string, string>;
+    const tzAsUtc = Date.UTC(
+      parseInt(parts.year, 10),
+      parseInt(parts.month, 10) - 1,
+      parseInt(parts.day, 10),
+      parseInt(parts.hour === '24' ? '00' : parts.hour, 10),
+      parseInt(parts.minute, 10),
+      parseInt(parts.second, 10),
+    );
+    return Math.round((tzAsUtc - ref.getTime()) / 60_000);
+  } catch {
+    return 0; // Defensive — never crash the SLA worker
+  }
+}
+
+const DAY_KEY_BY_INDEX: DayKey[] = ['sun','mon','tue','wed','thu','fri','sat'];
+
+/**
+ * Day-of-week key for a Date in a given IANA timezone.
+ * Uses tzOffsetMinutes + plain UTC math instead of Intl.formatToParts(weekday)
+ * because some Node builds return the full weekday name instead of short,
+ * and we hit "wednesday" instead of "wed" which silently failed schedule lookup
+ * and made every day appear disabled (causing the MAX_DAYS_WALK cap to hit).
+ */
 function dayKey(d: Date, tz: string): DayKey {
-  // toLocaleString with the weekday — Intl handles tz conversion.
-  const w = new Intl.DateTimeFormat('en-US', { weekday: 'short', timeZone: tz }).format(d).toLowerCase();
-  // mon, tue, wed, thu, fri, sat, sun (first 3 chars)
-  return w.slice(0, 3) as DayKey;
+  const off = tzOffsetMinutes(tz, d);
+  const local = new Date(d.getTime() + off * 60_000);
+  return DAY_KEY_BY_INDEX[local.getUTCDay()];
 }
 
 /** Hour:minute (in the given tz) → minutes-since-midnight. */
 function localMinutes(d: Date, tz: string): number {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false,
-  }).formatToParts(d);
-  const h = parseInt(parts.find(p => p.type === 'hour')!.value, 10);
-  const m = parseInt(parts.find(p => p.type === 'minute')!.value, 10);
-  return h * 60 + m;
+  const off = tzOffsetMinutes(tz, d);
+  const local = new Date(d.getTime() + off * 60_000);
+  return local.getUTCHours() * 60 + local.getUTCMinutes();
 }
 
-/** Reset a Date to the start of its local-tz day (00:00). */
+/** Returns a Date for the start (00:00) of d's day in tz, as a UTC instant. */
 function startOfLocalDay(d: Date, tz: string): Date {
-  const dateStr = new Intl.DateTimeFormat('en-CA', {
-    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(d); // "2026-06-24"
-  // Reconstruct a Date for that local-midnight in the target tz.
-  return new Date(`${dateStr}T00:00:00${tzOffsetSuffix(tz, d)}`);
-}
-
-/** Returns "+05:00" / "-04:00" / "Z" for the tz at a given moment. */
-function tzOffsetSuffix(tz: string, ref: Date): string {
-  const fmt = new Intl.DateTimeFormat('en-US', {
-    timeZone: tz, timeZoneName: 'shortOffset',
-  });
-  const parts = fmt.formatToParts(ref);
-  const off = parts.find(p => p.type === 'timeZoneName')?.value ?? 'GMT';
-  // "GMT+5" / "GMT-04:00" / "GMT"
-  if (off === 'GMT') return 'Z';
-  const m = /GMT([+-])(\d{1,2})(?::(\d{2}))?/.exec(off);
-  if (!m) return 'Z';
-  const sign = m[1];
-  const hh = m[2].padStart(2, '0');
-  const mm = (m[3] ?? '00').padStart(2, '0');
-  return `${sign}${hh}:${mm}`;
+  const off = tzOffsetMinutes(tz, d);
+  const local = new Date(d.getTime() + off * 60_000);
+  const midnightLocal = Date.UTC(
+    local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate(),
+    0, 0, 0,
+  );
+  // Convert back to UTC instant
+  return new Date(midnightLocal - off * 60_000);
 }
 
 /**
