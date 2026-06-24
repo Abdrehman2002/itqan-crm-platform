@@ -12,10 +12,11 @@
 import type { FastifyInstance } from 'fastify';
 import type { PlatformModule, ModuleContext } from '@crm/shared';
 import { logger, EmailService } from '@crm/core';
+import * as sla from '../../../packages/api/src/lib/sla';
 
 const SLA_WORKER_INTERVAL_MS = 5 * 60 * 1000; // every 5 minutes
 
-// ── Inline SLA worker (no circular deps) ──────────────────────────────────
+// ── Inline SLA worker — business-hours + pause-aware + multi-step ─────────
 async function runSlaWorker(ctx: ModuleContext): Promise<void> {
   const { db, eventBus } = ctx;
   const emailSvc = new EmailService(db);
@@ -27,11 +28,19 @@ async function runSlaWorker(ctx: ModuleContext): Promise<void> {
            t.assignee_id, t.accepted_at, t.sla_due_at,
            t.escalation_level, t.reminder_sent_at,
            t.escalated_l1_at, t.escalated_l2_at,
+           t.sla_paused_at, t.sla_paused_total_ms, t.sla_reminders_sent,
            s.reminder_pct,
            s.l1_escalation_pct,
-           s.l2_escalation_pct
+           s.l2_escalation_pct,
+           s.resolution_hours,
+           s.business_hours_only,
+           s.business_hours_schedule,
+           s.pause_on_pending,
+           s.reminder_schedule,
+           tn.settings->>'timezone' AS tenant_tz
          FROM tickets t
          LEFT JOIN sla_policies s ON t.sla_policy_id = s.id
+         LEFT JOIN tenants     tn ON tn.id = t.tenant_id
          WHERE t.accepted_at IS NOT NULL
            AND t.status NOT IN ('resolved','closed')
            AND t.sla_due_at IS NOT NULL`,
@@ -40,19 +49,104 @@ async function runSlaWorker(ctx: ModuleContext): Promise<void> {
     });
 
     for (const ticket of activeTickets) {
-      const now        = Date.now();
-      const acceptedMs = new Date(ticket.accepted_at).getTime();
-      const dueMs      = new Date(ticket.sla_due_at).getTime();
-      const totalMs    = dueMs - acceptedMs;
-      const elapsedMs  = now - acceptedMs;
-      const pct        = totalMs > 0 ? (elapsedMs / totalMs) * 100 : 0;
+      const now    = Date.now();
+      const dueMs  = new Date(ticket.sla_due_at).getTime();
+      const tz     = (ticket.tenant_tz as string) || 'UTC';
+
+      // Business-hours + pause-aware elapsed percentage.
+      // Falls back to straight wall-clock if the policy hasn't been
+      // populated with business hours config (24/7 mode).
+      const pct = ticket.resolution_hours
+        ? sla.computeElapsedPct(
+            {
+              accepted_at:         ticket.accepted_at,
+              sla_paused_at:       ticket.sla_paused_at,
+              sla_paused_total_ms: ticket.sla_paused_total_ms,
+            },
+            {
+              resolution_hours:        ticket.resolution_hours,
+              business_hours_only:     ticket.business_hours_only,
+              business_hours_schedule: ticket.business_hours_schedule,
+              pause_on_pending:        ticket.pause_on_pending,
+            },
+            tz,
+            now,
+          )
+        : 0;
 
       const reminderPct = ticket.reminder_pct      ?? 80;
       const l1Pct       = ticket.l1_escalation_pct ?? 100;
       const l2Pct       = ticket.l2_escalation_pct ?? 150;
 
-      // ── Reminder ────────────────────────────────────────────────────
-      if (pct >= reminderPct && !ticket.reminder_sent_at && ticket.assignee_id) {
+      // ── Multi-step reminder schedule ─────────────────────────────────
+      // If the policy has a configured reminder_schedule (jsonb array),
+      // iterate each step and fire any that hit their pct threshold but
+      // haven't been sent yet (tracked in tickets.sla_reminders_sent map).
+      const schedule: Array<{
+        id: string; pct: number; level: string; label: string; notifyTarget: string;
+      }> = Array.isArray(ticket.reminder_schedule) ? ticket.reminder_schedule : [];
+      const sentMap: Record<string, boolean> = ticket.sla_reminders_sent ?? {};
+
+      for (const step of schedule) {
+        if (pct < step.pct || sentMap[step.id]) continue;
+
+        // Resolve who to notify based on the step's notifyTarget enum
+        let notifyIds: string[] = [];
+        if ((step.notifyTarget === 'assignee' || step.notifyTarget === 'all') && ticket.assignee_id) {
+          notifyIds.push(ticket.assignee_id);
+        }
+        if (step.notifyTarget === 'managers' || step.notifyTarget === 'all') {
+          const mgrs = await db.withSuperAdmin(async (c) => {
+            const r = await c.query(
+              `SELECT id FROM users WHERE tenant_id=$1 AND role IN ('manager','tenant_admin') AND is_active=true`,
+              [ticket.tenant_id],
+            );
+            return r.rows.map((u: any) => u.id as string);
+          });
+          notifyIds.push(...mgrs);
+        }
+        if (step.notifyTarget === 'admins' || step.notifyTarget === 'all') {
+          const adms = await db.withSuperAdmin(async (c) => {
+            const r = await c.query(
+              `SELECT id FROM users WHERE tenant_id=$1 AND role='tenant_admin' AND is_active=true`,
+              [ticket.tenant_id],
+            );
+            return r.rows.map((u: any) => u.id as string);
+          });
+          notifyIds.push(...adms);
+        }
+        notifyIds = [...new Set(notifyIds)];
+
+        // Mark sent, write notification rows, publish event
+        sentMap[step.id] = true;
+        await db.withSuperAdmin(async (c) => {
+          await c.query(
+            `UPDATE tickets SET sla_reminders_sent = $1::jsonb WHERE id = $2`,
+            [JSON.stringify(sentMap), ticket.id],
+          );
+          for (const uid of notifyIds) {
+            await c.query(
+              `INSERT INTO notifications (tenant_id, user_id, type, title, body, entity_type, entity_id)
+               VALUES ($1,$2,'sla_reminder',$3,$4,'ticket',$5)`,
+              [ticket.tenant_id, uid,
+               `SLA ${step.label}: ${ticket.ticket_number}`,
+               `"${ticket.subject}" — reached ${Math.round(pct)}% of SLA budget (step "${step.label}").`,
+               ticket.id],
+            );
+          }
+        });
+        await eventBus.publish(ticket.tenant_id, 'ticket.sla_reminder', {
+          ticketId: ticket.id, stepId: step.id, level: step.level,
+        });
+        logger.info(`SLA reminder ${step.id} fired on ${ticket.ticket_number}`);
+      }
+
+      // Legacy single-reminder fallback for policies without a schedule.
+      // Skip if any step in the schedule has already fired (multi-step path used).
+      const legacyMode = schedule.length === 0;
+
+      // ── Legacy single reminder (only if no multi-step schedule) ─────
+      if (legacyMode && pct >= reminderPct && !ticket.reminder_sent_at && ticket.assignee_id) {
         const remMins = Math.round((dueMs - now) / 60_000);
         await db.withSuperAdmin(async (c) => {
           await c.query(`UPDATE tickets SET reminder_sent_at = NOW() WHERE id = $1`, [ticket.id]);
@@ -69,7 +163,7 @@ async function runSlaWorker(ctx: ModuleContext): Promise<void> {
         logger.info(`SLA reminder sent for ticket ${ticket.ticket_number}`);
       }
 
-      // ── L1 Escalation (breach) ───────────────────────────────────────
+      // ── L1 Escalation (breach) — always runs regardless of schedule ──
       if (pct >= l1Pct && ticket.escalation_level < 1 && !ticket.escalated_l1_at) {
         const managers = await db.withSuperAdmin(async (c) => {
           const r = await c.query(

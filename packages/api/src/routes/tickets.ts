@@ -34,6 +34,7 @@ import { CRM_EVENTS } from '@crm/core';
 import { requireScope } from '../middlewares/auth.middleware';
 import { EmailService } from '../services/email.service';
 import { SmsService } from '@crm/core/sms.service';
+import * as sla from '../lib/sla';
 
 // ── Schemas ────────────────────────────────────────────────────────────────
 const CreateTicketSchema = z.object({
@@ -1070,6 +1071,22 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
       const { id } = req.params as { id: string };
       const body  = UpdateTicketSchema.parse(req.body);
 
+      // Pre-fetch existing ticket + its SLA policy. Needed for:
+      //  (a) pause-on-pending logic (compare old vs new status)
+      //  (b) priority-change recompute of sla_due_at
+      const [existing] = await db.withTenant(req.tenant.id, async (client) => {
+        const r = await client.query(
+          `SELECT t.status, t.accepted_at, t.sla_paused_at,
+                  t.sla_paused_total_ms, t.sla_policy_id,
+                  s.pause_on_pending,
+                  s.business_hours_only, s.business_hours_schedule, s.resolution_hours
+           FROM tickets t LEFT JOIN sla_policies s ON s.id = t.sla_policy_id
+           WHERE t.id = $1`,
+          [id],
+        );
+        return r.rows;
+      });
+
       const sets: string[] = ['updated_at = NOW()'];
       const vals: unknown[] = [];
       let idx = 1;
@@ -1090,7 +1107,27 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
       if (body.status === 'resolved') { sets.push(`resolved_at = COALESCE(resolved_at, NOW())`); }
       if (body.status === 'closed')   { sets.push(`closed_at   = COALESCE(closed_at,   NOW())`); }
 
-      // Auto-reassign SLA policy when priority changes (and no explicit slaPolicyId given)
+      // ── SLA pause-on-pending state machine ───────────────────────────
+      // Only relevant if the policy enables it. State machine:
+      //   * status → 'pending' and not already paused → start pause clock
+      //   * status changes FROM 'pending' and clock is paused → accumulate
+      if (body.status !== undefined && existing?.pause_on_pending) {
+        const oldStatus = existing.status as string;
+        const newStatus = body.status as string;
+        const wasPaused = !!existing.sla_paused_at;
+
+        if (newStatus === 'pending' && oldStatus !== 'pending' && !wasPaused) {
+          sets.push(`sla_paused_at = NOW()`);
+        }
+        if (oldStatus === 'pending' && newStatus !== 'pending' && wasPaused) {
+          // Bank the pause duration, then clear the marker
+          sets.push(`sla_paused_total_ms = sla_paused_total_ms + (EXTRACT(EPOCH FROM (NOW() - sla_paused_at)) * 1000)::bigint`);
+          sets.push(`sla_paused_at = NULL`);
+        }
+      }
+
+      // Auto-reassign SLA policy when priority changes (and no explicit slaPolicyId given).
+      // Also recompute sla_due_at against the new policy + remaining elapsed time.
       if (body.priority && !body.slaPolicyId) {
         const newSla = await findSlaPolicy(db, req.tenant.id, undefined, body.priority);
         if (newSla) { sets.push(`sla_policy_id = $${idx++}`); vals.push(newSla.id); }
@@ -1236,16 +1273,21 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
     });
 
     // ── Accept ticket (agent confirms they will work on it) ───────────────
-    // This starts the SLA resolution timer.
+    // This starts the SLA resolution timer. sla_due_at honors business hours
+    // if the policy is configured (see lib/sla.ts:computeSlaDueAt).
     fastify.post('/:id/accept', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const { id }   = req.params as { id: string };
       const tenantId = req.tenant.id;
       const userId   = req.user.sub;
 
-      // Fetch ticket + SLA policy
+      // Fetch ticket + SLA policy (incl. business hours + pause flags)
       const [existing] = await db.withTenant(tenantId, async (client) => {
         const r = await client.query(
-          `SELECT t.*, s.resolution_hours
+          `SELECT t.*,
+                  s.resolution_hours,
+                  s.business_hours_only,
+                  s.business_hours_schedule,
+                  s.pause_on_pending
            FROM tickets t
            LEFT JOIN sla_policies s ON t.sla_policy_id = s.id
            WHERE t.id = $1`,
@@ -1259,9 +1301,15 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
         return reply.code(409).send({ success: false, error: { code: 'ALREADY_ACCEPTED', message: 'Ticket already accepted' } });
       }
 
+      // Resolve tenant timezone (Munir's tenants.settings.timezone, default UTC)
+      const tenantTz = (req.tenant as any).settings?.timezone ?? 'UTC';
+      const resHours = existing.resolution_hours ?? 24;
       const acceptedAt = new Date();
-      const resHours   = existing.resolution_hours ?? 24;
-      const slaDueAt   = new Date(acceptedAt.getTime() + resHours * 3_600_000);
+      const slaDueAt = sla.computeSlaDueAt(acceptedAt, {
+        resolution_hours: resHours,
+        business_hours_only: existing.business_hours_only,
+        business_hours_schedule: existing.business_hours_schedule,
+      }, tenantTz);
 
       const [ticket] = await db.withTenant(tenantId, async (client) => {
         const r = await client.query(
