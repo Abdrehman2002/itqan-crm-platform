@@ -292,8 +292,14 @@ export function analyticsRoutes(db: DatabaseClient) {
       const scopeLiteral = scopeIds
         ? `ARRAY[${scopeIds.map(id => `'${id}'::uuid`).join(',')}]`
         : 'NULL';
+      // BUG-O fix: queries that JOIN contacts/companies/deals into the same SELECT
+      // hit "column reference owner_id is ambiguous" with the bare-column version.
+      // Use the "a." (activities), "t." (tickets), "vc." (voice_calls) qualified
+      // variants from joined queries; keep the bare ones for non-joined contexts.
       const scopeOwnerSql    = scopeIds ? `AND owner_id     = ANY(${scopeLiteral})` : '';
+      const scopeOwnerSqlA   = scopeIds ? `AND a.owner_id   = ANY(${scopeLiteral})` : '';
       const scopeAssigneeSql = scopeIds ? `AND (assignee_id = ANY(${scopeLiteral}) OR created_by = ANY(${scopeLiteral}))` : '';
+      const scopeAssigneeSqlT= scopeIds ? `AND (t.assignee_id = ANY(${scopeLiteral}) OR t.created_by = ANY(${scopeLiteral}))` : '';
       const scopeAgentSql    = scopeIds ? `AND agent_id     = ANY(${scopeLiteral})` : '';
 
       // Map user department → ticket_type value used in DB.
@@ -439,7 +445,7 @@ export function analyticsRoutes(db: DatabaseClient) {
           LEFT JOIN users u  ON t.assignee_id = u.id
           LEFT JOIN users cb ON t.created_by  = cb.id
           WHERE t.status NOT IN ('resolved','closed')
-            ${scopeAssigneeSql}
+            ${scopeAssigneeSqlT}
             ${deptTicketFilter}
           ORDER BY
             CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
@@ -479,7 +485,7 @@ export function analyticsRoutes(db: DatabaseClient) {
           FROM activities a
           LEFT JOIN contacts c ON a.contact_id = c.id
           LEFT JOIN users u ON a.owner_id = u.id
-          WHERE 1=1 ${scopeOwnerSql}
+          WHERE 1=1 ${scopeOwnerSqlA}
           ORDER BY a.created_at DESC LIMIT 8
         `);
         return r.rows;
