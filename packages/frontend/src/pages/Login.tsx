@@ -1,12 +1,25 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { Eye, EyeOff, Loader2 } from 'lucide-react';
 import { useAuthStore } from '../store/auth.store';
 
+const REMEMBER_KEY = 'crm_remember';
+
+function loadRemembered() {
+  try { return JSON.parse(localStorage.getItem(REMEMBER_KEY) ?? 'null'); } catch { return null; }
+}
+
 export function LoginPage() {
   const navigate = useNavigate();
   const { login } = useAuthStore();
-  const [form, setForm] = useState({ email: '', password: '', tenantSlug: 'vextria' });
+
+  const remembered = loadRemembered();
+  const [form, setForm] = useState({
+    email: remembered?.email ?? '',
+    password: '',
+    tenantSlug: remembered?.tenantSlug ?? 'vextria',
+  });
+  const [remember, setRemember] = useState(!!remembered);
   const [showPw, setShowPw] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -23,6 +36,11 @@ export function LoginPage() {
     setError('');
     setLoading(true);
     try {
+      if (remember) {
+        localStorage.setItem(REMEMBER_KEY, JSON.stringify({ email: form.email, tenantSlug: form.tenantSlug }));
+      } else {
+        localStorage.removeItem(REMEMBER_KEY);
+      }
       await login(form.email, form.password, isSubdomain ? undefined : form.tenantSlug);
       navigate('/dashboard');
     } catch (err: any) {
@@ -215,6 +233,25 @@ export function LoginPage() {
                   {error}
                 </div>
               )}
+
+              {/* Remember me */}
+              <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                <div
+                  onClick={() => setRemember(!remember)}
+                  className="w-4 h-4 rounded border flex items-center justify-center shrink-0 transition-colors"
+                  style={{
+                    background: remember ? '#29ABE2' : 'transparent',
+                    borderColor: remember ? '#29ABE2' : 'rgba(255,255,255,0.3)',
+                  }}
+                >
+                  {remember && (
+                    <svg viewBox="0 0 10 8" className="w-2.5 h-2.5 fill-white">
+                      <path d="M1 4l2.5 2.5L9 1" stroke="white" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                  )}
+                </div>
+                <span className="text-xs text-white/60">Remember workspace &amp; email</span>
+              </label>
 
               {/* Submit */}
               <button

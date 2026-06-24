@@ -127,6 +127,12 @@ export function departmentRoutes(db: DatabaseClient) {
     fastify.delete('/:id', { preHandler: requireScope('admin:write') }, async (req, reply) => {
       const tenantId = req.tenant.id;
       const { id } = req.params as { id: string };
+      const check = await db.withTenant(tenantId, (client) =>
+        client.query(`SELECT is_system FROM departments WHERE tenant_id = $1 AND id = $2`, [tenantId, id])
+      );
+      if (check.rows[0]?.is_system) {
+        return reply.code(400).send({ success: false, error: 'System departments cannot be deleted' });
+      }
       // Unlink members (matched by department name) before deleting the department.
       await db.withTenant(tenantId, (client) =>
         client.query(

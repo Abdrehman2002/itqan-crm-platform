@@ -87,8 +87,8 @@ function RoleModal({
               <Shield className="w-4 h-4 text-white" />
             </div>
             <div>
-              <h2 className="font-semibold text-gray-900">{isEdit ? 'Edit Role Permissions' : 'Create Custom Role'}</h2>
-              {isSystem && <p className="text-xs text-gray-400 flex items-center gap-1"><Lock className="w-3 h-3" /> System role — name &amp; color are fixed</p>}
+              <h2 className="font-semibold text-gray-900">{isEdit ? 'Edit Role' : 'Create Custom Role'}</h2>
+              {isSystem && <p className="text-xs text-gray-400 flex items-center gap-1"><Lock className="w-3 h-3" /> System role — display label editable · access level fixed</p>}
             </div>
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-1"><X className="w-5 h-5" /></button>
@@ -99,28 +99,37 @@ function RoleModal({
             <div className="px-4 py-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">{error}</div>
           )}
 
-          {!isSystem && (
-            <div className="grid grid-cols-[1fr_auto] gap-3">
+          {/* Name field — always shown; color picker only for custom roles */}
+          <div className="grid grid-cols-[1fr_auto] gap-3">
               <div>
-                <label className="text-xs font-medium text-gray-600 mb-1 block">Role Name *</label>
+                <label className="text-xs font-medium text-gray-600 mb-1 block">
+                  Display Label / Job Title {!isSystem && '*'}
+                </label>
                 <input
                   value={name} onChange={(e) => setName(e.target.value)}
-                  placeholder="e.g. Regional Manager, Territory Lead..."
+                  placeholder={isSystem ? 'e.g. Branch Head, Senior Agent…' : 'e.g. Branch Head, Account Executive, Claims Officer…'}
                   className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400"
                 />
+                <p className="text-[11px] text-gray-400 mt-1">
+                  {isSystem
+                    ? 'Rename to match your organisation. Access level and permissions are unchanged.'
+                    : 'This is what appears in the UI. It does not affect permissions.'}
+                </p>
               </div>
-              <div>
-                <label className="text-xs font-medium text-gray-600 mb-1 block">Color</label>
-                <div className="flex gap-1.5 flex-wrap w-[180px]">
-                  {PRESET_COLORS.map((c) => (
-                    <button key={c} type="button" onClick={() => setColor(c)}
-                      className={`w-6 h-6 rounded-full border-2 transition-all ${color === c ? 'border-gray-900 scale-110' : 'border-transparent'}`}
-                      style={{ background: c }} />
-                  ))}
+              {/* Color picker — hidden for system roles (structural, not customisable) */}
+              {!isSystem && (
+                <div>
+                  <label className="text-xs font-medium text-gray-600 mb-1 block">Color</label>
+                  <div className="flex gap-1.5 flex-wrap w-[180px]">
+                    {PRESET_COLORS.map((c) => (
+                      <button key={c} type="button" onClick={() => setColor(c)}
+                        className={`w-6 h-6 rounded-full border-2 transition-all ${color === c ? 'border-gray-900 scale-110' : 'border-transparent'}`}
+                        style={{ background: c }} />
+                    ))}
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
-          )}
 
           {!isSystem && (
             <div>
@@ -133,7 +142,12 @@ function RoleModal({
 
           {!isSystem && (
             <div>
-              <label className="text-xs font-medium text-gray-600 mb-1.5 block">Start from template <span className="text-gray-400">(sets default permissions below)</span></label>
+              <label className="text-xs font-medium text-gray-600 mb-0.5 block">
+                Access Level *
+              </label>
+              <p className="text-[11px] text-gray-400 mb-2">
+                Controls what this role can see and do. The display label above is separate and can be anything.
+              </p>
               <div className="grid grid-cols-2 gap-2">
                 {BASE_ROLES.map((br) => (
                   <button key={br.value} type="button" onClick={() => loadDefaults(br.value)}
@@ -165,7 +179,7 @@ function RoleModal({
           <button onClick={onClose} className="flex-1 py-2 border border-gray-200 rounded-lg text-sm text-gray-600 hover:bg-gray-50">
             Cancel
           </button>
-          <button onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending || (!isSystem && !name.trim())}
+          <button onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending || !name.trim()}
             className="flex-1 py-2 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700 disabled:opacity-50 flex items-center justify-center gap-2">
             {saveMutation.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
             {isEdit ? 'Save Changes' : 'Create Role'}
@@ -201,7 +215,7 @@ function RoleCard({ role, modules, onEdit, onDelete, canManage }: {
         </div>
 
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <p className="text-sm font-semibold text-gray-900">{role.name}</p>
             {role.is_system && (
               <span className="text-xs px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 flex items-center gap-0.5">
@@ -209,7 +223,17 @@ function RoleCard({ role, modules, onEdit, onDelete, canManage }: {
               </span>
             )}
           </div>
-          <p className="text-xs text-gray-400 truncate">{role.description || `Based on ${role.base_role}`}</p>
+          {role.is_system ? (
+            <p className="text-xs text-gray-400 mt-0.5">
+              <span className="font-medium text-amber-600">Display name only</span>
+              {' · '}Access level: <span className="capitalize font-medium text-gray-500">{role.base_role?.replace('_', ' ')}</span>
+              {' · '}Rename freely — permissions stay fixed to this access level
+            </p>
+          ) : (
+            <p className="text-xs text-gray-400 truncate">
+              {role.description || `Access level: ${role.base_role?.replace('_', ' ')}`}
+            </p>
+          )}
         </div>
 
         <div className="flex items-center gap-3 shrink-0">

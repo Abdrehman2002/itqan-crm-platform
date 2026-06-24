@@ -259,22 +259,29 @@ export function rolesRoutes(db: DatabaseClient) {
         else builtinCounts[row.role] = (builtinCounts[row.role] ?? 0) + parseInt(row.count);
       }
 
-      // Check if tenant has saved custom permissions for system roles
+      // Check if tenant has saved custom permissions/names for system roles
       // Migrate legacy format (none/view/full) to granular booleans on read
-      const systemOverrides: Record<string, Record<string, boolean>> = {};
+      const systemOverrides: Record<string, { permissions: Record<string, boolean>; name?: string }> = {};
       for (const row of rows.filter((r: any) => r.is_system)) {
         const perms = row.permissions ?? {};
-        systemOverrides[row.base_role] = isLegacyPermissions(perms)
-          ? migrateLegacyPermissions(perms)
-          : perms;
+        systemOverrides[row.base_role] = {
+          permissions: isLegacyPermissions(perms) ? migrateLegacyPermissions(perms) : perms,
+          name: row.name,
+        };
       }
 
       const SYSTEM_ROLES = [
-        { id: 'tenant_admin', name: 'Admin',   description: 'Full workspace access',      color: '#dc2626', is_system: true, base_role: 'tenant_admin', permissions: systemOverrides['tenant_admin'] ?? defaultPermissions('tenant_admin') },
-        { id: 'manager',      name: 'Manager', description: 'Team management & records',  color: '#d97706', is_system: true, base_role: 'manager',      permissions: systemOverrides['manager']      ?? defaultPermissions('manager') },
-        { id: 'agent',        name: 'Agent',   description: 'Day-to-day CRM operations',  color: '#2563eb', is_system: true, base_role: 'agent',         permissions: systemOverrides['agent']        ?? defaultPermissions('agent') },
-        { id: 'viewer',       name: 'Viewer',  description: 'Read-only access',           color: '#6b7280', is_system: true, base_role: 'viewer',        permissions: systemOverrides['viewer']       ?? defaultPermissions('viewer') },
-      ].map((r) => ({ ...r, created_at: null, user_count: builtinCounts[r.base_role] ?? 0 }));
+        { id: 'tenant_admin', defaultName: 'Admin',   description: 'Full workspace access',      color: '#dc2626', is_system: true, base_role: 'tenant_admin' },
+        { id: 'manager',      defaultName: 'Manager', description: 'Team management & records',  color: '#d97706', is_system: true, base_role: 'manager' },
+        { id: 'agent',        defaultName: 'Agent',   description: 'Day-to-day CRM operations',  color: '#2563eb', is_system: true, base_role: 'agent' },
+        { id: 'viewer',       defaultName: 'Viewer',  description: 'Read-only access',           color: '#6b7280', is_system: true, base_role: 'viewer' },
+      ].map((r) => ({
+        ...r,
+        name: systemOverrides[r.base_role]?.name ?? r.defaultName,
+        permissions: systemOverrides[r.base_role]?.permissions ?? defaultPermissions(r.base_role),
+        created_at: null,
+        user_count: builtinCounts[r.base_role] ?? 0,
+      })).map(({ defaultName: _d, ...rest }) => rest);
 
       // Exclude system role DB rows from custom list; migrate legacy permissions
       const customData = rows
@@ -351,30 +358,28 @@ export function rolesRoutes(db: DatabaseClient) {
         viewer:       { name: 'Viewer',  color: '#6b7280' },
       };
       if (id in SYSTEM_ROLE_META) {
-        // Re-applied after Munir overlay: frontend echoes name/description in
-        // the PATCH body even when only permissions changed. Only reject if
-        // the user ACTUALLY changed the system-role name.
         const meta = SYSTEM_ROLE_META[id];
-        const triedToRename = (name && name !== meta.name)
-                          || (description && description.trim() !== '');
-        if (triedToRename) {
-          return reply.code(400).send({ success: false, error: { code: 'SYSTEM_ROLE', message: 'Cannot rename system roles. You can only edit their permissions.' } });
+        if (!name && !description && !permissions) {
+          return reply.send({ success: true, data: null });
         }
-        if (!permissions) return reply.send({ success: true, data: null });
-        // Check if an override row already exists for this system role
+
+        // Upsert: find existing DB row for this system role (may not exist yet for fresh tenants)
         const existingOverride = await db.withSuperAdmin(async (client) => {
           const r = await client.query(
-            `SELECT id FROM roles WHERE tenant_id = $1 AND base_role = $2 AND is_system = true`,
+            `SELECT id, name, permissions FROM roles WHERE tenant_id = $1 AND base_role = $2 AND is_system = true`,
             [req.tenant.id, id],
           );
           return r.rows[0] ?? null;
         });
 
+        const newName        = name?.trim()  ?? existingOverride?.name  ?? meta.name;
+        const newPermissions = permissions   ?? existingOverride?.permissions ?? {};
+
         if (existingOverride) {
           await db.withSuperAdmin(async (client) => {
             await client.query(
-              `UPDATE roles SET permissions = $1, updated_at = NOW() WHERE id = $2`,
-              [JSON.stringify(permissions), existingOverride.id],
+              `UPDATE roles SET name = $1, permissions = $2, updated_at = NOW() WHERE id = $3`,
+              [newName, JSON.stringify(newPermissions), existingOverride.id],
             );
           });
         } else {
@@ -382,20 +387,22 @@ export function rolesRoutes(db: DatabaseClient) {
             await client.query(
               `INSERT INTO roles (tenant_id, name, description, color, is_system, base_role, permissions)
                VALUES ($1, $2, $3, $4, true, $5, $6)`,
-              [req.tenant.id, meta.name, null, meta.color, id, JSON.stringify(permissions)],
+              [req.tenant.id, newName, description ?? null, meta.color, id, JSON.stringify(newPermissions)],
             );
           });
         }
 
-        // Propagate to all users on this built-in role (no custom_role_id)
-        await db.withSuperAdmin(async (client) => {
-          await client.query(
-            `UPDATE users SET permissions = $1 WHERE tenant_id = $2 AND role = $3 AND custom_role_id IS NULL`,
-            [JSON.stringify(permissions), req.tenant.id, id],
-          );
-        });
+        // Propagate permission changes to users on this built-in role
+        if (permissions) {
+          await db.withSuperAdmin(async (client) => {
+            await client.query(
+              `UPDATE users SET permissions = $1 WHERE tenant_id = $2 AND role = $3 AND custom_role_id IS NULL`,
+              [JSON.stringify(newPermissions), req.tenant.id, id],
+            );
+          });
+        }
 
-        return reply.send({ success: true, data: { id, name: meta.name, color: meta.color, is_system: true, base_role: id, permissions } });
+        return reply.send({ success: true, data: { id, name: newName, color: meta.color, is_system: true, base_role: id, permissions: newPermissions } });
       }
 
       // Custom role — check ownership
@@ -411,27 +418,10 @@ export function rolesRoutes(db: DatabaseClient) {
 
       if (name !== undefined) { updates.push(`name = $${i++}`); vals.push(name.trim()); }
       if (description !== undefined) { updates.push(`description = $${i++}`); vals.push(description); }
-      if (color !== undefined) { updates.push(`color = $${i++}`); vals.push(color); }
+      if (color !== undefined && !existing.is_system) { updates.push(`color = $${i++}`); vals.push(color); }
       if (permissions !== undefined) { updates.push(`permissions = $${i++}`); vals.push(JSON.stringify(permissions)); }
-
-      // System roles: only permissions can be changed, not name/description.
-      // Re-applied after Munir overlay: only reject when user ACTUALLY changed
-      // the name/description (frontend echoes existing values either way).
-      if (existing.is_system && ((name && name !== existing.name)
-                              || (description && description !== existing.description))) {
-        return reply.code(400).send({ success: false, error: { code: 'SYSTEM_ROLE', message: 'Cannot rename system roles. You can only edit their permissions.' } });
-      }
-      // When system role: strip name/description from update so a stale echo
-      // doesn't accidentally rewrite a column.
-      if (existing.is_system) {
-        for (let k = updates.length - 1; k >= 0; k--) {
-          if (updates[k].startsWith('name =') || updates[k].startsWith('description =')) {
-            updates.splice(k, 1);
-            vals.splice(k, 1);
-            i--;
-          }
-        }
-      }
+      // System roles: display name & description CAN be renamed (org-specific labels).
+      // Color and base_role are structural and stay fixed for system roles.
 
       if (updates.length === 0) return reply.send({ success: true, data: existing });
 

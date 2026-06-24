@@ -1,5 +1,4 @@
 import crypto from 'crypto';
-import bcrypt from 'bcryptjs';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { DatabaseClient } from '@crm/core';
@@ -228,6 +227,7 @@ export function settingsRoutes(db: DatabaseClient) {
           routing: {
             per_agent_ticket_limit: settings?.routing?.per_agent_ticket_limit ?? 0,
             routing_method:         settings?.routing?.routing_method ?? 'random_capacity',
+            bot_default_priority:   settings?.routing?.bot_default_priority ?? 'medium',
           },
           csat: {
             expiry_days: settings?.csat_expiry_days ?? 7,
@@ -236,19 +236,21 @@ export function settingsRoutes(db: DatabaseClient) {
       });
     });
 
-    fastify.patch('/routing', { preHandler: requireRole('super_admin', 'tenant_admin') }, async (req, reply) => {
+    fastify.patch('/routing', { preHandler: requireRole('super_admin', 'tenant_admin', 'manager') }, async (req, reply) => {
       const body = z.object({
         per_agent_ticket_limit: z.number().int().min(0).max(500).optional(), // 0 = unlimited
         routing_method:         z.enum(['random_capacity','round_robin','manual']).optional(),
         csat_expiry_days:       z.number().int().min(1).max(90).optional(),
+        bot_default_priority:   z.enum(['urgent','high','medium','low']).optional(),
       }).parse(req.body);
 
       await db.withSuperAdmin(async (client) => {
-        if (body.per_agent_ticket_limit !== undefined || body.routing_method !== undefined) {
+        if (body.per_agent_ticket_limit !== undefined || body.routing_method !== undefined || body.bot_default_priority !== undefined) {
           const current = (await client.query(`SELECT settings FROM tenants WHERE id = $1`, [req.tenant.id])).rows[0]?.settings ?? {};
           const routing = { ...(current?.routing ?? {}) };
           if (body.per_agent_ticket_limit !== undefined) routing.per_agent_ticket_limit = body.per_agent_ticket_limit;
           if (body.routing_method !== undefined)         routing.routing_method         = body.routing_method;
+          if (body.bot_default_priority !== undefined)   routing.bot_default_priority   = body.bot_default_priority;
           await client.query(
             `UPDATE tenants SET settings = jsonb_set(COALESCE(settings,'{}'), '{routing}', $1::jsonb) WHERE id = $2`,
             [JSON.stringify(routing), req.tenant.id],
@@ -265,44 +267,41 @@ export function settingsRoutes(db: DatabaseClient) {
     });
 
     // List team members (super_admin excluded — internal platform role)
-    // Returns presence (is_online / is_recently_active) + hierarchy info (manager_id, manager_name).
-    // Manager/line_manager only see users in their own department + tenant_admins.
-    fastify.get('/team', { preHandler: requireRole('super_admin', 'tenant_admin', 'manager', 'line_manager') }, async (req, reply) => {
-      const role = (req.user as any).role as string;
-      const userId = (req.user as any).sub as string;
-      const deptFilter = (req.user as any).department_type as string | null;
-
-      const params: unknown[] = [req.tenant.id];
-      // FIX: must qualify with u.* — the LEFT JOIN to users m makes
-      // unqualified tenant_id / role / department_type ambiguous.
-      let where = `u.tenant_id = $1 AND u.role != 'super_admin'`;
-      if ((role === 'manager' || role === 'line_manager') && deptFilter) {
-        params.push(deptFilter);
-        where += ` AND (u.department_type = $${params.length} OR u.role = 'tenant_admin')`;
-      }
-
+    fastify.get('/team', { preHandler: requireRole('super_admin', 'tenant_admin', 'manager') }, async (req, reply) => {
       const members = await db.withTenant(req.tenant.id, async (client) => {
-        const r = await client.query(
-          `SELECT u.id, u.email, u.name, u.role, u.department, u.department_type,
-                  u.permissions, u.is_active, u.manager_id, u.max_direct_reports, u.avatar,
-                  u.created_at, u.last_login_at, u.last_active_at,
-                  (u.last_active_at IS NOT NULL AND u.last_active_at > NOW() - INTERVAL '90 seconds') AS is_online,
-                  (u.last_active_at IS NOT NULL AND u.last_active_at > NOW() - INTERVAL '10 minutes') AS is_recently_active,
-                  m.name AS manager_name
+        const result = await client.query(
+          `SELECT u.id, u.name, u.email, u.role, u.permissions, u.is_active, u.created_at,
+                  u.last_login_at, u.custom_role_id, u.manager_id,
+                  m.name AS manager_name,
+                  r.name AS role_name, r.color AS role_color
            FROM users u
            LEFT JOIN users m ON m.id = u.manager_id
-           WHERE ${where}
-           ORDER BY u.role, u.name`,
-          params,
+           LEFT JOIN roles r ON r.id = u.custom_role_id
+           WHERE u.role != 'super_admin'
+           ORDER BY u.name ASC`,
         );
-        return r.rows;
+        return result.rows;
       });
-
-      // Agents only see themselves
-      if (role === 'agent') {
-        return reply.send({ success: true, data: members.filter(u => u.id === userId) });
-      }
       return reply.send({ success: true, data: members });
+    });
+
+    // Get direct reportees of the current user (or any user id for tenant_admin)
+    fastify.get('/team/reportees', { preHandler: requireRole('super_admin', 'tenant_admin', 'manager') }, async (req, reply) => {
+      const { userId } = req.query as { userId?: string };
+      const targetId = userId ?? req.user.sub;
+      const reportees = await db.withTenant(req.tenant.id, async (client) => {
+        const result = await client.query(
+          `SELECT u.id, u.name, u.email, u.role, u.custom_role_id,
+                  r.name AS role_name, r.color AS role_color
+           FROM users u
+           LEFT JOIN roles r ON r.id = u.custom_role_id
+           WHERE u.manager_id = $1 AND u.role != 'super_admin'
+           ORDER BY u.name ASC`,
+          [targetId],
+        );
+        return result.rows;
+      });
+      return reply.send({ success: true, data: reportees });
     });
 
     // Get module definitions (for permissions matrix UI)
@@ -436,31 +435,20 @@ export function settingsRoutes(db: DatabaseClient) {
       const InviteSchema = z.object({
         email:           z.string().email(),
         name:            z.string().max(100).optional(),
-        // Tenant admins can only assign roles up to their own level; super_admin is never assignable here.
-        // line_manager added in migration 014 — a department-scoped sub-manager between manager and agent.
-        role:            z.enum(['tenant_admin', 'manager', 'line_manager', 'agent', 'viewer']).default('agent'),
+        // Tenant admins can only assign roles up to their own level; super_admin is never assignable here
+        role:            z.enum(['tenant_admin', 'manager', 'agent', 'viewer']).default('agent'),
         custom_role_id:  z.string().uuid().optional(),
         permissions:     z.record(z.string()).optional(),
         department:      z.string().max(100).optional(),
         // Gap 8: explicit dept type — prevents fragile keyword matching on ambiguous dept names
         departmentType:  z.enum(DEPT_TYPES).optional(),
-        // Hierarchy: agent reports to line_manager; line_manager reports to manager.
-        managerId:       z.string().uuid().optional(),
-        // Capacity: how many direct reports this user can have (only meaningful for manager/line_manager)
-        maxDirectReports: z.number().int().min(0).max(100).optional(),
-        // Direct password set — tenant admin can onboard members without depending
-        // on email delivery. If supplied, user can log in immediately. If omitted,
-        // falls through to the existing email-invite-link flow.
-        password:        z.string().min(8).max(200).optional(),
+        manager_id:      z.string().uuid().nullable().optional(),
       });
       const parsed = InviteSchema.safeParse(req.body);
       if (!parsed.success) {
         return reply.code(400).send({ success: false, error: { code: 'INVALID_INPUT', message: parsed.error.issues[0]?.message ?? 'Invalid input' } });
       }
-      const { email, name, role, custom_role_id, permissions: customPermissions, department, departmentType, managerId, maxDirectReports, password } = parsed.data;
-      // Pre-hash if password was supplied so we can write it straight into INSERT.
-      // bcrypt is imported at the top of this file for /auth/refresh + similar flows.
-      const passwordHash = password ? await bcrypt.hash(password, 12) : 'INVITE_PENDING';
+      const { email, name, role, custom_role_id, permissions: customPermissions, department, departmentType, manager_id } = parsed.data;
 
       const displayName  = name?.trim() || email.split('@')[0];
       const assignedRole = role ?? 'agent';
@@ -469,88 +457,23 @@ export function settingsRoutes(db: DatabaseClient) {
       // Enforce: any module not licensed by super admin is forced to 'none'
       const perms = await applyModuleLicensing(req.tenant.id, rawPerms);
 
-      // ── Hierarchy validation ────────────────────────────────────────────
-      // 1. Manager role can ONLY exist once per department (enforced by uq_one_manager_per_dept).
-      // 2. line_manager and agent must have a managerId pointing to someone above them in their dept.
-      // 3. Capacity check: don't exceed the parent manager's max_direct_reports.
-      if (assignedRole === 'line_manager' || assignedRole === 'agent') {
-        if (!managerId) {
-          return reply.code(400).send({ success: false, error: { code: 'MANAGER_REQUIRED',
-            message: `${assignedRole} must report to a ${assignedRole === 'agent' ? 'line_manager or manager' : 'manager'} (provide managerId)` } });
-        }
-        const [parent] = await db.withTenant(req.tenant.id, async (client) => {
-          const r = await client.query(
-            `SELECT id, role, department_type, max_direct_reports,
-                    (SELECT COUNT(*) FROM users WHERE manager_id = u.id AND is_active = true) AS direct_reports
-             FROM users u WHERE id = $1 AND tenant_id = $2`,
-            [managerId, req.tenant.id],
-          );
-          return r.rows;
-        });
-        if (!parent) {
-          return reply.code(400).send({ success: false, error: { code: 'MANAGER_NOT_FOUND', message: 'Parent manager does not exist in this tenant' } });
-        }
-        // Department must match parent's department
-        if (departmentType && parent.department_type && departmentType !== parent.department_type) {
-          return reply.code(400).send({ success: false, error: { code: 'DEPT_MISMATCH',
-            message: `Cannot assign to a manager from a different department (parent is ${parent.department_type})` } });
-        }
-        // Capacity check
-        if (parent.max_direct_reports != null && Number(parent.direct_reports) >= Number(parent.max_direct_reports)) {
-          return reply.code(409).send({ success: false, error: { code: 'CAPACITY_EXCEEDED',
-            message: `Parent manager is at capacity (${parent.max_direct_reports} direct reports)` } });
-        }
-        // Role hierarchy check
-        if (assignedRole === 'line_manager' && parent.role !== 'manager') {
-          return reply.code(400).send({ success: false, error: { code: 'INVALID_PARENT', message: 'line_manager must report to a manager' } });
-        }
-        if (assignedRole === 'agent' && !['manager', 'line_manager'].includes(parent.role)) {
-          return reply.code(400).send({ success: false, error: { code: 'INVALID_PARENT', message: 'agent must report to a manager or line_manager' } });
-        }
-      }
+      // 1. Create (or update) user account with role + permissions + department
+      const [user] = await db.withTenant(req.tenant.id, async (client) => {
+        const result = await client.query(
+          `INSERT INTO users (tenant_id, email, name, role, password_hash, permissions, custom_role_id, department, department_type, manager_id)
+           VALUES ($1, $2, $3, $4, 'INVITE_PENDING', $5, $6, $7, $8, $9)
+           ON CONFLICT (tenant_id, email) DO UPDATE
+             SET role = EXCLUDED.role, name = EXCLUDED.name,
+                 permissions = EXCLUDED.permissions, custom_role_id = EXCLUDED.custom_role_id,
+                 department = EXCLUDED.department, department_type = EXCLUDED.department_type,
+                 manager_id = EXCLUDED.manager_id
+           RETURNING id, email, name, role, permissions, custom_role_id, department, department_type, manager_id`,
+          [req.tenant.id, email, displayName, assignedRole, JSON.stringify(perms), custom_role_id ?? null, department ?? null, departmentType ?? null, manager_id ?? null],
+        );
+        return result.rows;
+      });
 
-      // 1. Create (or update) user account with role + permissions + department + hierarchy
-      let user: any;
-      try {
-        [user] = await db.withTenant(req.tenant.id, async (client) => {
-          // Pass the pre-hashed password (real bcrypt hash if supplied, else
-          // 'INVITE_PENDING' sentinel). On UPDATE we only overwrite the hash
-          // if a real one was provided — avoids wiping an existing user's
-          // password back to INVITE_PENDING when re-inviting them.
-          const result = await client.query(
-            `INSERT INTO users (tenant_id, email, name, role, password_hash, permissions, custom_role_id, department, department_type, manager_id, max_direct_reports)
-             VALUES ($1, $2, $3, $4, $11, $5, $6, $7, $8, $9, $10)
-             ON CONFLICT (tenant_id, email) DO UPDATE
-               SET role = EXCLUDED.role, name = EXCLUDED.name,
-                   permissions = EXCLUDED.permissions, custom_role_id = EXCLUDED.custom_role_id,
-                   department = EXCLUDED.department, department_type = EXCLUDED.department_type,
-                   manager_id = EXCLUDED.manager_id, max_direct_reports = EXCLUDED.max_direct_reports,
-                   password_hash = CASE WHEN $11 = 'INVITE_PENDING' THEN users.password_hash ELSE $11 END
-             RETURNING id, email, name, role, permissions, custom_role_id, department, department_type, manager_id, max_direct_reports`,
-            [req.tenant.id, email, displayName, assignedRole, JSON.stringify(perms), custom_role_id ?? null, department ?? null, departmentType ?? null, managerId ?? null, maxDirectReports ?? null, passwordHash],
-          );
-          return result.rows;
-        });
-      } catch (err: any) {
-        // Unique index uq_one_manager_per_dept catches a second active manager in the same department.
-        if (err?.code === '23505' && /uq_one_manager_per_dept/.test(err.constraint ?? err.detail ?? '')) {
-          return reply.code(409).send({ success: false, error: { code: 'MANAGER_EXISTS',
-            message: `A manager already exists for the ${departmentType} department. Only one manager per department is allowed.` } });
-        }
-        throw err;
-      }
-
-      // 2. If admin supplied a password, the user can log in immediately —
-      //    short-circuit and skip the reset-token + email-invite plumbing.
-      if (password) {
-        return reply.send({
-          success: true,
-          data: { user, immediateLogin: true },
-          message: `${displayName} can log in now with their email + the password you set.`,
-        });
-      }
-
-      // 2b. Otherwise: generate a password-setup token (reuses reset-password flow)
+      // 2. Generate a password-setup token (reuses the reset-password flow)
       const rawToken  = crypto.randomBytes(32).toString('hex');
       const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
       const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
@@ -650,12 +573,15 @@ export function settingsRoutes(db: DatabaseClient) {
         department:     z.string().max(100).nullable().optional(),
         departmentType: z.enum(DEPT_TYPES).nullable().optional(), // Gap 8
         permissions:    z.record(z.string()).optional(),
+        manager_id:     z.string().uuid().nullable().optional(),
+        custom_role_id: z.string().uuid().nullable().optional(),
+        is_active:      z.boolean().optional(),
       });
       const parsed = PatchSchema.safeParse(req.body);
       if (!parsed.success) {
         return reply.code(400).send({ success: false, error: { code: 'INVALID_INPUT', message: parsed.error.issues[0]?.message ?? 'Invalid input' } });
       }
-      const { role, department, departmentType, permissions: customPermissions } = parsed.data;
+      const { role, department, departmentType, permissions: customPermissions, manager_id, custom_role_id, is_active } = parsed.data;
 
       const [user] = await db.withTenant(req.tenant.id, async (client) => {
         // Build dynamic update
@@ -693,13 +619,25 @@ export function settingsRoutes(db: DatabaseClient) {
           updates.push(`permissions = $${i++}`);
           vals.push(JSON.stringify(enforcedPerms));
         }
+        if (manager_id !== undefined) {
+          updates.push(`manager_id = $${i++}`);
+          vals.push(manager_id);
+        }
+        if (custom_role_id !== undefined) {
+          updates.push(`custom_role_id = $${i++}`);
+          vals.push(custom_role_id);
+        }
+        if (is_active !== undefined) {
+          updates.push(`is_active = $${i++}`);
+          vals.push(is_active);
+        }
 
         if (updates.length === 0) return [null];
 
         vals.push(userId);
         const result = await client.query(
           `UPDATE users SET ${updates.join(', ')}, updated_at = NOW()
-           WHERE id = $${i} RETURNING id, name, email, role, department, department_type, permissions`,
+           WHERE id = $${i} RETURNING id, name, email, role, department, department_type, permissions, manager_id, custom_role_id, is_active`,
           vals,
         );
         return result.rows;
@@ -773,7 +711,7 @@ export function settingsRoutes(db: DatabaseClient) {
       if (!newPassword || newPassword.length < 8) {
         return reply.code(400).send({ success: false, error: { code: 'WEAK_PASSWORD', message: 'Password must be at least 8 characters' } });
       }
-      const bcrypt = await import('bcryptjs');
+      const bcrypt = (await import('bcryptjs')).default;
       const [user] = await db.withTenant(req.tenant.id, async (client) => {
         const result = await client.query('SELECT password_hash FROM users WHERE id = $1', [req.user.sub]);
         return result.rows;
@@ -788,93 +726,19 @@ export function settingsRoutes(db: DatabaseClient) {
       return reply.send({ success: true });
     });
 
-    // ── ORG TREE ───────────────────────────────────────────────────────────
-    // GET /settings/team/tree
-    // Returns the full org hierarchy as a nested tree.
-    // tenant_admin sees everything. manager sees their own subtree.
-    // line_manager sees their own subtree. agent sees just themselves.
-    // Each node includes a computed `is_online` flag (heartbeat < 90s ago).
-    fastify.get('/team/tree', { preHandler: requireRole('super_admin', 'tenant_admin', 'manager', 'line_manager') }, async (req, reply) => {
-      const role = (req.user as any).role as string;
-      const userId = (req.user as any).sub as string;
-
-      const rows = await db.withTenant(req.tenant.id, async (client) => {
-        const r = await client.query(
-          `SELECT id, email, name, role, department, department_type,
-                  manager_id, max_direct_reports, is_active, avatar,
-                  phone, whatsapp_number,
-                  (last_active_at IS NOT NULL AND last_active_at > NOW() - INTERVAL '90 seconds') AS is_online,
-                  last_active_at
-           FROM users
-           WHERE tenant_id = $1
-           ORDER BY
-             CASE role
-               WHEN 'tenant_admin' THEN 1
-               WHEN 'manager' THEN 2
-               WHEN 'line_manager' THEN 3
-               WHEN 'agent' THEN 4
-               WHEN 'viewer' THEN 5
-               ELSE 9
-             END,
-             name`,
-          [req.tenant.id],
-        );
-        return r.rows;
-      });
-
-      // Build children map
-      const byParent: Record<string, any[]> = {};
-      const byId: Record<string, any> = {};
-      for (const u of rows) {
-        byId[u.id] = { ...u, children: [] };
-        const k = u.manager_id ?? '__root__';
-        (byParent[k] ??= []).push(u.id);
+    // PATCH /api/v1/settings/tenant — update arbitrary tenant settings flags (e.g. dismiss banners)
+    fastify.patch('/tenant', { preHandler: requireRole('super_admin', 'tenant_admin') }, async (req, reply) => {
+      const body = req.body as Record<string, unknown>;
+      for (const [key, value] of Object.entries(body)) {
+        const jsonVal = JSON.stringify(value);
+        await db.withSuperAdmin(async (client) => {
+          await client.query(
+            `UPDATE tenants SET settings = jsonb_set(COALESCE(settings,'{}'), $1, $2::jsonb) WHERE id = $3`,
+            [`{${key}}`, jsonVal, req.tenant.id],
+          );
+        });
       }
-      // Build subtrees recursively
-      const buildSubtree = (uid: string): any => {
-        const node = byId[uid];
-        if (!node) return null;
-        const kids = byParent[uid] ?? [];
-        node.children = kids.map(buildSubtree).filter(Boolean);
-        return node;
-      };
-
-      let treeRoots: any[] = [];
-      if (role === 'tenant_admin' || role === 'super_admin') {
-        // Roots = anyone with no manager (tenant_admin / managers / unattached)
-        treeRoots = (byParent['__root__'] ?? []).map(buildSubtree).filter(Boolean);
-      } else if (role === 'manager' || role === 'line_manager') {
-        // See DIRECT REPORTS only (exclude self — per product feedback:
-        // 'manager hierarchy should not include itself in reportee').
-        // Each direct report becomes a root; subtree expansion brings in
-        // their reports too. Manager appears only at the top label, not as
-        // a row in the tree.
-        const directReportIds = byParent[userId] ?? [];
-        treeRoots = directReportIds.map(buildSubtree).filter(Boolean);
-      }
-
-      return reply.send({
-        success: true,
-        data: {
-          roots: treeRoots,
-          // Useful for the org-chart sidebar: list of active managers/line_managers with capacity info
-          managers: rows
-            .filter(u => ['manager','line_manager'].includes(u.role) && u.is_active)
-            .map(u => ({
-              id: u.id,
-              name: u.name,
-              role: u.role,
-              email: u.email,
-              phone: u.phone,
-              whatsapp_number: u.whatsapp_number,
-              department_type: u.department_type,
-              max_direct_reports: u.max_direct_reports,
-              direct_reports: rows.filter(r => r.manager_id === u.id && r.is_active).length,
-              is_online: u.is_online,
-            })),
-        },
-      });
+      return reply.send({ success: true });
     });
-
   };
 }

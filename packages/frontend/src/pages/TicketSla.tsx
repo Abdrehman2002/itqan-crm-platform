@@ -1,7 +1,7 @@
 /**
  * TicketSla — SLA policies with multi-step reminder schedule builder
  */
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Clock, Plus, Pencil, Trash2, Loader2, X, Bell,
@@ -20,13 +20,41 @@ interface ReminderStep {
   notifyTarget: 'assignee' | 'managers' | 'admins' | 'all';
 }
 
+interface DaySchedule { enabled: boolean; start: string; end: string; }
+type BusinessHoursSchedule = Record<string, DaySchedule>;
+
 interface SlaPolicy {
   id: string; name: string; description?: string; priority: string;
   first_response_hours: number; resolution_hours: number;
   reminder_pct: number; l1_escalation_pct: number; l2_escalation_pct: number;
-  business_hours_only: boolean; is_active: boolean;
+  business_hours_only: boolean;
+  business_hours_schedule: BusinessHoursSchedule;
+  pause_on_pending: boolean;
+  is_active: boolean;
   reminder_schedule: ReminderStep[];
 }
+
+// ── Business hours defaults (benchmarked: Zendesk/Freshdesk standard schedule) ──
+const DAYS = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'] as const;
+const DAY_LABELS: Record<string, string> = {
+  monday:'Mon', tuesday:'Tue', wednesday:'Wed', thursday:'Thu',
+  friday:'Fri', saturday:'Sat', sunday:'Sun',
+};
+const DEFAULT_BIZ_HOURS: BusinessHoursSchedule = {
+  monday:    { enabled: true,  start: '09:00', end: '18:00' },
+  tuesday:   { enabled: true,  start: '09:00', end: '18:00' },
+  wednesday: { enabled: true,  start: '09:00', end: '18:00' },
+  thursday:  { enabled: true,  start: '09:00', end: '18:00' },
+  friday:    { enabled: true,  start: '09:00', end: '18:00' },
+  saturday:  { enabled: false, start: '09:00', end: '18:00' },
+  sunday:    { enabled: false, start: '09:00', end: '18:00' },
+};
+// Time options every 30 minutes (Zendesk/Freshdesk granularity)
+const TIME_OPTIONS = Array.from({ length: 48 }, (_, i) => {
+  const h = String(Math.floor(i / 2)).padStart(2, '0');
+  const m = i % 2 === 0 ? '00' : '30';
+  return `${h}:${m}`;
+});
 
 // ── Config maps ────────────────────────────────────────────────────────────
 
@@ -214,8 +242,19 @@ function SlaModal({ policy, onClose }: { policy?: SlaPolicy; onClose: () => void
     l1EscalationPct:    policy?.l1_escalation_pct     ?? 100,
     l2EscalationPct:    policy?.l2_escalation_pct     ?? 150,
     businessHoursOnly:  policy?.business_hours_only   ?? false,
+    pauseOnPending:     policy?.pause_on_pending      ?? false,
     isActive:           policy?.is_active             ?? true,
   });
+
+  // Business hours schedule — load from policy or use defaults
+  const [bizHours, setBizHours] = useState<BusinessHoursSchedule>(() => {
+    const existing = policy?.business_hours_schedule;
+    if (existing && Object.keys(existing).length > 0) return existing;
+    return { ...DEFAULT_BIZ_HOURS };
+  });
+
+  const updateDay = (day: string, patch: Partial<DaySchedule>) =>
+    setBizHours(prev => ({ ...prev, [day]: { ...prev[day], ...patch } }));
 
   // Schedule — seed from existing or default
   const [schedule, setSchedule] = useState<ReminderStep[]>(() => {
@@ -252,7 +291,7 @@ function SlaModal({ policy, onClose }: { policy?: SlaPolicy; onClose: () => void
 
   const mutation = useMutation({
     mutationFn: () => {
-      const payload = { ...form, reminderSchedule: schedule };
+      const payload = { ...form, reminderSchedule: schedule, businessHoursSchedule: bizHours };
       return policy
         ? api.patch(`/api/v1/tickets/sla-policies/${policy.id}`, payload)
         : api.post('/api/v1/tickets/sla-policies', payload);
@@ -322,9 +361,66 @@ function SlaModal({ policy, onClose }: { policy?: SlaPolicy; onClose: () => void
                 <p className="text-xs text-gray-400 mt-1">From agent acceptance → resolved</p>
               </div>
             </div>
-            <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer mt-3">
-              <input type="checkbox" checked={form.businessHoursOnly} onChange={setCheck('businessHoursOnly')} className="rounded accent-brand-600" />
-              Business hours only (Mon–Fri, 9 AM–6 PM)
+            {/* Business hours toggle + per-day schedule (Zendesk/Freshdesk standard) */}
+            <div className="mt-3 border border-gray-100 rounded-xl overflow-hidden">
+              <label className="flex items-center gap-3 px-4 py-3 cursor-pointer bg-gray-50 hover:bg-gray-100 transition-colors">
+                <input type="checkbox" checked={form.businessHoursOnly} onChange={setCheck('businessHoursOnly')} className="rounded accent-brand-600 w-4 h-4" />
+                <div>
+                  <p className="text-sm font-medium text-gray-800">Business hours only</p>
+                  <p className="text-xs text-gray-500">SLA clock pauses outside configured hours</p>
+                </div>
+              </label>
+              {form.businessHoursOnly && (
+                <div className="divide-y divide-gray-100">
+                  {DAYS.map(day => {
+                    const d = bizHours[day] ?? { enabled: false, start: '09:00', end: '18:00' };
+                    return (
+                      <div key={day} className={`flex items-center gap-3 px-4 py-2.5 ${d.enabled ? 'bg-white' : 'bg-gray-50'}`}>
+                        <input type="checkbox" checked={d.enabled}
+                          onChange={e => updateDay(day, { enabled: e.target.checked })}
+                          className="rounded accent-brand-600 w-4 h-4 shrink-0" />
+                        <span className={`text-xs font-semibold w-8 shrink-0 ${d.enabled ? 'text-gray-800' : 'text-gray-400'}`}>
+                          {DAY_LABELS[day]}
+                        </span>
+                        {d.enabled ? (
+                          <div className="flex items-center gap-2 flex-1">
+                            <select value={d.start} onChange={e => updateDay(day, { start: e.target.value })}
+                              className="text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-brand-400 bg-white">
+                              {TIME_OPTIONS.map(t => <option key={t} value={t}>{t}</option>)}
+                            </select>
+                            <span className="text-xs text-gray-400">to</span>
+                            <select value={d.end} onChange={e => updateDay(day, { end: e.target.value })}
+                              className="text-xs border border-gray-200 rounded-lg px-2 py-1.5 outline-none focus:border-brand-400 bg-white">
+                              {TIME_OPTIONS.map(t => <option key={t} value={t}>{t}</option>)}
+                            </select>
+                            <span className="text-[10px] text-gray-400 ml-1">
+                              {(() => {
+                                const [sh, sm] = d.start.split(':').map(Number);
+                                const [eh, em] = d.end.split(':').map(Number);
+                                const mins = (eh * 60 + em) - (sh * 60 + sm);
+                                return mins > 0 ? `${Math.floor(mins/60)}h${mins%60?` ${mins%60}m`:''}` : '—';
+                              })()}
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-gray-400 italic">Closed</span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Pause on pending */}
+          <div className="mt-3">
+            <label className="flex items-center gap-3 px-4 py-3 cursor-pointer bg-gray-50 hover:bg-gray-100 rounded-xl border border-gray-100 transition-colors">
+              <input type="checkbox" checked={form.pauseOnPending} onChange={setCheck('pauseOnPending')} className="rounded accent-brand-600 w-4 h-4" />
+              <div>
+                <p className="text-sm font-medium text-gray-800">Pause SLA when waiting for customer</p>
+                <p className="text-xs text-gray-500">Clock pauses when ticket is set to Pending / Waiting — resumes when customer replies</p>
+              </div>
             </label>
           </div>
 
@@ -439,7 +535,13 @@ function PolicyCard({ p, onEdit, onDelete, canEdit }: {
             </span>
             <h3 className="font-semibold text-gray-900">{p.name}</h3>
             {!p.is_active      && <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">Inactive</span>}
-            {p.business_hours_only && <span className="text-xs text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">Business hrs</span>}
+            {p.business_hours_only && (() => {
+              const sched = p.business_hours_schedule ?? {};
+              const activeDays = DAYS.filter(d => sched[d]?.enabled).map(d => DAY_LABELS[d]);
+              const label = activeDays.length ? activeDays.join(', ') : 'Business hrs';
+              return <span className="text-xs text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full" title={label}>⏰ {label}</span>;
+            })()}
+            {p.pause_on_pending && <span className="text-xs text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full">⏸ Pauses on pending</span>}
           </div>
           {p.description && <p className="text-sm text-gray-500">{p.description}</p>}
         </div>
@@ -508,6 +610,76 @@ function PolicyCard({ p, onEdit, onDelete, canEdit }: {
 
 // ── Main page ──────────────────────────────────────────────────────────────
 
+// ── Bot Default Priority Panel ─────────────────────────────────────────────
+const BOT_PRIORITY_OPTIONS = [
+  { value: 'urgent', label: 'Urgent', desc: 'Fraud, blocked accounts — 24/7 clock' },
+  { value: 'high',   label: 'High',   desc: 'Card issues, loan queries' },
+  { value: 'medium', label: 'Medium', desc: 'General complaints (recommended default)' },
+  { value: 'low',    label: 'Low',    desc: 'Balance checks, informational queries' },
+];
+
+function BotDefaultPriority() {
+  const [priority, setPriority] = useState('medium');
+  const [saved, setSaved] = useState(false);
+  const initialisedRef = useRef(false);
+
+  const { data: routingData } = useQuery({
+    queryKey: ['routing-settings'],
+    queryFn: () => api.get('/api/v1/settings/routing').then((r: any) => r.data.data),
+  });
+
+  useEffect(() => {
+    if (routingData && !initialisedRef.current) {
+      const p = (routingData as any)?.routing?.bot_default_priority;
+      if (p) setPriority(p);
+      initialisedRef.current = true;
+    }
+  }, [routingData]);
+
+  const mut = useMutation({
+    mutationFn: () => api.patch('/api/v1/settings/routing', { bot_default_priority: priority }),
+    onSuccess: () => { setSaved(true); setTimeout(() => setSaved(false), 2000); },
+  });
+
+  return (
+    <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5 space-y-4">
+      <div className="flex items-center gap-2">
+        <div className="w-8 h-8 rounded-lg bg-purple-100 flex items-center justify-center">
+          <Bell className="w-4 h-4 text-purple-600" />
+        </div>
+        <div>
+          <p className="text-sm font-semibold text-gray-900">Voice Bot Default Priority</p>
+          <p className="text-xs text-gray-500">Applied to tickets the bot creates when intent is unclear</p>
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        {BOT_PRIORITY_OPTIONS.map(opt => {
+          const cfg = PRIORITY_CFG[opt.value];
+          const selected = priority === opt.value;
+          return (
+            <button key={opt.value} onClick={() => setPriority(opt.value)}
+              className={`text-left p-3 rounded-xl border-2 transition-all ${
+                selected ? 'border-brand-500 bg-brand-50' : 'border-gray-100 hover:border-gray-200'
+              }`}>
+              <div className="flex items-center gap-2 mb-0.5">
+                <span className={`w-2 h-2 rounded-full ${cfg.dot}`} />
+                <span className="text-xs font-semibold text-gray-800">{opt.label}</span>
+              </div>
+              <p className="text-[11px] text-gray-500 pl-4">{opt.desc}</p>
+            </button>
+          );
+        })}
+      </div>
+      <button onClick={() => mut.mutate()} disabled={mut.isPending}
+        className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-xl disabled:opacity-50"
+        style={{ background: 'linear-gradient(135deg,#29ABE2,#1a8cbf)' }}>
+        {mut.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+        {saved ? 'Saved!' : 'Save Default'}
+      </button>
+    </div>
+  );
+}
+
 export function TicketSla() {
   const can = useCan();
   const qc  = useQueryClient();
@@ -538,7 +710,7 @@ export function TicketSla() {
             multi-step reminder and escalation schedule.
           </p>
         </div>
-        {can.manageWorkspace && (
+        {can.manageSla && (
           <button onClick={() => setShowCreate(true)}
             className="flex items-center gap-1.5 px-4 py-2 bg-brand-600 text-white rounded-xl text-sm font-medium hover:bg-brand-700">
             <Plus className="w-4 h-4" /> New Policy
@@ -575,7 +747,7 @@ export function TicketSla() {
         <div className="space-y-4">
           {data.map(p => (
             <PolicyCard key={p.id} p={p}
-              canEdit={can.manageWorkspace}
+              canEdit={can.manageSla}
               onEdit={() => setEditing(p)}
               onDelete={() => { if (confirm(`Delete policy "${p.name}"?`)) deleteMutation.mutate(p.id); }}
             />
@@ -588,6 +760,9 @@ export function TicketSla() {
           )}
         </div>
       )}
+
+      {/* Bot default priority */}
+      {can.manageSla && <BotDefaultPriority />}
 
       {(showCreate || editing) && (
         <SlaModal

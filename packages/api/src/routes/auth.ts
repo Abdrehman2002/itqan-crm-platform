@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import type { DatabaseClient, RedisClient } from '@crm/core';
 import { EmailService } from '../services/email.service';
 import { SECTOR_MAP, getSector } from '@crm/shared';
+import { seedDefaultSlaPolicies } from './tickets';
 
 // ── Security constants ────────────────────────────────────────────────────────
 const BCRYPT_ROUNDS        = 14;          // PCI-DSS / ISO 27001 recommended
@@ -142,12 +143,13 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
         return { tenant: t, user: adminUser };
       });
 
+      // Seed default SLA policies for the new tenant
+      await seedDefaultSlaPolicies(db, tenant.id);
+
       const regJti  = crypto.randomBytes(16).toString('hex');
       const token   = await reply.jwtSign({
         sub: user.id, tenantId: tenant.id, role: user.role, plan: tenant.plan,
         department: user.department ?? null,
-        department_type: user.department_type ?? null,
-        manager_id: user.manager_id ?? null,
         sector:     body.sector,
         jti:        regJti,
       });
@@ -168,60 +170,16 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
       if (!tenantSlug && host.endsWith(`.${platformDomain}`)) {
         tenantSlug = host.replace(`.${platformDomain}`, '');
       }
-
-      // Platform-level fallback: if no tenant slug supplied, this MAY be a
-      // super_admin (they're platform-scoped, not bound to any tenant). Look up
-      // the email globally and accept only if the matching active user is a
-      // super_admin. Any other role still requires the slug — protects tenant
-      // login from accidental cross-tenant matches.
-      // PERF: collapse super_admin login from 3 Mumbai round-trips to 1.
-      // Slug-less super_admin path previously did SELECT user → SELECT tenant →
-      // SELECT user-with-role (3 sequential round-trips × ~150ms = 450ms wasted).
-      // Now: single JOIN that returns user + tenant in one trip.
-      let tenant: any;
-      let preloadedUser: any = null;
       if (!tenantSlug) {
-        const [row] = await db.withSuperAdmin(async (client) => {
-          const r = await client.query(
-            `SELECT u.id AS u_id, u.email AS u_email, u.name AS u_name, u.role AS u_role,
-                    u.password_hash, u.permissions, u.custom_role_id, u.tenant_id AS u_tenant,
-                    u.department, u.department_type, u.manager_id,
-                    t.id AS t_id, t.name AS t_name, t.slug AS t_slug,
-                    t.plan AS t_plan, t.status AS t_status, t.sector AS t_sector,
-                    t.settings AS t_settings, t.active_modules AS t_active_modules,
-                    t.entitled_features AS t_entitled_features,
-                    r.name AS role_name, r.color AS role_color, r.permissions AS role_permissions
-             FROM users u
-             JOIN tenants t      ON t.id = u.tenant_id
-             LEFT JOIN roles r   ON r.id = u.custom_role_id
-             WHERE u.email = $1 AND u.is_active = true AND u.role = 'super_admin'
-             LIMIT 1`,
-            [body.email],
-          );
-          return r.rows;
-        });
-        if (!row) {
-          return reply.code(400).send({ success: false, error: { code: 'TENANT_REQUIRED', message: 'Workspace slug required' } });
-        }
-        tenant = {
-          id: row.t_id, name: row.t_name, slug: row.t_slug, plan: row.t_plan,
-          status: row.t_status, sector: row.t_sector, settings: row.t_settings,
-          active_modules: row.t_active_modules, entitled_features: row.t_entitled_features,
-        };
-        preloadedUser = {
-          id: row.u_id, email: row.u_email, name: row.u_name, role: row.u_role,
-          password_hash: row.password_hash, permissions: row.permissions,
-          custom_role_id: row.custom_role_id, tenant_id: row.u_tenant,
-          department: row.department, department_type: row.department_type, manager_id: row.manager_id,
-          role_name: row.role_name, role_color: row.role_color, role_permissions: row.role_permissions,
-        };
-      } else {
-        [tenant] = await db.withSuperAdmin(async (client) => {
-          const result = await client.query('SELECT * FROM tenants WHERE slug = $1', [tenantSlug]);
-          return result.rows;
-        });
+        return reply.code(400).send({ success: false, error: { code: 'TENANT_REQUIRED', message: 'Workspace slug required' } });
       }
+
+      const [tenant] = await db.withSuperAdmin(async (client) => {
+        const result = await client.query('SELECT * FROM tenants WHERE slug = $1', [tenantSlug]);
+        return result.rows;
+      });
       if (!tenant) {
+        // Use same error as invalid credentials to prevent tenant enumeration
         return reply.code(401).send({ success: false, error: { code: 'INVALID_CREDENTIALS', message: 'Invalid credentials' } });
       }
 
@@ -244,9 +202,7 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
         });
       }
 
-      // PERF: super_admin slug-less path already loaded user+tenant in one trip
-      // above. Skip the third query for them.
-      const [user] = preloadedUser ? [preloadedUser] : await db.withSuperAdmin(async (client) => {
+      const [user] = await db.withSuperAdmin(async (client) => {
         const result = await client.query(
           `SELECT u.*, r.name as role_name, r.color as role_color, r.permissions as role_permissions
            FROM users u
@@ -309,8 +265,6 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
       const token = await reply.jwtSign({
         sub: user.id, tenantId: tenant.id, role: user.role, plan: tenant.plan,
         department: user.department ?? null,
-        department_type: user.department_type ?? null,
-        manager_id: user.manager_id ?? null,
         sector:     tenant.sector ?? 'other',
         permissions: effectivePermissions,
         jti,
@@ -426,19 +380,8 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
     // Refresh token — re-validates user is still active before issuing new token
     fastify.post('/refresh', async (req, reply) => {
       try {
-        // Refresh tokens MUST accept slightly-expired access tokens — that's
-        // the whole reason for the refresh flow. Default jwtVerify rejects
-        // expired tokens, which caused an infinite refresh→401→refresh loop
-        // on the frontend. Allow tokens expired within the last 7 days; older
-        // than that requires a fresh login.
-        await req.jwtVerify({ allowedIss: undefined, ignoreExpiration: true } as any);
+        await req.jwtVerify();
         const payload = req.user as any;
-        // But REJECT tokens that have been expired for more than 7 days —
-        // these are likely stolen / abandoned sessions, not real users.
-        const ageDays = payload.exp ? (Date.now() / 1000 - payload.exp) / 86400 : 0;
-        if (ageDays > 7) {
-          return reply.code(401).send({ success: false, error: { code: 'TOKEN_TOO_OLD', message: 'Session expired, please log in again' } });
-        }
 
         // Verify user and tenant are still active (prevents deactivated users from refreshing)
         const [row] = await db.withSuperAdmin(async (client) => {
@@ -468,11 +411,24 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
       }
     });
 
-    // Change password — Munir's PersonalSettings.tsx calls this at /api/v1/auth/change-password.
-    // We mount auth twice in server.ts so the same handler answers at both /auth/* and /api/v1/auth/*.
+    // Logout — revokes the current token's JTI in Redis
+    fastify.post('/logout', async (req, reply) => {
+      try {
+        await req.jwtVerify();
+        const payload = req.user as any;
+        if (payload?.jti && payload?.exp) {
+          await revokeToken(redis, payload.jti, payload.exp);
+        }
+      } catch {
+        // Even if token is malformed, return success — client is logging out
+      }
+      return reply.send({ success: true });
+    });
+
+    // Change password — Munir's PersonalSettings.tsx calls /api/v1/auth/change-password.
+    // We dual-mount authRoutes in server.ts (/auth and /api/v1/auth) so this resolves at both.
+    // narrow try/catch to jwtVerify; let real errors bubble to global handler.
     fastify.post('/change-password', async (req, reply) => {
-      // Verify JWT first; only catch THAT failure as 401. Later errors bubble
-      // up to the global handler so we don't silently mask DB / bcrypt bugs.
       try {
         await req.jwtVerify();
       } catch {
@@ -480,15 +436,18 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
       }
       const userId   = (req.user as any)?.sub;
       const tenantId = (req.user as any)?.tenantId;
+      const userRole = (req.user as any)?.role;
       if (!userId || !tenantId) {
         return reply.code(401).send({ success: false, error: { code: 'UNAUTHORIZED', message: 'Not authenticated' } });
+      }
+      // Block super_admin from changing their password here (per Munir's hardening — they go through Super Admin → Settings)
+      if (userRole === 'super_admin') {
+        return reply.code(403).send({ success: false, error: { code: 'SUPER_ADMIN_BLOCKED', message: 'Super admin password must be changed via the platform Settings tab' } });
       }
       const { currentPassword, newPassword } = req.body as { currentPassword?: string; newPassword?: string };
       if (!currentPassword || !newPassword || newPassword.length < 8) {
         return reply.code(400).send({ success: false, error: { code: 'WEAK_PASSWORD', message: 'Password must be at least 8 characters' } });
       }
-      const bcryptMod = await import('bcryptjs');
-      const bcrypt: any = (bcryptMod as any).default ?? bcryptMod;
       const [row] = await db.withSuperAdmin(async (client) => {
         const r = await client.query('SELECT password_hash FROM users WHERE id = $1 AND tenant_id = $2', [userId, tenantId]);
         return r.rows;
@@ -504,41 +463,6 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
       await db.withSuperAdmin(async (client) => {
         await client.query('UPDATE users SET password_hash = $1 WHERE id = $2 AND tenant_id = $3', [hash, userId, tenantId]);
       });
-      return reply.send({ success: true });
-    });
-
-    // Heartbeat — frontend pings every 30s while a tab is open.
-    // Updates users.last_active_at so manager dashboards can show online/idle/offline.
-    // Cheap upsert — no logging, no eventBus, just a single UPDATE.
-    fastify.post('/heartbeat', async (req, reply) => {
-      try {
-        await req.jwtVerify();
-        const userId = (req.user as any)?.sub;
-        const tenantId = (req.user as any)?.tenantId;
-        if (!userId || !tenantId) return reply.code(401).send({ success: false });
-        await db.withSuperAdmin(async (client) => {
-          await client.query(
-            `UPDATE users SET last_active_at = NOW() WHERE id = $1 AND tenant_id = $2`,
-            [userId, tenantId],
-          );
-        });
-        return reply.send({ success: true });
-      } catch {
-        return reply.code(401).send({ success: false });
-      }
-    });
-
-    // Logout — revokes the current token's JTI in Redis
-    fastify.post('/logout', async (req, reply) => {
-      try {
-        await req.jwtVerify();
-        const payload = req.user as any;
-        if (payload?.jti && payload?.exp) {
-          await revokeToken(redis, payload.jti, payload.exp);
-        }
-      } catch {
-        // Even if token is malformed, return success — client is logging out
-      }
       return reply.send({ success: true });
     });
   };

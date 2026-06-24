@@ -1,13 +1,14 @@
+import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate, NavLink } from 'react-router-dom';
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import {
   LayoutDashboard, Users, Building2, TrendingUp, Phone,
   CheckSquare, BarChart3, Settings as SettingsIcon, Zap, Shield,
   LogOut, CreditCard, BarChart2, LifeBuoy, List, Clock, Mail, Bot,
-  FileText, Layers, MessageCircle,
+  FileText, Layers, MessageCircle, Key, Bell, Lock,
 } from 'lucide-react';
 import { useAuthStore } from './store/auth.store';
-import { useIsSuperAdmin, useIsAdmin, useIsTenantAdmin } from './hooks/useRole';
+import { useIsSuperAdmin, useIsAdmin, useIsTenantAdmin, useHasRole } from './hooks/useRole';
 import { useApplyAppearance } from './hooks/useApplyAppearance';
 import { api } from './services/api';
 import { NotificationBell } from './components/NotificationBell';
@@ -23,7 +24,7 @@ import { Deals }        from './pages/Deals';
 import { Activities }   from './pages/Activities';
 import { Analytics }    from './pages/Analytics';
 import { Integrations } from './pages/Integrations';
-import { Settings }     from './pages/Settings';
+import { Settings, ModulesSettings, RoutingSettings } from './pages/Settings';
 import { SuperAdmin }       from './pages/SuperAdmin';
 import { VoiceAnalytics }   from './pages/VoiceAnalytics';
 import { Tickets }          from './pages/Tickets';
@@ -38,6 +39,9 @@ import { ForgotPassword }  from './pages/ForgotPassword';
 import { ResetPassword }   from './pages/ResetPassword';
 import { RolesPage }          from './pages/Roles';
 import { PersonalSettings }   from './pages/PersonalSettings';
+import { TenantAdminDashboard } from './pages/TenantAdminDashboard';
+import { Departments }          from './pages/Departments';
+import { AdminUsers }           from './pages/admin/AdminUsers';
 // Sales & Invoicing module
 import { SalesDashboard }    from './pages/sales/SalesDashboard';
 import { InvoiceList }       from './pages/sales/InvoiceList';
@@ -87,6 +91,7 @@ function Sidebar() {
   const isSuperAdmin  = useIsSuperAdmin();
   const isAdmin       = useIsAdmin();
   const isTenantAdmin = useIsTenantAdmin();
+  const isManager     = useHasRole('manager');
 
   // Fetch active modules from the API — drives the sidebar dynamically
   const { data: modulesData } = useQuery<ActiveModule[]>({
@@ -130,9 +135,67 @@ function Sidebar() {
         </div>
       </div>
 
-      {/* ── Dynamic module navigation ─────────────────────────────── */}
-      {/* Tenant admin is administrative-only — no operational module nav. */}
-      <nav className="flex-1 px-2 py-4 space-y-4 overflow-y-auto">
+      {/* ── Navigation ───────────────────────────────────────────── */}
+      <nav className="flex-1 px-2 py-4 space-y-0.5 overflow-y-auto">
+
+        {/* ── Tenant Admin sidebar ─────────────────────────────────── */}
+        {isTenantAdmin && (
+          <>
+            {/* Dashboard */}
+            <NavLink to="/admin" end
+              className={({ isActive }) => `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'}`}
+              style={({ isActive }) => isActive ? { background: 'linear-gradient(135deg, rgba(41,171,226,0.25) 0%, rgba(77,139,60,0.15) 100%)', borderLeft: '2px solid #29ABE2' } : {}}
+            ><LayoutDashboard className="w-4 h-4 shrink-0" />Dashboard</NavLink>
+
+            {/* People section */}
+            <p className="px-3 pt-3 pb-1 text-[10px] font-bold text-brand-300/60 uppercase tracking-widest">People</p>
+            <NavLink to="/admin/users"
+              className={({ isActive }) => `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'}`}
+              style={({ isActive }) => isActive ? { background: 'linear-gradient(135deg, rgba(41,171,226,0.25) 0%, rgba(77,139,60,0.15) 100%)', borderLeft: '2px solid #29ABE2' } : {}}
+            ><Users className="w-4 h-4 shrink-0" />Users</NavLink>
+            <NavLink to="/roles"
+              className={({ isActive }) => `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'}`}
+              style={({ isActive }) => isActive ? { background: 'linear-gradient(135deg, rgba(41,171,226,0.25) 0%, rgba(77,139,60,0.15) 100%)', borderLeft: '2px solid #29ABE2' } : {}}
+            ><Shield className="w-4 h-4 shrink-0" />Roles & Permissions</NavLink>
+            <NavLink to="/departments"
+              className={({ isActive }) => `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'}`}
+              style={({ isActive }) => isActive ? { background: 'linear-gradient(135deg, rgba(41,171,226,0.25) 0%, rgba(77,139,60,0.15) 100%)', borderLeft: '2px solid #29ABE2' } : {}}
+            ><Building2 className="w-4 h-4 shrink-0" />Departments</NavLink>
+
+            {/* Workspace section */}
+            <p className="px-3 pt-3 pb-1 text-[10px] font-bold text-brand-300/60 uppercase tracking-widest">Workspace</p>
+            <NavLink to="/admin/modules"
+              className={({ isActive }) => `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'}`}
+              style={({ isActive }) => isActive ? { background: 'linear-gradient(135deg, rgba(41,171,226,0.25) 0%, rgba(77,139,60,0.15) 100%)', borderLeft: '2px solid #29ABE2' } : {}}
+            ><Layers className="w-4 h-4 shrink-0" />Modules</NavLink>
+            <NavLink to="/integrations"
+              className={({ isActive }) => `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'}`}
+              style={({ isActive }) => isActive ? { background: 'linear-gradient(135deg, rgba(41,171,226,0.25) 0%, rgba(77,139,60,0.15) 100%)', borderLeft: '2px solid #29ABE2' } : {}}
+            ><Zap className="w-4 h-4 shrink-0" />Integrations</NavLink>
+            <NavLink to="/settings"
+              end
+              className={({ isActive }) => `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'}`}
+              style={({ isActive }) => isActive ? { background: 'linear-gradient(135deg, rgba(41,171,226,0.25) 0%, rgba(77,139,60,0.15) 100%)', borderLeft: '2px solid #29ABE2' } : {}}
+            ><SettingsIcon className="w-4 h-4 shrink-0" />General Settings</NavLink>
+            <NavLink to="/admin/routing"
+              className={({ isActive }) => `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'}`}
+              style={({ isActive }) => isActive ? { background: 'linear-gradient(135deg, rgba(41,171,226,0.25) 0%, rgba(77,139,60,0.15) 100%)', borderLeft: '2px solid #29ABE2' } : {}}
+            ><Clock className="w-4 h-4 shrink-0" />Routing & SLA</NavLink>
+
+            {/* Security section */}
+            <p className="px-3 pt-3 pb-1 text-[10px] font-bold text-brand-300/60 uppercase tracking-widest">Security</p>
+            <NavLink to="/settings/personal"
+              className={({ isActive }) => `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'}`}
+              style={({ isActive }) => isActive ? { background: 'linear-gradient(135deg, rgba(41,171,226,0.25) 0%, rgba(77,139,60,0.15) 100%)', borderLeft: '2px solid #29ABE2' } : {}}
+            ><Lock className="w-4 h-4 shrink-0" />Security & Password</NavLink>
+            <NavLink to="/settings/notifications"
+              className={({ isActive }) => `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'}`}
+              style={({ isActive }) => isActive ? { background: 'linear-gradient(135deg, rgba(41,171,226,0.25) 0%, rgba(77,139,60,0.15) 100%)', borderLeft: '2px solid #29ABE2' } : {}}
+            ><Bell className="w-4 h-4 shrink-0" />Notifications</NavLink>
+          </>
+        )}
+
+        {/* ── Operational staff module nav ─────────────────────────── */}
         {!isTenantAdmin && modules.map((mod) => (
           <div key={mod.id}>
             {modules.length > 1 && (
@@ -194,7 +257,7 @@ function Sidebar() {
           const gatedLinks = [
             { to: '/integrations', label: 'Integrations', icon: 'Zap',        key: 'integrations:read', adminBypass: true  },
             { to: '/billing',      label: 'Billing',      icon: 'CreditCard', key: 'billing:read',      adminBypass: false },
-          ].filter((l) => (l.adminBypass && isAdmin) || perms[l.key] === true);
+          ].filter((l) => !isTenantAdmin && ((l.adminBypass && isAdmin) || perms[l.key] === true));
           if (gatedLinks.length === 0) return null;
           return (
             <>
@@ -274,8 +337,8 @@ function Sidebar() {
         )}
 
 
-        {/* Roles — admins only */}
-        {isAdmin && (
+        {/* Roles — admins only (not tenant admin, they have it in their own sidebar) */}
+        {isAdmin && !isTenantAdmin && (
           <NavLink to="/roles"
             className={({ isActive }) =>
               `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${
@@ -292,8 +355,8 @@ function Sidebar() {
           </NavLink>
         )}
 
-        {/* System Settings — only if user has settings:read permission */}
-        {(isAdmin || (user as any)?.permissions?.['settings:read']) && (
+        {/* System Settings — for non-tenant-admin users with settings:read */}
+        {!isTenantAdmin && (isAdmin || (user as any)?.permissions?.['settings:read']) && (
           <NavLink to="/settings"
             className={({ isActive }) =>
               `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${
@@ -307,6 +370,42 @@ function Sidebar() {
           >
             <SettingsIcon className="w-4 h-4" />
             Settings
+          </NavLink>
+        )}
+
+        {/* SLA Policies — managers only */}
+        {isManager && !isTenantAdmin && (
+          <NavLink to="/tickets/sla"
+            className={({ isActive }) =>
+              `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${
+                isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'
+              }`
+            }
+            style={({ isActive }) => isActive ? {
+              background: 'linear-gradient(135deg, rgba(41,171,226,0.25) 0%, rgba(77,139,60,0.15) 100%)',
+              borderLeft: '2px solid #29ABE2',
+            } : {}}
+          >
+            <Clock className="w-4 h-4" />
+            SLA Policies
+          </NavLink>
+        )}
+
+        {/* Routing & SLA — managers only (tenant admins have it in their own sidebar) */}
+        {isManager && !isTenantAdmin && (
+          <NavLink to="/admin/routing"
+            className={({ isActive }) =>
+              `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${
+                isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'
+              }`
+            }
+            style={({ isActive }) => isActive ? {
+              background: 'linear-gradient(135deg, rgba(41,171,226,0.25) 0%, rgba(77,139,60,0.15) 100%)',
+              borderLeft: '2px solid #29ABE2',
+            } : {}}
+          >
+            <Clock className="w-4 h-4" />
+            Routing & SLA
           </NavLink>
         )}
 
@@ -332,27 +431,98 @@ function Sidebar() {
   );
 }
 
+// ── Shared wrapper for standalone tenant-admin pages ─────────────────────────
+function AdminPageWrapper({ title, subtitle, children }: { title: string; subtitle: string; children: React.ReactNode }) {
+  return (
+    <div className="min-h-screen bg-gray-50">
+      <div className="bg-white border-b border-gray-100 px-8 py-5">
+        <h1 className="text-xl font-bold text-gray-900">{title}</h1>
+        <p className="text-sm text-gray-500 mt-0.5">{subtitle}</p>
+      </div>
+      <div className="px-8 py-6">{children}</div>
+    </div>
+  );
+}
+
+// ── Notifications page ────────────────────────────────────────────────────────
+function NotificationsPage() {
+  const categories = [
+    { id: 'tickets',  label: 'Tickets',           items: ['New ticket assigned to me', 'Ticket status changed', 'Ticket SLA breached', 'Ticket resolved'] },
+    { id: 'contacts', label: 'Contacts & Deals',  items: ['New contact added', 'Deal stage changed', 'Deal won / lost'] },
+    { id: 'team',     label: 'Team',               items: ['New user invited', 'User activated / deactivated', 'Role changed'] },
+    { id: 'system',   label: 'System',             items: ['Module enabled / disabled', 'Integration connected / disconnected'] },
+  ];
+  const [prefs, setPrefs] = React.useState<Record<string, Record<string, { email: boolean; inApp: boolean }>>>(() =>
+    Object.fromEntries(categories.map(c => [c.id, Object.fromEntries(c.items.map(i => [i, { email: true, inApp: true }]))]))
+  );
+  const toggle = (cat: string, item: string, channel: 'email' | 'inApp') =>
+    setPrefs(p => ({ ...p, [cat]: { ...p[cat], [item]: { ...p[cat][item], [channel]: !p[cat][item][channel] } } }));
+
+  return (
+    <div className="max-w-2xl space-y-6">
+      <div className="flex items-center gap-6 text-xs font-semibold text-gray-500 uppercase tracking-wide justify-end pr-2">
+        <span className="w-14 text-center">Email</span>
+        <span className="w-14 text-center">In-App</span>
+      </div>
+      {categories.map(cat => (
+        <div key={cat.id} className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+          <div className="px-5 py-3 bg-gray-50 border-b border-gray-100">
+            <p className="text-xs font-bold text-gray-600 uppercase tracking-wide">{cat.label}</p>
+          </div>
+          <div className="divide-y divide-gray-50">
+            {cat.items.map(item => (
+              <div key={item} className="flex items-center px-5 py-3 gap-4">
+                <span className="flex-1 text-sm text-gray-700">{item}</span>
+                <div className="flex gap-6 shrink-0">
+                  {(['email', 'inApp'] as const).map(ch => (
+                    <div key={ch} className="w-14 flex justify-center">
+                      <button
+                        onClick={() => toggle(cat.id, item, ch)}
+                        className={`w-9 h-5 rounded-full transition-colors ${prefs[cat.id][item][ch] ? 'bg-blue-500' : 'bg-gray-200'}`}
+                      >
+                        <span className={`block w-3.5 h-3.5 bg-white rounded-full shadow transition-transform mx-0.5 ${prefs[cat.id][item][ch] ? 'translate-x-4' : 'translate-x-0'}`} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+      <button className="px-5 py-2.5 text-sm font-semibold text-white rounded-xl" style={{ background: 'linear-gradient(135deg,#29ABE2,#1a8cbf)' }}>
+        Save Preferences
+      </button>
+    </div>
+  );
+}
+
 function AppLayout() {
   const { isAuthenticated } = useAuthStore();
   const isSuperAdmin = useIsSuperAdmin();
   const isTenantAdmin = useIsTenantAdmin();
+  const isManager = useHasRole('manager');
   useApplyAppearance();
   if (!isAuthenticated) return <Navigate to="/login" replace />;
 
   // Super admins have no operational (ticket/voice) dashboard — their home is the
   // platform admin console. Tenant admins are administrative-only: their home is
   // the workspace Settings console; all operational pages redirect away.
-  const homePath = isSuperAdmin ? '/super-admin' : isTenantAdmin ? '/settings' : '/dashboard';
+  const homePath = isSuperAdmin ? '/super-admin' : isTenantAdmin ? '/admin' : '/dashboard';
 
   // Operational pages are off-limits to the tenant admin (separation of duties).
   // Wrap an operational element so it bounces the admin to their console.
-  const op = (el: JSX.Element) => (isTenantAdmin ? <Navigate to="/settings" replace /> : el);
+  const op = (el: JSX.Element) => (isTenantAdmin ? <Navigate to="/admin" replace /> : el);
 
   return (
     <div className="flex h-screen bg-gray-50 overflow-hidden">
       <Sidebar />
       <main className="flex-1 overflow-y-auto">
         <Routes>
+          <Route path="/admin"         element={isTenantAdmin ? <TenantAdminDashboard /> : <Navigate to="/dashboard" replace />} />
+          <Route path="/admin/users"   element={isTenantAdmin ? <AdminUsers /> : <Navigate to="/dashboard" replace />} />
+          <Route path="/admin/modules" element={isTenantAdmin ? <AdminPageWrapper title="Modules" subtitle="Enable or disable features for your workspace"><ModulesSettings /></AdminPageWrapper> : <Navigate to="/dashboard" replace />} />
+          <Route path="/admin/routing" element={(isTenantAdmin || isManager) ? <AdminPageWrapper title="Routing & SLA" subtitle="Configure how tickets and calls are assigned to your team"><RoutingSettings /></AdminPageWrapper> : <Navigate to="/dashboard" replace />} />
           <Route path="/dashboard"    element={isSuperAdmin ? <Navigate to="/super-admin" replace /> : op(<Dashboard />)} />
           <Route path="/contacts"     element={op(<Contacts />)} />
           <Route path="/companies"   element={op(<Companies />)} />
@@ -375,6 +545,8 @@ function AppLayout() {
           <Route path="/integrations" element={<Integrations />} />
           <Route path="/settings"          element={<Settings />} />
           <Route path="/settings/personal" element={<PersonalSettings />} />
+          <Route path="/settings/notifications" element={<AdminPageWrapper title="Notifications" subtitle="Control which alerts and emails you receive"><NotificationsPage /></AdminPageWrapper>} />
+          <Route path="/departments"       element={<Departments />} />
           <Route path="/roles"        element={<RolesPage />} />
           <Route path="/super-admin" element={<SuperAdmin />} />
           {/* Sales & Invoicing module */}

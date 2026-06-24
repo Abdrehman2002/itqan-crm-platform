@@ -103,7 +103,13 @@ const CreateSlaSchema = z.object({
   reminderPct:         z.number().int().min(1).max(99).default(80),
   l1EscalationPct:     z.number().int().min(1).default(100),
   l2EscalationPct:     z.number().int().min(1).default(150),
-  businessHoursOnly:   z.boolean().default(false),
+  businessHoursOnly:       z.boolean().default(false),
+  businessHoursSchedule:   z.record(z.object({
+    enabled: z.boolean(),
+    start:   z.string().regex(/^\d{2}:\d{2}$/),
+    end:     z.string().regex(/^\d{2}:\d{2}$/),
+  })).optional(),
+  pauseOnPending:      z.boolean().default(false),
   isActive:            z.boolean().default(true),
   reminderSchedule:    z.array(z.object({
     id:           z.string(),
@@ -710,12 +716,14 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
         const r = await client.query(
            `INSERT INTO sla_policies
               (tenant_id, name, description, priority, first_response_hours, resolution_hours,
-               reminder_pct, l1_escalation_pct, l2_escalation_pct, business_hours_only, is_active, reminder_schedule)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+               reminder_pct, l1_escalation_pct, l2_escalation_pct, business_hours_only,
+               business_hours_schedule, pause_on_pending, is_active, reminder_schedule)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
            [req.tenant.id, body.name, body.description ?? null, body.priority,
             body.firstResponseHours, body.resolutionHours,
             body.reminderPct, body.l1EscalationPct, body.l2EscalationPct,
-            body.businessHoursOnly, body.isActive, JSON.stringify(body.reminderSchedule ?? [])],
+            body.businessHoursOnly, JSON.stringify(body.businessHoursSchedule ?? {}),
+            body.pauseOnPending, body.isActive, JSON.stringify(body.reminderSchedule ?? [])],
          );
         return r.rows;
       });
@@ -736,14 +744,19 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
              reminder_pct         = COALESCE($6,  reminder_pct),
              l1_escalation_pct    = COALESCE($7,  l1_escalation_pct),
              l2_escalation_pct    = COALESCE($8,  l2_escalation_pct),
-             business_hours_only  = COALESCE($9,  business_hours_only),
-             is_active            = COALESCE($10, is_active),
-             reminder_schedule    = COALESCE($11::jsonb, reminder_schedule),
-             updated_at           = NOW()
-           WHERE id = $12 RETURNING *`,
+             business_hours_only     = COALESCE($9,        business_hours_only),
+             business_hours_schedule = COALESCE($10::jsonb, business_hours_schedule),
+             pause_on_pending        = COALESCE($11,        pause_on_pending),
+             is_active               = COALESCE($12,        is_active),
+             reminder_schedule       = COALESCE($13::jsonb, reminder_schedule),
+             updated_at              = NOW()
+           WHERE id = $14 RETURNING *`,
           [body.name, body.description, body.priority, body.firstResponseHours,
            body.resolutionHours, body.reminderPct, body.l1EscalationPct,
-           body.l2EscalationPct, body.businessHoursOnly, body.isActive,
+           body.l2EscalationPct, body.businessHoursOnly,
+           body.businessHoursSchedule !== undefined ? JSON.stringify(body.businessHoursSchedule) : null,
+           body.pauseOnPending ?? null,
+           body.isActive,
            body.reminderSchedule !== undefined ? JSON.stringify(body.reminderSchedule) : null, id],
         );
         return r.rows;
@@ -1055,6 +1068,12 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
       // Auto-set timestamps for status transitions
       if (body.status === 'resolved') { sets.push(`resolved_at = COALESCE(resolved_at, NOW())`); }
       if (body.status === 'closed')   { sets.push(`closed_at   = COALESCE(closed_at,   NOW())`); }
+
+      // Auto-reassign SLA policy when priority changes (and no explicit slaPolicyId given)
+      if (body.priority && !body.slaPolicyId) {
+        const newSla = await findSlaPolicy(db, req.tenant.id, undefined, body.priority);
+        if (newSla) { sets.push(`sla_policy_id = $${idx++}`); vals.push(newSla.id); }
+      }
 
       vals.push(id);
       const [ticket] = await db.withTenant(req.tenant.id, async (client) => {
@@ -2174,4 +2193,110 @@ export async function runSlaWorker(db: DatabaseClient, eventBus: EventBus): Prom
     // Worker errors must not crash the server
     console.error('[SLA Worker] Error:', err.message);
   }
+}
+
+// ── Default SLA seed ──────────────────────────────────────────────────────────
+//
+// Benchmarked against Zendesk, Freshdesk, and Jira Service Management defaults:
+//   Urgent  — 1h first response / 4h resolution   (Zendesk critical / Freshdesk urgent)
+//   High    — 2h first response / 8h resolution   (Zendesk high)
+//   Medium  — 8h first response / 24h resolution  (Freshdesk medium / Jira SM normal)
+//   Low     — 24h first response / 72h resolution (Zendesk low / Freshdesk low)
+//
+// All four tiers use business hours by default (industry standard).
+// Escalation schedule mirrors Freshdesk/Zendesk three-tier pattern:
+//   50% warning → agent, 75% warning → agent, 100% L1 breach → managers, 150% L2 → admins.
+
+const DEFAULT_SLA_POLICIES = [
+  {
+    priority: 'urgent',
+    name: 'Urgent — Fraud & Critical',
+    description: 'Fraud alerts, account blocks, security incidents. 24/7 clock — business hours OFF.',
+    first_response_hours: 1,
+    resolution_hours: 4,
+    business_hours_only: false,
+    reminder_pct: 75,
+    l1_escalation_pct: 100,
+    l2_escalation_pct: 150,
+    reminder_schedule: [
+      { id: 'u1', pct: 50,  level: 'reminder', label: '50% Warning — Notify Agent',          notifyTarget: 'assignee' },
+      { id: 'u2', pct: 75,  level: 'reminder', label: '75% Warning — Urgent Alert to Agent',  notifyTarget: 'assignee' },
+      { id: 'u3', pct: 100, level: 'l1',       label: 'SLA Breached — Escalate to Managers', notifyTarget: 'managers' },
+      { id: 'u4', pct: 150, level: 'l2',       label: 'Critical Breach — Notify All Admins', notifyTarget: 'admins'  },
+    ],
+  },
+  {
+    priority: 'high',
+    name: 'High — Card & Loan Issues',
+    description: 'Card disputes, loan queries, payment failures. Business hours.',
+    first_response_hours: 2,
+    resolution_hours: 8,
+    business_hours_only: true,
+    reminder_pct: 75,
+    l1_escalation_pct: 100,
+    l2_escalation_pct: 150,
+    reminder_schedule: [
+      { id: 'h1', pct: 50,  level: 'reminder', label: '50% Warning to Agent',               notifyTarget: 'assignee' },
+      { id: 'h2', pct: 75,  level: 'reminder', label: '75% Final Warning to Agent',          notifyTarget: 'assignee' },
+      { id: 'h3', pct: 100, level: 'l1',       label: 'SLA Breached — Notify Managers',     notifyTarget: 'managers' },
+      { id: 'h4', pct: 150, level: 'l2',       label: 'Critical Breach — Notify Admins',    notifyTarget: 'admins'  },
+    ],
+  },
+  {
+    priority: 'medium',
+    name: 'Medium — General Complaints',
+    description: 'Service complaints, account queries, general support. Business hours.',
+    first_response_hours: 8,
+    resolution_hours: 24,
+    business_hours_only: true,
+    reminder_pct: 75,
+    l1_escalation_pct: 100,
+    l2_escalation_pct: 200,
+    reminder_schedule: [
+      { id: 'm1', pct: 50,  level: 'reminder', label: '50% Warning to Agent',               notifyTarget: 'assignee' },
+      { id: 'm2', pct: 75,  level: 'reminder', label: '75% Warning — Act Now',               notifyTarget: 'assignee' },
+      { id: 'm3', pct: 90,  level: 'reminder', label: '90% Final Warning',                   notifyTarget: 'assignee' },
+      { id: 'm4', pct: 100, level: 'l1',       label: 'SLA Breached — Notify Managers',     notifyTarget: 'managers' },
+      { id: 'm5', pct: 200, level: 'l2',       label: 'Severely Overdue — Notify Admins',   notifyTarget: 'admins'  },
+    ],
+  },
+  {
+    priority: 'low',
+    name: 'Low — Balance & Info Queries',
+    description: 'Balance checks, statement requests, informational queries. Business hours.',
+    first_response_hours: 24,
+    resolution_hours: 72,
+    business_hours_only: true,
+    reminder_pct: 75,
+    l1_escalation_pct: 100,
+    l2_escalation_pct: 200,
+    reminder_schedule: [
+      { id: 'l1', pct: 50,  level: 'reminder', label: '50% Warning to Agent',               notifyTarget: 'assignee' },
+      { id: 'l2', pct: 75,  level: 'reminder', label: '75% Warning to Agent',                notifyTarget: 'assignee' },
+      { id: 'l3', pct: 100, level: 'l1',       label: 'SLA Breached — Notify Managers',     notifyTarget: 'managers' },
+      { id: 'l4', pct: 200, level: 'l2',       label: 'Long Overdue — Notify Admins',       notifyTarget: 'admins'  },
+    ],
+  },
+];
+
+export async function seedDefaultSlaPolicies(db: any, tenantId: string): Promise<void> {
+  await db.withTenant(tenantId, async (client: any) => {
+    const existing = await client.query('SELECT COUNT(*) FROM sla_policies WHERE tenant_id = $1', [tenantId]);
+    if (parseInt(existing.rows[0].count) > 0) return; // already seeded
+
+    for (const p of DEFAULT_SLA_POLICIES) {
+      await client.query(
+        `INSERT INTO sla_policies
+           (tenant_id, name, description, priority, first_response_hours, resolution_hours,
+            reminder_pct, l1_escalation_pct, l2_escalation_pct, business_hours_only, is_active, reminder_schedule)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,true,$11)`,
+        [
+          tenantId, p.name, p.description, p.priority,
+          p.first_response_hours, p.resolution_hours,
+          p.reminder_pct, p.l1_escalation_pct, p.l2_escalation_pct,
+          p.business_hours_only, JSON.stringify(p.reminder_schedule),
+        ],
+      );
+    }
+  });
 }

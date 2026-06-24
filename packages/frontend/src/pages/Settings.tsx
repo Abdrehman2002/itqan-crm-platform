@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Save, Loader2, Building2, Users, Clock,
@@ -11,27 +11,44 @@ import { MilestoneSettings } from './MilestoneSettings';
 import { useAuthStore } from '../store/auth.store';
 import { useIsAdmin } from '../hooks/useRole';
 
-type Tab = 'workspace' | 'modules' | 'team' | 'routing' | 'tags';
+type Tab = 'workspace' | 'tags';
 
 const TABS: { id: Tab; label: string; icon: any }[] = [
-  { id: 'workspace', label: 'Workspace',    icon: Building2 },
-  { id: 'modules',   label: 'Modules',      icon: Layers    },
-  { id: 'team',      label: 'Team',         icon: Users     },
-  { id: 'routing',   label: 'Routing & SLA',icon: Route     },
-  { id: 'tags',      label: 'Tags',         icon: Tag       },
+  { id: 'workspace', label: 'General',  icon: Building2 },
+  { id: 'tags',      label: 'Tags',     icon: Tag       },
 ];
 
 function WorkspaceSettings() {
   const { tenant } = useAuthStore();
   const qc = useQueryClient();
+
+  const { data: wsData, isLoading } = useQuery({
+    queryKey: ['workspace-settings'],
+    queryFn: () => api.get('/api/v1/settings/workspace').then((r: any) => r.data.data),
+  });
+
   const [form, setForm] = useState({
-    name: tenant?.name ?? '',
+    name: '',
     domain: '',
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     dateFormat: 'MM/DD/YYYY',
     currency: 'USD',
   });
   const [saved, setSaved] = useState(false);
+  const initialisedRef = useRef(false);
+
+  useEffect(() => {
+    if (wsData && !initialisedRef.current) {
+      setForm({
+        name:       (wsData as any).name ?? tenant?.name ?? '',
+        domain:     (wsData as any).custom_domain ?? '',
+        timezone:   (wsData as any).settings?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+        dateFormat: (wsData as any).settings?.dateFormat ?? 'MM/DD/YYYY',
+        currency:   (wsData as any).settings?.currency ?? 'USD',
+      });
+      initialisedRef.current = true;
+    }
+  }, [wsData]);
 
   const mutation = useMutation({
     mutationFn: (body: typeof form) => api.patch('/api/v1/settings/workspace', body),
@@ -42,10 +59,12 @@ function WorkspaceSettings() {
     },
   });
 
+  if (isLoading) return <div className="text-sm text-gray-400 p-4">Loading…</div>;
+
   return (
     <div className="space-y-6 max-w-lg">
       <div>
-        <h2 className="text-base font-semibold text-gray-900">Workspace Settings</h2>
+        <h2 className="text-base font-semibold text-gray-900">General Settings</h2>
         <p className="text-sm text-gray-500 mt-0.5">Manage your organization details and preferences.</p>
       </div>
       <div className="space-y-4">
@@ -581,7 +600,7 @@ function TeamSettings() {
 
 // ── Routing & SLA Settings ────────────────────────────────────────────────────
 
-function RoutingSettings() {
+export function RoutingSettings() {
   const qc = useQueryClient();
   const [saved, setSaved] = useState(false);
 
@@ -765,8 +784,8 @@ function TagsSettings() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between">
-        <div>
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
           <h2 className="text-base font-semibold text-gray-900">Ticket Tags</h2>
           <p className="text-sm text-gray-500 mt-0.5">
             Manage reusable labels for categorising tickets across your workspace.
@@ -774,7 +793,7 @@ function TagsSettings() {
         </div>
         <button
           onClick={() => setCreating(true)}
-          className="flex items-center gap-2 px-4 py-2 bg-brand-600 text-white text-sm rounded-xl hover:bg-brand-700 font-medium"
+          className="flex shrink-0 items-center gap-2 px-4 py-2 bg-brand-600 text-white text-sm rounded-xl hover:bg-brand-700 font-medium"
         >
           <Plus className="w-4 h-4" /> New Tag
         </button>
@@ -931,7 +950,7 @@ const MODULE_META: Record<string, { icon: string; warning?: string }> = {
   analytics:    { icon: '📊' },
 };
 
-function ModulesSettings() {
+export function ModulesSettings() {
   const qc = useQueryClient();
   const [saving, setSaving] = useState<string | null>(null);
   const [toggleError, setToggleError] = useState<string | null>(null);
@@ -1067,24 +1086,18 @@ function ModulesSettings() {
 
 const TAB_CONTENT: Record<Tab, React.FC> = {
   workspace: WorkspaceSettings,
-  modules:   ModulesSettings,
-  team:      TeamSettings,
-  routing:   RoutingSettings,
   tags:      TagsSettings,
 };
 
 export function Settings() {
   const [tab, setTab] = useState<Tab>('workspace');
   const TabContent = TAB_CONTENT[tab];
-  const { user } = useAuthStore();
-  const visibleTabs = TABS.filter(t => !(user?.role === 'super_admin' && t.id === 'routing'));
-
   return (
     <div className="flex h-full">
       {/* Sidebar */}
       <div className="w-52 border-r border-gray-100 p-3 space-y-0.5">
-        <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider px-3 mb-3">Workspace Settings</p>
-        {visibleTabs.map(({ id, label, icon: Icon }) => (
+        <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider px-3 mb-3">General Settings</p>
+        {TABS.map(({ id, label, icon: Icon }) => (
           <button key={id} onClick={() => setTab(id)}
             className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors text-left ${
               tab === id ? 'bg-brand-50 text-brand-700 font-medium' : 'text-gray-600 hover:bg-gray-50'

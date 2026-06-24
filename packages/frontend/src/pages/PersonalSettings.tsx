@@ -288,18 +288,17 @@ function NotificationSettings() {
 
 function SecuritySettings() {
   const isSuperAdmin = useIsSuperAdmin();
+  const { logout } = useAuthStore();
   const [currentPw, setCurrentPw] = useState('');
   const [newPw,     setNewPw]     = useState('');
   const [confirmPw, setConfirmPw] = useState('');
-  const [saved,     setSaved]     = useState(false);
 
   const mutation = useMutation({
     mutationFn: (body: { currentPassword: string; newPassword: string }) =>
-      api.post('/api/v1/auth/change-password', body),
+      api.post('/api/v1/settings/security/change-password', body),
     onSuccess: () => {
-      setSaved(true);
-      setCurrentPw(''); setNewPw(''); setConfirmPw('');
-      setTimeout(() => setSaved(false), 2500);
+      // Log out immediately so the user must re-authenticate with the new password
+      setTimeout(() => logout(), 1500);
     },
   });
 
@@ -332,14 +331,14 @@ function SecuritySettings() {
             </div>
           ))}
           <button
-            disabled={!currentPw || !newPw || newPw !== confirmPw || mutation.isPending}
+            disabled={!currentPw || !newPw || newPw !== confirmPw || mutation.isPending || mutation.isSuccess}
             onClick={() => mutation.mutate({ currentPassword: currentPw, newPassword: newPw })}
             className="flex items-center gap-2 px-4 py-2 bg-brand-600 text-white text-sm rounded-lg hover:bg-brand-700 disabled:opacity-50">
-            {mutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : saved ? <Check className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />}
-            {saved ? 'Password Updated!' : 'Update Password'}
+            {mutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : mutation.isSuccess ? <Check className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />}
+            {mutation.isPending ? 'Updating…' : mutation.isSuccess ? 'Done — logging you out…' : 'Update Password'}
           </button>
           {mutation.isError && (
-            <p className="text-xs text-red-500">Failed to update password. Check your current password.</p>
+            <p className="text-xs text-red-500">Failed to update password. Check your current password is correct.</p>
           )}
         </div>
       )}
