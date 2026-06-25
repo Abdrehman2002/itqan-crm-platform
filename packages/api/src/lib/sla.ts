@@ -135,6 +135,16 @@ const MS_PER_HOUR = 3_600_000;
 const MS_PER_MIN  = 60_000;
 const MAX_DAYS_WALK = 365; // safety cap; no SLA realistically spans > 1 year
 
+/** "YYYY-MM-DD" for a Date in the given tz — used for holiday lookups */
+function isoDateInTz(d: Date, tz: string): string {
+  const off = tzOffsetMinutes(tz, d);
+  const local = new Date(d.getTime() + off * 60_000);
+  const y = local.getUTCFullYear();
+  const m = String(local.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(local.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 /**
  * Walk forward by N business-hours from `start` and return the resulting
  * wall-clock timestamp. If `schedule` is null, treats all time as business
@@ -146,6 +156,8 @@ export function addBusinessHours(
   businessHoursOnly: boolean,
   schedule: BusinessHoursSchedule | null | undefined,
   tz: string,
+  /** ISO YYYY-MM-DD set of holiday dates to skip (in tenant tz) */
+  holidays?: Set<string> | null,
 ): Date {
   const sched = effectiveSchedule(businessHoursOnly, schedule);
   if (!sched) {
@@ -157,6 +169,11 @@ export function addBusinessHours(
   let cursor = new Date(start);
 
   for (let safety = 0; safety < MAX_DAYS_WALK && remainingMs > 0; safety++) {
+    // Holiday check — same effect as a "disabled" day
+    if (holidays && holidays.has(isoDateInTz(cursor, tz))) {
+      cursor = new Date(startOfLocalDay(cursor, tz).getTime() + 24 * MS_PER_HOUR);
+      continue;
+    }
     const dk = dayKey(cursor, tz);
     const day = sched[dk];
     if (!day || !day.enabled) {
@@ -201,6 +218,7 @@ export function elapsedBusinessMs(
   businessHoursOnly: boolean,
   schedule: BusinessHoursSchedule | null | undefined,
   tz: string,
+  holidays?: Set<string> | null,
 ): number {
   if (to.getTime() <= from.getTime()) return 0;
   const sched = effectiveSchedule(businessHoursOnly, schedule);
@@ -210,6 +228,10 @@ export function elapsedBusinessMs(
   let acc = 0;
 
   for (let safety = 0; safety < MAX_DAYS_WALK && cursor.getTime() < to.getTime(); safety++) {
+    if (holidays && holidays.has(isoDateInTz(cursor, tz))) {
+      cursor = new Date(startOfLocalDay(cursor, tz).getTime() + 24 * MS_PER_HOUR);
+      continue;
+    }
     const dk  = dayKey(cursor, tz);
     const day = sched[dk];
     if (!day || !day.enabled) {
@@ -307,6 +329,7 @@ export function computeSlaDueAt(
     business_hours_schedule?: BusinessHoursSchedule | null;
   },
   tz: string,
+  holidays?: Set<string> | null,
 ): Date {
   return addBusinessHours(
     acceptedAt,
@@ -314,5 +337,17 @@ export function computeSlaDueAt(
     !!policy.business_hours_only,
     policy.business_hours_schedule ?? null,
     tz,
+    holidays,
   );
+}
+
+/**
+ * Loads tenant holidays from sla_holidays into a Set of "YYYY-MM-DD" strings.
+ * Caller passes the result to computeSlaDueAt / computeElapsedPct.
+ */
+export async function loadHolidays(
+  client: { query: (sql: string, params?: any[]) => Promise<{ rows: any[] }> },
+): Promise<Set<string>> {
+  const r = await client.query(`SELECT date::text AS d FROM sla_holidays`);
+  return new Set(r.rows.map((row: any) => row.d as string));
 }

@@ -32,6 +32,7 @@ import { modulesRoute } from './routes/modules';
 import { rolesRoutes } from './routes/roles';
 import { connectorRoutes } from './routes/connectors';
 import { ticketRoutes } from './routes/tickets';
+import { reportsRoutes } from './routes/reports';
 import { csatPublicRoutes, csatProtectedRoutes } from './routes/csat';
 import { ticketAnalyticsRoutes } from './routes/ticket-analytics';
 import { notificationRoutes } from './routes/notifications';
@@ -346,6 +347,7 @@ async function buildServer() {
   await fastify.register(salesDashboardRoutes(db),     { prefix: '/api/v1/sales/dashboard' });
   await fastify.register(invoiceTemplateRoutes(db),    { prefix: '/api/v1/sales/templates' });
   await fastify.register(sectorRoutes(db),         { prefix: '/api/v1/sector' });
+  await fastify.register(reportsRoutes(db),        { prefix: '/api/v1/reports' });
   await fastify.register(departmentRoutes(db),     { prefix: '/api/v1/departments' });
   await fastify.register(opportunityRoutes(db),    { prefix: '/api/v1/opportunities' });
   await fastify.register(teamMessageRoutes(db),    { prefix: '/api/v1/messages' });

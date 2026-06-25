@@ -150,12 +150,24 @@ async function nextTicketNumber(db: DatabaseClient, tenantId: string): Promise<s
   return `TKT-${String(row.next_val - 1).padStart(5, '0')}`;
 }
 
-/** Lookup SLA policy for a given priority (fallback to medium) */
+/**
+ * M7: Smart SLA policy matching.
+ *
+ * Scoring rules (highest-scoring active policy wins; ties broken by created_at):
+ *   +100 — matches the ticket's priority
+ *   + 10 — match_conditions.channels   contains ticket.channel
+ *   + 10 — match_conditions.departments contains ticket.assignee_department
+ *   + 10 — match_conditions.tags        intersects ticket.tags (any one)
+ *   +  1 — policy is a catch-all (no match_conditions configured)
+ *
+ * If `slaPolicyId` is provided explicitly, that policy wins regardless.
+ */
 async function findSlaPolicy(
   db: DatabaseClient,
   tenantId: string,
   slaPolicyId: string | undefined,
   priority: string,
+  ticketCtx?: { channel?: string | null; department?: string | null; tags?: string[] | null },
 ): Promise<{ id: string; resolution_hours: number } | null> {
   const rows = await db.withTenant(tenantId, async (client) => {
     if (slaPolicyId) {
@@ -163,14 +175,35 @@ async function findSlaPolicy(
       return r.rows;
     }
     const r = await client.query(
-      `SELECT id, resolution_hours FROM sla_policies
-       WHERE priority = $1 AND is_active = true
-       ORDER BY created_at ASC LIMIT 1`,
-      [priority],
+      `SELECT id, resolution_hours, priority, match_conditions, created_at
+       FROM sla_policies
+       WHERE is_active = true
+       ORDER BY created_at ASC`,
     );
     return r.rows;
   });
-  return rows[0] ?? null;
+  if (rows.length === 0) return null;
+
+  const channel    = ticketCtx?.channel ?? null;
+  const department = ticketCtx?.department ?? null;
+  const tags       = ticketCtx?.tags ?? null;
+
+  const scored = rows.map((p: any) => {
+    let score = 0;
+    if (p.priority === priority) score += 100;
+    const mc = p.match_conditions ?? null;
+    if (!mc || Object.keys(mc).length === 0) {
+      score += 1; // catch-all
+    } else {
+      if (channel    && Array.isArray(mc.channels)    && mc.channels.includes(channel))   score += 10;
+      if (department && Array.isArray(mc.departments) && mc.departments.includes(department)) score += 10;
+      if (Array.isArray(tags) && tags.length && Array.isArray(mc.tags)
+          && tags.some((t: string) => mc.tags.includes(t))) score += 10;
+    }
+    return { ...p, _score: score };
+  });
+  scored.sort((a: any, b: any) => b._score - a._score || +new Date(a.created_at) - +new Date(b.created_at));
+  return scored[0]?._score > 0 ? { id: scored[0].id, resolution_hours: scored[0].resolution_hours } : null;
 }
 
 /** Send in-app notification to a list of users */
@@ -796,6 +829,44 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
       return reply.code(204).send();
     });
 
+    // ════════════════════════════════════════════════════════════════════
+    // M1: Holiday calendar — tenant-level public holidays the SLA clock skips
+    // ════════════════════════════════════════════════════════════════════
+    fastify.get('/sla-holidays', { preHandler: requireScope('tickets:read') }, async (req, reply) => {
+      const rows = await db.withTenant(req.tenant.id, async (client) => {
+        const r = await client.query(
+          `SELECT id, date::text AS date, name, created_at FROM sla_holidays ORDER BY date ASC`,
+        );
+        return r.rows;
+      });
+      return reply.send({ success: true, data: rows });
+    });
+
+    fastify.post('/sla-holidays', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
+      const body = z.object({
+        date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be YYYY-MM-DD'),
+        name: z.string().min(1),
+      }).parse(req.body);
+      const [row] = await db.withTenant(req.tenant.id, async (client) => {
+        const r = await client.query(
+          `INSERT INTO sla_holidays (tenant_id, date, name) VALUES ($1, $2::date, $3)
+           ON CONFLICT (tenant_id, date) DO UPDATE SET name = EXCLUDED.name
+           RETURNING id, date::text AS date, name, created_at`,
+          [req.tenant.id, body.date, body.name],
+        );
+        return r.rows;
+      });
+      return reply.code(201).send({ success: true, data: row });
+    });
+
+    fastify.delete('/sla-holidays/:id', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
+      const { id } = req.params as { id: string };
+      await db.withTenant(req.tenant.id, async (client) => {
+        await client.query('DELETE FROM sla_holidays WHERE id = $1', [id]);
+      });
+      return reply.code(204).send();
+    });
+
     // ── Create ticket (manual) ────────────────────────────────────────────
     fastify.post('/', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const body       = CreateTicketSchema.parse(req.body);
@@ -952,9 +1023,25 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
       if (query.contactId) { where.push(`t.contact_id = $${idx++}`); params.push(query.contactId); }
       if (query.overdue)   { where.push(`t.sla_due_at < NOW() AND t.status NOT IN ('resolved','closed')`); }
       if (query.search) {
-        where.push(`(t.subject ILIKE $${idx++} OR t.ticket_number ILIKE $${idx++} OR t.reporter_email ILIKE $${idx})`);
+        // M4: Customer 360 — multi-field search across ticket#, name, mobile,
+        // NIC (Pakistan ID), email, phone. Joins to contacts inline via EXISTS.
+        const a = idx++, b = idx++, c = idx++, d = idx++, e = idx++, f = idx++, g = idx++;
+        where.push(`(
+          t.subject ILIKE $${a}
+          OR t.ticket_number ILIKE $${b}
+          OR t.reporter_email ILIKE $${c}
+          OR t.reporter_name  ILIKE $${d}
+          OR t.reporter_phone ILIKE $${e}
+          OR EXISTS (SELECT 1 FROM contacts c WHERE c.id = t.contact_id AND (
+               c.first_name ILIKE $${f}
+            OR c.last_name  ILIKE $${f}
+            OR c.email      ILIKE $${c}
+            OR c.phone      ILIKE $${e}
+            OR c.nic_number ILIKE $${g}
+          ))
+        )`);
         const like = `%${query.search}%`;
-        params.push(like, like, like); idx += 2;
+        params.push(like, like, like, like, like, like, like);
       }
 
       const whereStr = where.join(' AND ');
@@ -965,23 +1052,31 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
           `SELECT COUNT(*) FROM tickets t WHERE ${whereStr}`, params,
         );
         const listR = await client.query(
+          // M5: Add assignee_department + is_originated_by_me + contact NIC for
+          // the originator-view badge + Customer 360 hover card.
           `SELECT t.*,
              u.name  AS assignee_name,
              u.avatar AS assignee_avatar,
+             u.department AS assignee_department,
              c.first_name || ' ' || COALESCE(c.last_name,'') AS contact_name,
+             c.nic_number AS contact_nic,
              q.name  AS queue_name,
              q.color AS queue_color,
              CASE WHEN t.sla_due_at < NOW() AND t.status NOT IN ('resolved','closed')
                   THEN true ELSE false END AS is_overdue,
-             EXTRACT(EPOCH FROM (t.sla_due_at - NOW())) AS sla_seconds_remaining
+             EXTRACT(EPOCH FROM (t.sla_due_at - NOW())) AS sla_seconds_remaining,
+             CASE WHEN t.created_by = $${idx++} THEN true ELSE false END AS is_originated_by_me,
+             CASE WHEN t.created_by = $${idx} AND (t.assignee_id IS NULL OR t.assignee_id <> $${idx})
+                       AND (u.department IS NULL OR u.department <> (SELECT department FROM users WHERE id = $${idx}))
+                  THEN true ELSE false END AS is_view_only
            FROM tickets t
            LEFT JOIN users u    ON t.assignee_id  = u.id
            LEFT JOIN contacts c ON t.contact_id   = c.id
            LEFT JOIN ticket_queues q ON t.queue_id = q.id
            WHERE ${whereStr}
            ORDER BY ${orderBy}
-           LIMIT $${idx++} OFFSET $${idx}`,
-          [...params, query.pageSize, offset],
+           LIMIT $${idx + 1} OFFSET $${idx + 2}`,
+          [...params, userId, userId, query.pageSize, offset],
         );
         return [parseInt(cntR.rows[0].count), listR.rows];
       });
@@ -1305,11 +1400,13 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
       const tenantTz = (req.tenant as any).settings?.timezone ?? 'UTC';
       const resHours = existing.resolution_hours ?? 24;
       const acceptedAt = new Date();
+      // Load holiday calendar so the SLA clock skips public holidays
+      const holidays = await db.withTenant(tenantId, async (client) => sla.loadHolidays(client));
       const slaDueAt = sla.computeSlaDueAt(acceptedAt, {
         resolution_hours: resHours,
         business_hours_only: existing.business_hours_only,
         business_hours_schedule: existing.business_hours_schedule,
-      }, tenantTz);
+      }, tenantTz, holidays);
 
       const [ticket] = await db.withTenant(tenantId, async (client) => {
         const r = await client.query(
@@ -1406,17 +1503,42 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
 
       if (!ticket) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Ticket not found' } });
 
+      // M6: CSAT survey — generate a token, persist, attach the survey link
+      // to the resolution email. The customer rates on a public /csat/:token page.
+      let csatToken: string | null = null;
+      if (ticket.reporter_email) {
+        csatToken = randomBytes(24).toString('hex');
+        await db.withSuperAdmin(async (client) => {
+          await client.query(
+            `INSERT INTO csat_surveys (tenant_id, ticket_id, token)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (tenant_id, ticket_id) DO UPDATE
+               SET token = EXCLUDED.token, sent_at = NOW(),
+                   rating = NULL, comment = NULL, responded_at = NULL`,
+            [tenantId, id, csatToken],
+          );
+        });
+      }
+      const csatUrl = csatToken
+        ? `${process.env.APP_URL ?? 'http://localhost:5173'}/csat/${csatToken}`
+        : null;
+
       // Email reporter on resolution
       if (ticket.reporter_email) {
+        const csatBlock = csatUrl
+          ? `<p>Could you spare 10 seconds to rate this experience? <a href="${csatUrl}">Leave feedback →</a></p>`
+          : '';
+        const csatBlockText = csatUrl ? `\nRate your experience: ${csatUrl}` : '';
         emailSvc.send(tenantId, {
           to: ticket.reporter_email,
           toName: ticket.reporter_name ?? undefined,
           subject: `Your ticket ${ticket.ticket_number} has been resolved`,
           bodyHtml: `<p>Dear ${ticket.reporter_name ?? 'Customer'},</p>
 <p>We're pleased to let you know that your support ticket <strong>${ticket.ticket_number}</strong> — "<em>${ticket.subject}</em>" — has been resolved.</p>
+${csatBlock}
 <p>If you have any further questions, please don't hesitate to reach out.</p>
 <p>Thank you for your patience.</p>`,
-          bodyText: `Dear ${ticket.reporter_name ?? 'Customer'},\n\nYour ticket ${ticket.ticket_number} ("${ticket.subject}") has been resolved.\n\nThank you.`,
+          bodyText: `Dear ${ticket.reporter_name ?? 'Customer'},\n\nYour ticket ${ticket.ticket_number} ("${ticket.subject}") has been resolved.${csatBlockText}\n\nThank you.`,
           ticketId: id,
         }).catch(() => { /* non-fatal */ });
       }
@@ -1728,10 +1850,15 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
       const userId   = req.user.sub;
 
       const [comment] = await db.withTenant(tenantId, async (client) => {
-        // If this is the first external reply, record first_response_at
+        // If this is the first external reply, record first_response_at + first_replied_at.
+        // M2: first_replied_at specifically tracks the first PUBLIC agent reply,
+        // separately from first_response_at which fires on any first action.
         if (!body.isInternal && body.commentType === 'reply') {
           await client.query(
-            `UPDATE tickets SET first_response_at = COALESCE(first_response_at, NOW()) WHERE id = $1`,
+            `UPDATE tickets
+             SET first_response_at = COALESCE(first_response_at, NOW()),
+                 first_replied_at  = COALESCE(first_replied_at,  NOW())
+             WHERE id = $1`,
             [id],
           );
         }
@@ -1940,6 +2067,77 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
         success: true,
         data: { totals, agents, direct_reports: Number(direct_reports) },
       });
+    });
+
+    // ════════════════════════════════════════════════════════════════════
+    // M3: Any-agent internal notes
+    // Any authenticated user in the tenant (regardless of ticket ownership)
+    // can attach an internal note. Useful for cross-team context handoffs.
+    // Read visibility still scoped by the usual rules — only the assignee
+    // dept can see this in the comments thread, but writes are open.
+    // ════════════════════════════════════════════════════════════════════
+    fastify.post('/:id/notes', { preHandler: requireScope('tickets:read') }, async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const body   = z.object({ note: z.string().min(1) }).parse(req.body);
+      const [comment] = await db.withTenant(req.tenant.id, async (client) => {
+        const r = await client.query(
+          `INSERT INTO ticket_comments
+             (tenant_id, ticket_id, author_id, body, is_internal, comment_type)
+           VALUES ($1, $2, $3, $4, true, 'note')
+           RETURNING *`,
+          [req.tenant.id, id, req.user.sub, body.note],
+        );
+        return r.rows;
+      });
+      return reply.code(201).send({ success: true, data: comment });
+    });
+
+    // ════════════════════════════════════════════════════════════════════
+    // M6: CSAT survey — public endpoints (no auth) for customer to respond
+    // GET  /tickets/csat-public/:token  — fetch survey metadata for the form
+    // POST /tickets/csat-public/:token  — submit rating + comment
+    //
+    // These are namespaced under /tickets (which mounts at /api/v1/tickets)
+    // so a single router export covers it. server.ts also registers a
+    // public route alias /public/csat/:token for the email link.
+    // ════════════════════════════════════════════════════════════════════
+    fastify.get('/csat-public/:token', async (req, reply) => {
+      const { token } = req.params as { token: string };
+      const [row] = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(
+          `SELECT cs.id, cs.ticket_id, cs.sent_at, cs.rating, cs.responded_at,
+                  t.ticket_number, t.subject, tn.name AS workspace_name
+           FROM csat_surveys cs
+           JOIN tickets t   ON t.id   = cs.ticket_id
+           JOIN tenants tn  ON tn.id  = cs.tenant_id
+           WHERE cs.token = $1`,
+          [token],
+        );
+        return r.rows;
+      });
+      if (!row) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Survey link is invalid or expired' } });
+      return reply.send({ success: true, data: row });
+    });
+
+    fastify.post('/csat-public/:token', async (req, reply) => {
+      const { token } = req.params as { token: string };
+      const body = z.object({
+        rating:  z.number().int().min(1).max(5),
+        comment: z.string().max(2000).optional(),
+      }).parse(req.body);
+      const [row] = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(
+          `UPDATE csat_surveys
+           SET rating = $1, comment = $2, responded_at = COALESCE(responded_at, NOW())
+           WHERE token = $3 AND responded_at IS NULL
+           RETURNING id, ticket_id, rating, comment, responded_at`,
+          [body.rating, body.comment ?? null, token],
+        );
+        return r.rows;
+      });
+      if (!row) return reply.code(409).send({ success: false, error: { code: 'ALREADY_RESPONDED', message: 'You have already submitted this survey' } });
+      await eventBus.publish((row as any).tenant_id ?? '', 'csat.received', { ticketId: row.ticket_id, rating: row.rating });
+      return reply.send({ success: true, data: row });
     });
   };
 }
