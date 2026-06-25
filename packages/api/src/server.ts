@@ -244,7 +244,8 @@ async function buildServer() {
       || req.url.startsWith('/api/v1/voice-bot/webhook/')
       || req.url.startsWith('/api/v1/voice-bot/livekit')
       || req.url.startsWith('/api/v1/emails/webhook')
-      || req.url.startsWith('/api/v1/emails/track');
+      || req.url.startsWith('/api/v1/emails/track')
+      || req.url.startsWith('/api/v1/tickets/csat-public/');
     if (isPublic) return;
     await authMiddleware(req, reply);
     if (reply.sent) return;

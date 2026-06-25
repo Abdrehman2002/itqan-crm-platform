@@ -1505,6 +1505,9 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
 
       // M6: CSAT survey — generate a token, persist, attach the survey link
       // to the resolution email. The customer rates on a public /csat/:token page.
+      // ON CONFLICT (ticket_id) matches the actual constraint that exists
+      // on the table (a UNIQUE on ticket_id alone, which is enough since
+      // ticket UUIDs are globally unique anyway).
       let csatToken: string | null = null;
       if (ticket.reporter_email) {
         csatToken = randomBytes(24).toString('hex');
@@ -1512,7 +1515,7 @@ ${note ? `<p><strong>Reason:</strong> ${note}</p>` : ''}
           await client.query(
             `INSERT INTO csat_surveys (tenant_id, ticket_id, token)
              VALUES ($1, $2, $3)
-             ON CONFLICT (tenant_id, ticket_id) DO UPDATE
+             ON CONFLICT (ticket_id) DO UPDATE
                SET token = EXCLUDED.token, sent_at = NOW(),
                    rating = NULL, comment = NULL, responded_at = NULL`,
             [tenantId, id, csatToken],
