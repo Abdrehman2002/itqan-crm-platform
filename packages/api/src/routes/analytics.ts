@@ -717,6 +717,8 @@ export function analyticsRoutes(db: DatabaseClient) {
       // ── M9: KPI strip (CSAT %, SLA %, avg resolution, avg first response) ──
       // Tiny aggregate visible to all operational roles. Scoped by the same
       // hierarchy filter as the rest of the dashboard.
+      // Note: FILTER (WHERE …) clauses must live on the aggregate (AVG/COUNT),
+      // not on the surrounding ROUND wrapper.
       const kpiStrip = await db.withTenant(tenantId, async (client) => {
         const [sql, params] = resolveDept(`
           SELECT
@@ -724,10 +726,12 @@ export function analyticsRoutes(db: DatabaseClient) {
             COUNT(cs.rating) AS csat_responses,
             ROUND(100.0 * COUNT(*) FILTER (WHERE t.escalation_level = 0 AND t.status IN ('resolved','closed'))
                   / NULLIF(COUNT(*) FILTER (WHERE t.status IN ('resolved','closed')), 0), 1) AS sla_pct,
-            ROUND(AVG(EXTRACT(EPOCH FROM (t.resolved_at - t.accepted_at))/3600)::numeric, 1)
-              FILTER (WHERE t.resolved_at IS NOT NULL AND t.accepted_at IS NOT NULL) AS avg_resolution_hours,
-            ROUND(AVG(EXTRACT(EPOCH FROM (t.first_response_at - t.created_at))/60)::numeric)
-              FILTER (WHERE t.first_response_at IS NOT NULL) AS avg_first_response_minutes
+            ROUND(AVG(EXTRACT(EPOCH FROM (t.resolved_at - t.accepted_at))/3600)
+                      FILTER (WHERE t.resolved_at IS NOT NULL AND t.accepted_at IS NOT NULL)::numeric, 1)
+              AS avg_resolution_hours,
+            ROUND(AVG(EXTRACT(EPOCH FROM (t.first_response_at - t.created_at))/60)
+                      FILTER (WHERE t.first_response_at IS NOT NULL)::numeric)
+              AS avg_first_response_minutes
           FROM tickets t
           LEFT JOIN csat_surveys cs ON cs.ticket_id = t.id AND cs.responded_at IS NOT NULL
           WHERE t.created_at > NOW() - INTERVAL '30 days'
