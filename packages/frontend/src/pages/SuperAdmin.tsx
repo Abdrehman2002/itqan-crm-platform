@@ -304,16 +304,25 @@ function CreateWorkspaceModal({ onClose }: { onClose: () => void }) {
                   <span className="text-gray-400">Temp password</span>
                   <span className="font-mono font-semibold text-gray-900 bg-amber-50 border border-amber-100 px-2 py-0.5 rounded">{result.tempPassword}</span>
                 </div>
+              ) : result.emailSent ? (
+                <div className="flex justify-between items-center px-4 py-2.5">
+                  <span className="text-gray-400">Password</span>
+                  <span className="text-green-700 text-xs flex items-center gap-1"><Check className="w-3.5 h-3.5" /> Emailed to {result.adminEmail}</span>
+                </div>
               ) : (
                 <div className="flex justify-between px-4 py-2.5"><span className="text-gray-400">Password</span><span className="text-gray-500">Set by you</span></div>
               )}
             </div>
-            {result.tempPassword && (
+            {result.tempPassword && !result.emailSent && (
               <p className="text-xs flex items-start gap-1.5 text-amber-600">
                 <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                {result.emailSent
-                  ? 'Password emailed to the customer. Copy it above as a backup — it is shown only once.'
-                  : 'No system email configured — copy this password and share it securely with the customer. They should change it on first login.'}
+                Email delivery failed (no SendGrid / SMTP configured). Copy this password and share it securely — it is shown only once. The customer should change it on first login.
+              </p>
+            )}
+            {result.emailSent && !result.tempPassword && (
+              <p className="text-xs flex items-start gap-1.5 text-green-700">
+                <Check className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                Welcome email with login credentials sent to <strong>{result.adminEmail}</strong>. Ask them to check spam if it doesn't arrive within a few minutes.
               </p>
             )}
             <button onClick={onClose} className="w-full py-2 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700">Done</button>
@@ -926,6 +935,7 @@ function EditUserModal({ user, onClose }: { user: any; onClose: () => void }) {
   const [showPw, setShowPw] = useState(false);
   const [changePass, setChangePass] = useState(false);
   const [error, setError] = useState('');
+  const [info, setInfo]   = useState<{ kind: 'pw' | 'link'; tempPassword?: string | null; email: string } | null>(null);
   const mutation = useMutation({
     mutationFn: () => api.patch(`/super-admin/users/${user.id}`, {
       name: form.name, email: form.email, role: form.role, status: form.status,
@@ -933,6 +943,23 @@ function EditUserModal({ user, onClose }: { user: any; onClose: () => void }) {
     }),
     onSuccess: onClose,
     onError: (e: any) => setError(e?.response?.data?.error?.message ?? 'Update failed'),
+  });
+  const regen = useMutation({
+    mutationFn: () => api.post(`/super-admin/users/${user.id}/regenerate-password`),
+    onSuccess: (r: any) => setInfo({
+      kind: 'pw',
+      tempPassword: r?.data?.data?.tempPassword ?? null,
+      email: r?.data?.data?.email ?? user.email,
+    }),
+    onError: (e: any) => setError(e?.response?.data?.error?.message ?? 'Regenerate failed'),
+  });
+  const sendReset = useMutation({
+    mutationFn: () => api.post(`/super-admin/users/${user.id}/send-reset-email`),
+    onSuccess: (r: any) => setInfo({
+      kind: 'link',
+      email: r?.data?.data?.email ?? user.email,
+    }),
+    onError: (e: any) => setError(e?.response?.data?.error?.message ?? 'Send reset failed'),
   });
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setForm(f => ({ ...f, [k]: e.target.value }));
   return (
@@ -966,19 +993,48 @@ function EditUserModal({ user, onClose }: { user: any; onClose: () => void }) {
               {['active','inactive'].map(s => <option key={s} value={s} className="capitalize">{s}</option>)}
             </select>
           </div>
-          <div>
+          <div className="border-t border-gray-100 pt-3 space-y-2">
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Password</p>
             <label className="flex items-center gap-2 cursor-pointer">
               <input type="checkbox" checked={changePass} onChange={e => setChangePass(e.target.checked)} className="accent-brand-600" />
-              <span className="text-xs text-gray-600">Reset password</span>
+              <span className="text-xs text-gray-600">Set a specific password</span>
             </label>
             {changePass && (
-              <div className="relative mt-2">
+              <div className="relative">
                 <input type={showPw ? 'text' : 'password'} value={form.password} onChange={set('password')}
                   placeholder="New password (min 8 chars)"
                   className="w-full px-3 py-2 pr-9 text-sm border border-gray-200 rounded-lg outline-none focus:border-brand-400" />
                 <button type="button" onClick={() => setShowPw(v => !v)}
                   className="absolute right-2.5 top-2.5 text-gray-400">{showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}</button>
               </div>
+            )}
+            <div className="flex flex-wrap gap-2">
+              <button type="button" onClick={() => regen.mutate()} disabled={regen.isPending}
+                className="text-[11px] px-2.5 py-1.5 rounded-lg bg-amber-50 text-amber-700 hover:bg-amber-100 font-medium disabled:opacity-60">
+                {regen.isPending ? 'Generating…' : 'Regenerate & email'}
+              </button>
+              <button type="button" onClick={() => sendReset.mutate()} disabled={sendReset.isPending}
+                className="text-[11px] px-2.5 py-1.5 rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100 font-medium disabled:opacity-60">
+                {sendReset.isPending ? 'Sending…' : 'Send reset link'}
+              </button>
+            </div>
+            {info?.kind === 'pw' && (
+              <div className="text-[11px] bg-amber-50 border border-amber-200 rounded-lg p-2 space-y-1">
+                {info.tempPassword ? (
+                  <>
+                    <p className="text-amber-900 font-medium">Email delivery unavailable — copy this password now:</p>
+                    <p className="font-mono text-sm bg-white border border-amber-300 rounded px-2 py-1">{info.tempPassword}</p>
+                    <p className="text-amber-700">Share securely with {info.email}.</p>
+                  </>
+                ) : (
+                  <p className="text-amber-900">New temporary password emailed to <strong>{info.email}</strong>.</p>
+                )}
+              </div>
+            )}
+            {info?.kind === 'link' && (
+              <p className="text-[11px] text-blue-700 bg-blue-50 border border-blue-200 rounded-lg p-2">
+                Reset link sent to <strong>{info.email}</strong>. Expires in 24 hours.
+              </p>
             )}
           </div>
           {error && <p className="text-xs text-red-600 bg-red-50 px-3 py-2 rounded-lg">{error}</p>}
@@ -1821,6 +1877,114 @@ function CreateInvoiceModal({ tenants, onClose }: { tenants: any[]; onClose: () 
   );
 }
 
+function EditInvoiceModal({ invoice, onClose }: { invoice: any; onClose: () => void }) {
+  const qc = useQueryClient();
+  const [periodStart, setPeriodStart] = useState((invoice.period_start ?? '').slice(0, 10));
+  const [periodEnd, setPeriodEnd]     = useState((invoice.period_end ?? '').slice(0, 10));
+  const [dueDate, setDueDate]         = useState((invoice.due_date ?? '').slice(0, 10));
+  const [currency, setCurrency]       = useState(invoice.currency ?? 'GBP');
+  const [notes, setNotes]             = useState(invoice.notes ?? '');
+  const [items, setItems] = useState<any[]>(() => {
+    const raw = invoice.items;
+    if (Array.isArray(raw) && raw.length) return raw.map(i => ({ ...i, quantity: Number(i.quantity), unit_price: Number(i.unit_price) }));
+    return [{ description: 'Monthly subscription', quantity: 1, unit_price: Number(invoice.amount) || 0 }];
+  });
+  const [error, setError] = useState('');
+
+  const total = items.reduce((s, i) => s + i.quantity * i.unit_price, 0);
+
+  const mutation = useMutation({
+    mutationFn: () => api.patch(`/super-admin/platform-invoices/${invoice.id}`, {
+      period_start: periodStart, period_end: periodEnd, due_date: dueDate,
+      currency, items, notes: notes || undefined,
+    }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['platform-invoices'] }); onClose(); },
+    onError: (e: any) => setError(e?.response?.data?.error?.message ?? 'Update failed'),
+  });
+
+  function addItem() { setItems([...items, { description: '', quantity: 1, unit_price: 0 }]); }
+  function removeItem(i: number) { setItems(items.filter((_, idx) => idx !== i)); }
+  function updateItem(i: number, field: string, value: any) {
+    setItems(items.map((item, idx) => idx === i ? { ...item, [field]: value } : item));
+  }
+
+  const canSave = periodStart && periodEnd && dueDate && items.every(i => i.description && i.unit_price >= 0);
+
+  return (
+    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+          <div>
+            <h2 className="text-base font-semibold text-gray-900">Edit Invoice {invoice.invoice_number}</h2>
+            <p className="text-[11px] text-gray-400 mt-0.5">Editable while draft only. Send → invoice becomes immutable.</p>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="overflow-y-auto flex-1 px-6 py-4 space-y-4">
+          <div className="grid grid-cols-3 gap-3">
+            {[
+              { label: 'Period Start', value: periodStart, set: setPeriodStart },
+              { label: 'Period End',   value: periodEnd,   set: setPeriodEnd   },
+              { label: 'Due Date',     value: dueDate,     set: setDueDate     },
+            ].map(({ label, value, set }) => (
+              <div key={label}>
+                <label className="text-xs font-medium text-gray-600 mb-1 block">{label}</label>
+                <input type="date" value={value} onChange={e => set(e.target.value)}
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-brand-400" />
+              </div>
+            ))}
+          </div>
+          <div className="w-32">
+            <label className="text-xs font-medium text-gray-600 mb-1 block">Currency</label>
+            <select value={currency} onChange={e => setCurrency(e.target.value)}
+              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-brand-400">
+              {['GBP','USD','EUR','PKR'].map(c => <option key={c}>{c}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-xs font-medium text-gray-600">Line Items</label>
+              <button onClick={addItem} className="text-xs text-brand-600 hover:text-brand-700 font-medium">+ Add item</button>
+            </div>
+            <div className="space-y-2">
+              {items.map((item, i) => (
+                <div key={i} className="grid grid-cols-12 gap-2 items-center">
+                  <input value={item.description} onChange={e => updateItem(i, 'description', e.target.value)}
+                    placeholder="Description" className="col-span-6 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-brand-400" />
+                  <input type="number" value={item.quantity} min={1} onChange={e => updateItem(i, 'quantity', Number(e.target.value))}
+                    className="col-span-2 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-brand-400 text-center" />
+                  <input type="number" value={item.unit_price} step="0.01" min={0} onChange={e => updateItem(i, 'unit_price', Number(e.target.value))}
+                    placeholder="Price" className="col-span-3 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-brand-400" />
+                  <button onClick={() => removeItem(i)} disabled={items.length === 1} className="col-span-1 text-gray-300 hover:text-red-400 disabled:opacity-30">
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="flex justify-end mt-3">
+              <span className="text-sm font-semibold text-gray-900">Total: {currency} {total.toFixed(2)}</span>
+            </div>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-gray-600 mb-1 block">Notes (optional)</label>
+            <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2}
+              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-brand-400 resize-none" />
+          </div>
+          {error && <p className="text-xs text-red-600 bg-red-50 px-3 py-2 rounded-lg">{error}</p>}
+        </div>
+        <div className="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50">Cancel</button>
+          <button disabled={!canSave || mutation.isPending} onClick={() => mutation.mutate()}
+            className="flex items-center gap-2 px-4 py-2 text-sm bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50">
+            {mutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+            Save Changes
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RecordPaymentModal({ invoice, onClose }: { invoice: any; onClose: () => void }) {
   const qc = useQueryClient();
   const [amount, setAmount]     = useState(String(Number(invoice.amount) - Number(invoice.amount_paid || 0)));
@@ -1883,6 +2047,7 @@ function RecordPaymentModal({ invoice, onClose }: { invoice: any; onClose: () =>
 function PlatformBillingTab({ tenants }: { tenants: any[] }) {
   const qc = useQueryClient();
   const [showCreate, setShowCreate]     = useState(false);
+  const [editInvoice, setEditInvoice]   = useState<any>(null);
   const [payInvoice, setPayInvoice]     = useState<any>(null);
   const [confirmDelInv, setConfirmDelInv] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState('');
@@ -1991,6 +2156,12 @@ function PlatformBillingTab({ tenants }: { tenants: any[] }) {
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-1">
                       {inv.status === 'draft' && (
+                        <button onClick={() => setEditInvoice(inv)}
+                          title="Edit Invoice" className="p-1 rounded text-gray-500 hover:text-brand-600 hover:bg-brand-50">
+                          <Edit2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                      {inv.status === 'draft' && (
                         <button onClick={() => markStatus.mutate({ id: inv.id, status: 'sent' })}
                           title="Mark as Sent" className="p-1 rounded text-blue-500 hover:bg-blue-50 text-xs font-medium">
                           Send
@@ -2024,6 +2195,7 @@ function PlatformBillingTab({ tenants }: { tenants: any[] }) {
       </div>
 
       {showCreate && <CreateInvoiceModal tenants={tenants} onClose={() => setShowCreate(false)} />}
+      {editInvoice && <EditInvoiceModal invoice={editInvoice} onClose={() => setEditInvoice(null)} />}
       {payInvoice  && <RecordPaymentModal invoice={payInvoice} onClose={() => setPayInvoice(null)} />}
       {confirmDelInv && (
         <ConfirmModal

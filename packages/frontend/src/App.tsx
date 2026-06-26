@@ -1,5 +1,5 @@
 import React from 'react';
-import { BrowserRouter, Routes, Route, Navigate, NavLink } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, NavLink, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import {
   LayoutDashboard, Users, Building2, TrendingUp, Phone,
@@ -498,12 +498,27 @@ function NotificationsPage() {
 }
 
 function AppLayout() {
-  const { isAuthenticated } = useAuthStore();
+  const { isAuthenticated, user } = useAuthStore();
   const isSuperAdmin = useIsSuperAdmin();
   const isTenantAdmin = useIsTenantAdmin();
   const isManager = useHasRole('manager');
+  const location = useLocation();
   useApplyAppearance();
   if (!isAuthenticated) return <Navigate to="/login" replace />;
+
+  // CallWidget visibility:
+  //   • Admins (super_admin, tenant_admin) never see it — they don't take calls.
+  //   • Requires either an explicit voice permission, OR an operational sales/support role.
+  //   • Only rendered on pages where placing/receiving a call is contextual —
+  //     dashboard, tickets, voice, contacts, deals. Hidden on settings, reports,
+  //     analytics, sales billing screens where the floating bubble was just noise.
+  const perms = (user as any)?.permissions as Record<string, string | boolean> | undefined;
+  const hasVoicePerm = perms?.voice === true || perms?.voice === 'full' || perms?.voice === 'view';
+  const role = user?.role ?? '';
+  const isOperationalRole = ['agent','line_manager','manager','support_agent','support_manager','sales_agent','sales_manager'].includes(role);
+  const VOICE_ROUTES = ['/dashboard','/tickets','/voice','/contacts','/deals','/companies','/activities','/calls'];
+  const onVoiceRoute = VOICE_ROUTES.some((p) => location.pathname === p || location.pathname.startsWith(`${p}/`));
+  const showCallWidget = !isTenantAdmin && !isSuperAdmin && (hasVoicePerm || isOperationalRole) && onVoiceRoute;
 
   // Super admins have no operational (ticket/voice) dashboard — their home is the
   // platform admin console. Tenant admins are administrative-only: their home is
@@ -563,8 +578,8 @@ function AppLayout() {
           <Route path="*"            element={<Navigate to={homePath} replace />} />
         </Routes>
       </main>
-      {/* Voice call widget is operational — not for the administrative tenant admin. */}
-      {!isTenantAdmin && !isSuperAdmin && <CallWidget />}
+      {/* Voice call widget — operational roles only, contextually shown */}
+      {showCallWidget && <CallWidget />}
     </div>
   );
 }

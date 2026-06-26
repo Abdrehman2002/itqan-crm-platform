@@ -4,6 +4,7 @@ import bcrypt from 'bcryptjs';
 import crypto from 'node:crypto';
 import type { DatabaseClient, RedisClient } from '@crm/core';
 import { EmailService } from '../services/email.service';
+import { sendPasswordResetEmail } from '../lib/system-email';
 import { SECTOR_MAP, getSector } from '@crm/shared';
 import { seedDefaultSlaPolicies } from './tickets';
 
@@ -356,28 +357,24 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
         );
       });
 
-      const appUrl   = process.env.APP_URL ?? 'http://localhost:5173';
+      const appUrl   = process.env.APP_URL ?? process.env.APP_BASE_URL ?? 'http://localhost:5173';
       const resetUrl = `${appUrl}/reset-password?token=${token}&tenant=${body.tenantSlug}`;
 
-      // Send reset email (best-effort)
-      await emailSvc.send(tenant.id, {
-        to:       user.email,
-        subject:  'Reset your password',
-        bodyHtml: `
-          <div style="font-family:sans-serif;max-width:480px;margin:0 auto;">
-            <h2 style="color:#0f172a;">Reset your password</h2>
-            <p>Hi ${user.name},</p>
-            <p>We received a request to reset your password. Click the button below to choose a new one.
-               This link expires in <strong>1 hour</strong>.</p>
-            <a href="${resetUrl}"
-               style="display:inline-block;margin:16px 0;padding:12px 24px;background:#29ABE2;color:white;border-radius:8px;text-decoration:none;font-weight:600;">
-              Reset Password
-            </a>
-            <p style="color:#64748b;font-size:13px;">If you didn't request this, you can safely ignore this email.</p>
-          </div>
-        `,
-        bodyText: `Reset your password: ${resetUrl}\n\nThis link expires in 1 hour.`,
-      }).catch(() => {});
+      // Try the platform system email FIRST — forgot-password is the one flow where
+      // we cannot rely on the tenant having configured its own outbound connector
+      // (they're locked out and can't log in to set it up). Tenant connector is the
+      // fallback for workspaces that have customised their sender domain.
+      const systemOk = await sendPasswordResetEmail({
+        to: user.email, toName: user.name, resetUrl,
+      });
+      if (!systemOk) {
+        await emailSvc.send(tenant.id, {
+          to:       user.email,
+          subject:  'Reset your password',
+          bodyHtml: `<p>Hi ${user.name},</p><p>We received a request to reset your password. <a href="${resetUrl}">Click here to choose a new one</a>. The link expires in 1 hour.</p>`,
+          bodyText: `Reset your password: ${resetUrl}\n\nThis link expires in 1 hour.`,
+        }).catch(() => {});
+      }
 
       return reply.send({ success: true });
     });
