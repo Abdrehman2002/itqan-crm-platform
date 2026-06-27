@@ -32,6 +32,51 @@ import { z } from 'zod';
 import type { DatabaseClient, EventBus } from '@crm/core';
 import { CRM_EVENTS } from '@crm/core';
 import { requireScope, requireRole } from '../middlewares/auth.middleware';
+import { findSlaPolicy } from './tickets';
+import * as sla from '../lib/sla';
+
+// Voice tickets were skipping the SLA pipeline — INSERTed with sla_policy_id=null,
+// so the worker couldn't compute breach / reminders, and reports filtered them out.
+// This helper runs the same matching + due-date math as the ticket-create path.
+async function applySlaToVoiceTicket(
+  db: DatabaseClient,
+  tenantId: string,
+  ticketId: string,
+  priority: string,
+  channel: string = 'voice_bot',
+  department: string | null = null,
+  tags: string[] = [],
+): Promise<void> {
+  const policy = await findSlaPolicy(db, tenantId, undefined, priority, { channel, department, tags });
+  if (!policy) return;
+  // Pull the matched policy's hours-schedule + holidays so due_at honours business hours.
+  const [polRow] = await db.withSuperAdmin(async (c) => {
+    const r = await c.query(
+      `SELECT p.resolution_hours, p.business_hours_only, p.business_hours_schedule, t.settings
+         FROM sla_policies p JOIN tenants t ON t.id = p.tenant_id
+        WHERE p.id = $1`,
+      [policy.id],
+    );
+    return r.rows;
+  });
+  const tz = (polRow?.settings?.timezone as string) ?? 'Asia/Karachi';
+  const schedule = polRow?.business_hours_schedule ?? null;
+  const holidays = await sla.loadHolidays(db, tenantId);
+  const dueAt = sla.computeSlaDueAt({
+    from: new Date(),
+    hours: polRow?.resolution_hours ?? policy['resolution_hours' as keyof typeof policy] as number ?? 24,
+    businessHoursOnly: polRow?.business_hours_only ?? false,
+    schedule,
+    timezone: tz,
+    holidays,
+  });
+  await db.withSuperAdmin(async (c) => {
+    await c.query(
+      `UPDATE tickets SET sla_policy_id = $1, sla_due_at = $2 WHERE id = $3`,
+      [policy.id, dueAt, ticketId],
+    );
+  });
+}
 
 // ── Default IVR menu ─────────────────────────────────────────────────────
 const DEFAULT_IVR_MENU = [
@@ -505,8 +550,14 @@ async function createComplaintFromStructured(
             AND (LOWER(name) IN ('complaints','complaint','complaints queue') OR is_default = true)
           ORDER BY (LOWER(name) IN ('complaints','complaint','complaints queue')) DESC, is_default DESC
           LIMIT 1`, [tenantId])).rows);
-    const [slaRow] = await db.withSuperAdmin(async (c) =>
-      (await c.query(`SELECT id FROM sla_policies WHERE tenant_id=$1 AND priority=$2 AND is_active=true LIMIT 1`, [tenantId, priority])).rows);
+    // Smart-match against match_conditions (channel=voice_bot, tags=[category]) rather
+    // than a naive priority-only lookup — same matcher the ticket-create path uses.
+    const matched = await findSlaPolicy(db, tenantId, undefined, priority, {
+      channel: 'voice_bot',
+      department: 'complaints',
+      tags: s.category ? [s.category] : [],
+    });
+    const slaRow = matched ? { id: matched.id } : null;
 
     // Call record (provider='livekit')
     const [botCall] = await db.withSuperAdmin(async (c) =>
@@ -541,6 +592,12 @@ async function createComplaintFromStructured(
     await db.withSuperAdmin(async (c) => {
       await c.query(`UPDATE voice_bot_calls SET ticket_id=$1 WHERE id=$2`, [ticket.id, botCall.id]);
     });
+
+    // Even when slaRow was found above, the INSERT alone doesn't compute due_at —
+    // that needs the business-hours + holidays math. applySlaToVoiceTicket re-runs
+    // the same smart matcher and sets BOTH sla_policy_id and sla_due_at consistently.
+    await applySlaToVoiceTicket(db, tenantId, ticket.id as string, priority, 'voice_bot', 'complaints',
+                                s.category ? [s.category] : []);
 
     await eventBus.publish(tenantId, CRM_EVENTS.TICKET_CREATED, {
       source: 'livekit', ticketId: ticket.id, ticketType: 'complaint',
@@ -1207,10 +1264,13 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
            JSON.stringify(b)],
         )).rows;
 
-        return { ticketNumber: ticketRow.ticket_number, voiceCallId: callRow.id };
+        return { ticketNumber: ticketRow.ticket_number, voiceCallId: callRow.id, ticketId: ticketRow.id };
       });
 
-      return reply.code(201).send({ success: true, ...result });
+      // Attach SLA policy + due_at AFTER the insert transaction so the worker picks it up.
+      await applySlaToVoiceTicket(db, tenantId, (result as any).ticketId, priority, 'voice_bot', 'sales');
+
+      return reply.code(201).send({ success: true, ticketNumber: result.ticketNumber, voiceCallId: result.voiceCallId });
     });
 
     // Support inquiry — Sara uses this when the caller needs human follow-up.
@@ -1280,10 +1340,12 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
            JSON.stringify(b)],
         )).rows;
 
-        return { ticketNumber: ticketRow.ticket_number, voiceCallId: callRow.id };
+        return { ticketNumber: ticketRow.ticket_number, voiceCallId: callRow.id, ticketId: ticketRow.id };
       });
 
-      return reply.code(201).send({ success: true, ...result });
+      await applySlaToVoiceTicket(db, tenantId, (result as any).ticketId, priority, 'voice_bot', 'support', [b.category ?? 'general']);
+
+      return reply.code(201).send({ success: true, ticketNumber: result.ticketNumber, voiceCallId: result.voiceCallId });
     });
   };
 }

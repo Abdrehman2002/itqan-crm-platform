@@ -162,7 +162,7 @@ async function nextTicketNumber(db: DatabaseClient, tenantId: string): Promise<s
  *
  * If `slaPolicyId` is provided explicitly, that policy wins regardless.
  */
-async function findSlaPolicy(
+export async function findSlaPolicy(
   db: DatabaseClient,
   tenantId: string,
   slaPolicyId: string | undefined,
