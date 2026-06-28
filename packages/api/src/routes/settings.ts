@@ -39,9 +39,15 @@ export function defaultPermissions(role: string): Record<string, string> {
       };
     case 'agent':
     default:
+      // Agents need to see their personal dashboard, which calls
+      // /api/v1/analytics/ops-dashboard. That endpoint already scopes data to
+      // the user's own hierarchy (recursive manager_id CTE), so giving every
+      // agent `analytics: 'view'` only lets them see THEIR own metrics —
+      // not the workspace-wide totals.
+      // Was 'none' → caused "agent dashboard not working" 403 on the personal view.
       return {
         dashboard: 'view', contacts: 'full', companies: 'view', deals: 'view',
-        activities: 'full', tickets: 'full', emails: 'full', analytics: 'none',
+        activities: 'full', tickets: 'full', emails: 'full', analytics: 'view',
         voice: 'view', voicebot: 'none', integrations: 'none', settings: 'none', billing: 'none',
       };
   }

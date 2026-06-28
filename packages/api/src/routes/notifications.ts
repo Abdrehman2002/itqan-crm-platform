@@ -60,5 +60,34 @@ export function notificationRoutes(db: DatabaseClient) {
 
       return reply.send({ success: true });
     });
+
+    // Dismiss (hard-delete) a single notification. Per-user — RLS + the
+    // user_id guard means I can only delete my own row, never anyone else's.
+    fastify.delete('/:id', async (req, reply) => {
+      const { id }   = req.params as { id: string };
+      const userId   = req.user.sub;
+      const tenantId = req.tenant.id;
+
+      const [row] = await db.withTenant(tenantId, async (client) => {
+        const r = await client.query(
+          `DELETE FROM notifications WHERE id = $1 AND user_id = $2 RETURNING id`,
+          [id, userId],
+        );
+        return r.rows;
+      });
+      if (!row) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Notification not found' } });
+      return reply.send({ success: true });
+    });
+
+    // Dismiss all notifications in one shot (used by the "clear all" affordance
+    // alongside "mark all read").
+    fastify.delete('/', async (req, reply) => {
+      const userId   = req.user.sub;
+      const tenantId = req.tenant.id;
+      await db.withTenant(tenantId, async (client) => {
+        await client.query(`DELETE FROM notifications WHERE user_id = $1`, [userId]);
+      });
+      return reply.send({ success: true });
+    });
   };
 }
