@@ -1,64 +1,94 @@
-import React from 'react';
+import React, { Suspense, lazy } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, NavLink, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import {
   LayoutDashboard, Users, Building2, TrendingUp, Phone,
   CheckSquare, BarChart3, Settings as SettingsIcon, Zap, Shield,
   LogOut, CreditCard, BarChart2, LifeBuoy, List, Clock, Mail, Bot,
-  FileText, Layers, MessageCircle, Key, Bell, Lock,
+  FileText, Layers, MessageCircle, Key, Bell, Lock, Loader2,
 } from 'lucide-react';
 import { useAuthStore } from './store/auth.store';
 import { useIsSuperAdmin, useIsAdmin, useIsTenantAdmin, useHasRole } from './hooks/useRole';
 import { useApplyAppearance } from './hooks/useApplyAppearance';
 import { api } from './services/api';
 import { NotificationBell } from './components/NotificationBell';
-import { CallWidget } from './components/CallWidget';
+// CallWidget pulls in livekit-client (~600kB). Lazy-load so it's only fetched
+// when an operational user lands on a voice-relevant route — settings/reports
+// users never download it.
+const CallWidget = lazy(() => import('./components/CallWidget').then(m => ({ default: m.CallWidget })));
+// EAGER imports — only the auth flow + the immediate post-login landing page
+// (Dashboard) stay in the main bundle. Everything else is route-split so
+// first paint after login isn't dragged down by code the user hasn't asked for.
 import { Dashboard }    from './pages/Dashboard';
-import { VoiceCalls }   from './pages/VoiceCalls';
-import { Billing }      from './pages/Billing';
 import { LoginPage }    from './pages/Login';
 import { RegisterPage } from './pages/Register';
-import { Contacts }     from './pages/Contacts';
-import { Companies }    from './pages/Companies';
-import { Deals }        from './pages/Deals';
-import { Activities }   from './pages/Activities';
-import { Analytics }    from './pages/Analytics';
-import { Integrations } from './pages/Integrations';
-import { Settings, ModulesSettings, RoutingSettings } from './pages/Settings';
-import { SuperAdmin }       from './pages/SuperAdmin';
-import { VoiceAnalytics }   from './pages/VoiceAnalytics';
-import { Tickets }          from './pages/Tickets';
-import { TicketQueues }     from './pages/TicketQueues';
-import { TicketSla }        from './pages/TicketSla';
-import { Emails }           from './pages/Emails';
-import { VoiceBotConfig }  from './pages/VoiceBotConfig';
-import { VoiceBotCalls }   from './pages/VoiceBotCalls';
-import { VoiceBotTickets } from './pages/VoiceBotTickets';
-import { ContactDetail }   from './pages/ContactDetail';
 import { ForgotPassword }  from './pages/ForgotPassword';
 import { ResetPassword }   from './pages/ResetPassword';
-import { RolesPage }          from './pages/Roles';
-import { PersonalSettings }   from './pages/PersonalSettings';
-import { TenantAdminDashboard } from './pages/TenantAdminDashboard';
-import { Departments }          from './pages/Departments';
-import { AdminUsers }           from './pages/admin/AdminUsers';
-// Sales & Invoicing module
-import { SalesDashboard }    from './pages/sales/SalesDashboard';
-import { InvoiceList }       from './pages/sales/InvoiceList';
-import { InvoiceCreate }     from './pages/sales/InvoiceCreate';
-import { InvoiceDetail }     from './pages/sales/InvoiceDetail';
-import { SalesContacts }     from './pages/sales/SalesContacts';
-import { SalesPayments }     from './pages/sales/SalesPayments';
-import { SalesReports }      from './pages/sales/SalesReports';
-import { SalesTemplates }    from './pages/sales/SalesTemplates';
-import { SalesBuilder }      from './pages/sales/SalesBuilder';
-import { SalesSettingsPage } from './pages/sales/SalesSettings';
-import { TeamReports }       from './pages/TeamReports';
-import { TeamMessaging }     from './pages/TeamMessaging';
+
+// LAZY imports — each becomes its own chunk, fetched on demand.
+const VoiceCalls   = lazy(() => import('./pages/VoiceCalls').then(m => ({ default: m.VoiceCalls })));
+const Billing      = lazy(() => import('./pages/Billing').then(m => ({ default: m.Billing })));
+const Contacts     = lazy(() => import('./pages/Contacts').then(m => ({ default: m.Contacts })));
+const Companies    = lazy(() => import('./pages/Companies').then(m => ({ default: m.Companies })));
+const Deals        = lazy(() => import('./pages/Deals').then(m => ({ default: m.Deals })));
+const Activities   = lazy(() => import('./pages/Activities').then(m => ({ default: m.Activities })));
+const Analytics    = lazy(() => import('./pages/Analytics').then(m => ({ default: m.Analytics })));
+const Integrations = lazy(() => import('./pages/Integrations').then(m => ({ default: m.Integrations })));
+const Settings          = lazy(() => import('./pages/Settings').then(m => ({ default: m.Settings })));
+const ModulesSettings   = lazy(() => import('./pages/Settings').then(m => ({ default: m.ModulesSettings })));
+const RoutingSettings   = lazy(() => import('./pages/Settings').then(m => ({ default: m.RoutingSettings })));
+const SuperAdmin        = lazy(() => import('./pages/SuperAdmin').then(m => ({ default: m.SuperAdmin })));
+const VoiceAnalytics    = lazy(() => import('./pages/VoiceAnalytics').then(m => ({ default: m.VoiceAnalytics })));
+const Tickets           = lazy(() => import('./pages/Tickets').then(m => ({ default: m.Tickets })));
+const TicketQueues      = lazy(() => import('./pages/TicketQueues').then(m => ({ default: m.TicketQueues })));
+const TicketSla         = lazy(() => import('./pages/TicketSla').then(m => ({ default: m.TicketSla })));
+const Emails            = lazy(() => import('./pages/Emails').then(m => ({ default: m.Emails })));
+const VoiceBotConfig    = lazy(() => import('./pages/VoiceBotConfig').then(m => ({ default: m.VoiceBotConfig })));
+const VoiceBotCalls     = lazy(() => import('./pages/VoiceBotCalls').then(m => ({ default: m.VoiceBotCalls })));
+const VoiceBotTickets   = lazy(() => import('./pages/VoiceBotTickets').then(m => ({ default: m.VoiceBotTickets })));
+const ContactDetail     = lazy(() => import('./pages/ContactDetail').then(m => ({ default: m.ContactDetail })));
+const RolesPage         = lazy(() => import('./pages/Roles').then(m => ({ default: m.RolesPage })));
+const PersonalSettings  = lazy(() => import('./pages/PersonalSettings').then(m => ({ default: m.PersonalSettings })));
+const TenantAdminDashboard = lazy(() => import('./pages/TenantAdminDashboard').then(m => ({ default: m.TenantAdminDashboard })));
+const Departments       = lazy(() => import('./pages/Departments').then(m => ({ default: m.Departments })));
+const AdminUsers        = lazy(() => import('./pages/admin/AdminUsers').then(m => ({ default: m.AdminUsers })));
+// Sales & Invoicing module — every page lazy. Heaviest sub-tree by far.
+const SalesDashboard    = lazy(() => import('./pages/sales/SalesDashboard').then(m => ({ default: m.SalesDashboard })));
+const InvoiceList       = lazy(() => import('./pages/sales/InvoiceList').then(m => ({ default: m.InvoiceList })));
+const InvoiceCreate     = lazy(() => import('./pages/sales/InvoiceCreate').then(m => ({ default: m.InvoiceCreate })));
+const InvoiceDetail     = lazy(() => import('./pages/sales/InvoiceDetail').then(m => ({ default: m.InvoiceDetail })));
+const SalesContacts     = lazy(() => import('./pages/sales/SalesContacts').then(m => ({ default: m.SalesContacts })));
+const SalesPayments     = lazy(() => import('./pages/sales/SalesPayments').then(m => ({ default: m.SalesPayments })));
+const SalesReports      = lazy(() => import('./pages/sales/SalesReports').then(m => ({ default: m.SalesReports })));
+const SalesTemplates    = lazy(() => import('./pages/sales/SalesTemplates').then(m => ({ default: m.SalesTemplates })));
+const SalesBuilder      = lazy(() => import('./pages/sales/SalesBuilder').then(m => ({ default: m.SalesBuilder })));
+const SalesSettingsPage = lazy(() => import('./pages/sales/SalesSettings').then(m => ({ default: m.SalesSettingsPage })));
+const TeamReports       = lazy(() => import('./pages/TeamReports').then(m => ({ default: m.TeamReports })));
+const TeamMessaging     = lazy(() => import('./pages/TeamMessaging').then(m => ({ default: m.TeamMessaging })));
 
 const queryClient = new QueryClient({
-  defaultOptions: { queries: { staleTime: 30_000, retry: 1 } },
+  defaultOptions: {
+    queries: {
+      // Was 30s — bumped to 60s so navigating between tabs doesn't refetch the
+      // same data the user just looked at. Combined with refetchOnWindowFocus=false
+      // this kills the "tab away → tab back → 800ms freeze" pattern.
+      staleTime: 60_000,
+      gcTime: 5 * 60_000,
+      refetchOnWindowFocus: false,
+      retry: 1,
+    },
+  },
 });
+
+// Inline spinner shown while a lazy chunk is fetching. Sized to fit inside the
+// main content area — not full-screen so the sidebar stays interactive.
+function PageFallback() {
+  return (
+    <div className="flex items-center justify-center h-full w-full py-24">
+      <Loader2 className="w-5 h-5 text-brand-400 animate-spin" />
+    </div>
+  );
+}
 
 // ── Icon resolver ─────────────────────────────────────────────────────────
 // Maps icon name strings (from the API) to Lucide components.
@@ -533,6 +563,7 @@ function AppLayout() {
     <div className="flex h-screen bg-gray-50 overflow-hidden">
       <Sidebar />
       <main className="flex-1 overflow-y-auto">
+        <Suspense fallback={<PageFallback />}>
         <Routes>
           <Route path="/admin"         element={isTenantAdmin ? <TenantAdminDashboard /> : <Navigate to="/dashboard" replace />} />
           <Route path="/admin/users"   element={isTenantAdmin ? <AdminUsers /> : <Navigate to="/dashboard" replace />} />
@@ -577,9 +608,16 @@ function AppLayout() {
           <Route path="/sales/settings"   element={op(<SalesSettingsPage />)} />
           <Route path="*"            element={<Navigate to={homePath} replace />} />
         </Routes>
+        </Suspense>
       </main>
-      {/* Voice call widget — operational roles only, contextually shown */}
-      {showCallWidget && <CallWidget />}
+      {/* Voice call widget — operational roles only, contextually shown.
+           Wrapped in its own Suspense so the surrounding chrome stays interactive
+           while the livekit chunk loads. */}
+      {showCallWidget && (
+        <Suspense fallback={null}>
+          <CallWidget />
+        </Suspense>
+      )}
     </div>
   );
 }

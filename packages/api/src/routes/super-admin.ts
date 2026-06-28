@@ -103,6 +103,43 @@ function generateTempPassword(): string {
 
 export function superAdminRoutes(db: DatabaseClient, tenantService: TenantService) {
   return async function (fastify: FastifyInstance) {
+
+    // Hot read-only GET endpoints under /super-admin advertise a 30s cache window.
+    // The browser and Vercel's CDN can both honour this — same tab switch within
+    // 30s no longer triggers a Mumbai roundtrip. stale-while-revalidate keeps
+    // the UI feeling instant: the cached copy renders immediately, a background
+    // fetch refreshes the cache silently.
+    //   Tenants/metrics list change on workspace create — that flow already
+    //   invalidates the React Query cache by predicate so the stale value
+    //   never sticks longer than one user action.
+    const CACHE_PATHS = [
+      '/tenants',
+      '/metrics',
+      '/modules',
+      '/platform-roles',
+      '/sub-admins',
+      '/reports/workspaces',
+      '/reports/backups',
+      '/reports/invoices',
+      '/reports/payments',
+      '/reports/audit',
+      '/password-log',
+      '/customer-contacts',
+      '/customer-companies',
+      '/platform-invoices',
+      '/emails',
+    ];
+    fastify.addHook('onSend', async (req, reply, payload) => {
+      if (req.method !== 'GET') return payload;
+      const url = req.url.split('?')[0];
+      // Trim the /super-admin prefix the routes are mounted under so the match
+      // works whether mounted at /super-admin or /api/v1/super-admin.
+      const path = url.replace(/^.*\/super-admin/, '');
+      if (CACHE_PATHS.some((p) => path === p || path.startsWith(`${p}/`))) {
+        reply.header('Cache-Control', 'private, max-age=30, stale-while-revalidate=120');
+      }
+      return payload;
+    });
     // All super-admin routes require super_admin role
     fastify.addHook('preHandler', requireRole('super_admin'));
 
