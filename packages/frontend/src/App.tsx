@@ -12,6 +12,7 @@ import { useIsSuperAdmin, useIsAdmin, useIsTenantAdmin, useHasRole } from './hoo
 import { useApplyAppearance } from './hooks/useApplyAppearance';
 import { api } from './services/api';
 import { NotificationBell } from './components/NotificationBell';
+import { MessageToast, useMessageUnread } from './components/MessageToast';
 // CallWidget pulls in livekit-client (~600kB). Lazy-load so it's only fetched
 // when an operational user lands on a voice-relevant route — settings/reports
 // users never download it.
@@ -115,6 +116,34 @@ interface ActiveModule {
   navItems: NavItem[];
 }
 
+
+// Sidebar entry for /messages that paints a small red badge when there are
+// unread DMs/channel messages. Splits out so the rest of the sidebar doesn't
+// have to re-render every 10 seconds while the unread poll runs.
+function MessagingNavLink() {
+  const { unread } = useMessageUnread();
+  return (
+    <NavLink to="/messages"
+      className={({ isActive }) =>
+        `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all relative ${
+          isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'
+        }`
+      }
+      style={({ isActive }) => isActive ? {
+        background: 'linear-gradient(135deg, rgba(41,171,226,0.25) 0%, rgba(77,139,60,0.15) 100%)',
+        borderLeft: '2px solid #29ABE2',
+      } : {}}
+    >
+      <MessageCircle className="w-4 h-4 shrink-0" />
+      <span className="flex-1">Messaging</span>
+      {unread > 0 && (
+        <span className="ml-auto inline-flex items-center justify-center min-w-[18px] h-[18px] px-1.5 text-[10px] font-bold bg-red-500 text-white rounded-full">
+          {unread > 9 ? '9+' : unread}
+        </span>
+      )}
+    </NavLink>
+  );
+}
 
 function Sidebar() {
   const { user, tenant, logout } = useAuthStore();
@@ -261,23 +290,10 @@ function Sidebar() {
           </div>
         ))}
 
-        {/* Team Messaging — operational staff only (not the administrative tenant admin) */}
-        {!isSuperAdmin && !isTenantAdmin && (
-          <NavLink to="/messages"
-            className={({ isActive }) =>
-              `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${
-                isActive ? 'text-white font-semibold' : 'text-white/60 hover:text-white hover:bg-white/10'
-              }`
-            }
-            style={({ isActive }) => isActive ? {
-              background: 'linear-gradient(135deg, rgba(41,171,226,0.25) 0%, rgba(77,139,60,0.15) 100%)',
-              borderLeft: '2px solid #29ABE2',
-            } : {}}
-          >
-            <MessageCircle className="w-4 h-4 shrink-0" />
-            Messaging
-          </NavLink>
-        )}
+        {/* Team Messaging — everyone except the platform super admin. Tenant admins
+            need to message their team (broadcasts, instructions), so this is no
+            longer scoped to operational roles only. */}
+        {!isSuperAdmin && <MessagingNavLink />}
 
         {/* Integrations — admin (keeps the system/network live) or permitted users.
             Billing — Finance/Sales function only: granted by the 'billing:read'
@@ -618,6 +634,11 @@ function AppLayout() {
           <CallWidget />
         </Suspense>
       )}
+
+      {/* In-app toast for new team messages. Visible to every signed-in user
+          except super_admin (who has no /messages page). Polls the unread
+          endpoint every 10s; pops a small card bottom-right on count increase. */}
+      {!isSuperAdmin && <MessageToast />}
     </div>
   );
 }

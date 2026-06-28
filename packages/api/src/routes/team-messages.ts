@@ -81,19 +81,26 @@ export function teamMessageRoutes(db: DatabaseClient) {
       return reply.send({ success: true, data: rows });
     });
 
+    // Resolve sender_name from the users table since the JWT payload doesn't
+    // carry name — using `(req.user as any).name` returned undefined and broke
+    // the NOT NULL constraint on sender_name. Cache per request.
+    async function senderNameOf(client: any, userId: string): Promise<string> {
+      const r = await client.query('SELECT name, email FROM users WHERE id = $1', [userId]);
+      return r.rows[0]?.name || r.rows[0]?.email || 'Unknown';
+    }
+
     // Post to a channel
     fastify.post('/channel/:name', async (req, reply) => {
       const { name } = req.params as { name: string };
       const { content } = req.body as { content: string };
       if (!content?.trim()) return reply.code(400).send({ success: false, error: { code: 'EMPTY', message: 'Message cannot be empty' } });
 
-      const senderName = (req.user as any).name || (req.user as any).email;
-
       const [row] = await db.withSuperAdmin(async (client) => {
+        const senderName = await senderNameOf(client, req.user.sub);
         const res = await client.query(
           `INSERT INTO team_messages (tenant_id, sender_id, sender_name, channel, content, message_type)
            VALUES ($1, $2, $3, $4, $5, 'channel') RETURNING *`,
-          [req.tenant.id, (req.user as any).id, senderName, name, content.trim()],
+          [req.tenant.id, req.user.sub, senderName, name, content.trim()],
         );
         return res.rows;
       });
@@ -117,7 +124,7 @@ export function teamMessageRoutes(db: DatabaseClient) {
     // Get DM thread with a user (messages between me and them, both directions)
     fastify.get('/dm/:userId', async (req, reply) => {
       const { userId } = req.params as { userId: string };
-      const myId = (req.user as any).id;
+      const myId = req.user.sub;
 
       const rows = await db.withSuperAdmin(async (client) => {
         const res = await client.query(
@@ -142,17 +149,53 @@ export function teamMessageRoutes(db: DatabaseClient) {
       const { content } = req.body as { content: string };
       if (!content?.trim()) return reply.code(400).send({ success: false, error: { code: 'EMPTY', message: 'Message cannot be empty' } });
 
-      const senderName = (req.user as any).name || (req.user as any).email;
-
       const [row] = await db.withSuperAdmin(async (client) => {
+        const senderName = await senderNameOf(client, req.user.sub);
         const res = await client.query(
           `INSERT INTO team_messages (tenant_id, sender_id, sender_name, recipient_id, content, message_type)
            VALUES ($1, $2, $3, $4, $5, 'dm') RETURNING *`,
-          [req.tenant.id, (req.user as any).id, senderName, userId, content.trim()],
+          [req.tenant.id, req.user.sub, senderName, userId, content.trim()],
         );
         return res.rows;
       });
       return reply.code(201).send({ success: true, data: row });
+    });
+
+    // GET /api/v1/messages/unread-count?since=<iso8601>
+    // Returns the count of messages addressed to me (DMs to me, OR any channel
+    // post) authored by someone else since the given timestamp. Frontend tracks
+    // the timestamp in localStorage — no DB schema change needed.
+    fastify.get('/unread-count', async (req, reply) => {
+      const { since } = req.query as { since?: string };
+      const sinceDt = since && !Number.isNaN(Date.parse(since)) ? new Date(since) : new Date(0);
+      const [row] = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(
+          `SELECT COUNT(*) AS n,
+                  COUNT(*) FILTER (WHERE message_type = 'dm')      AS dm_n,
+                  COUNT(*) FILTER (WHERE message_type = 'channel') AS channel_n,
+                  MAX(created_at) AS latest,
+                  (ARRAY_AGG(sender_name ORDER BY created_at DESC))[1] AS latest_sender,
+                  (ARRAY_AGG(content     ORDER BY created_at DESC))[1] AS latest_content
+             FROM team_messages
+            WHERE tenant_id = $1
+              AND created_at > $2
+              AND sender_id != $3
+              AND (recipient_id = $3 OR message_type = 'channel')`,
+          [req.tenant.id, sinceDt, req.user.sub],
+        );
+        return r.rows;
+      });
+      return reply.send({
+        success: true,
+        data: {
+          total:       Number(row?.n ?? 0),
+          dm:          Number(row?.dm_n ?? 0),
+          channel:     Number(row?.channel_n ?? 0),
+          latestAt:    row?.latest ?? null,
+          latestSender: row?.latest_sender ?? null,
+          latestPreview: row?.latest_content ? String(row.latest_content).slice(0, 80) : null,
+        },
+      });
     });
   };
 }

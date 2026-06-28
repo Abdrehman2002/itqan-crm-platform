@@ -27,8 +27,7 @@ interface Message {
 
 interface TeamMember {
   id: string;
-  first_name: string;
-  last_name?: string;
+  name: string;
   email: string;
   role: string;
 }
@@ -219,7 +218,7 @@ export function TeamMessaging() {
 
   const filteredMembers = (members ?? []).filter((m) =>
     m.id !== myId &&
-    (`${m.first_name} ${m.last_name ?? ''} ${m.email}`).toLowerCase().includes(memberSearch.toLowerCase())
+    `${m.name} ${m.email}`.toLowerCase().includes(memberSearch.toLowerCase())
   );
 
   const currentTitle = view.type === 'channel' ? `#${view.name}` : view.userName;
@@ -276,16 +275,16 @@ export function TeamMessaging() {
           <div className="space-y-0.5">
             {filteredMembers.map((m) => (
               <button key={m.id}
-                onClick={() => setView({ type: 'dm', userId: m.id, userName: `${m.first_name} ${m.last_name ?? ''}`.trim() })}
+                onClick={() => setView({ type: 'dm', userId: m.id, userName: m.name })}
                 className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs transition-colors text-left ${
                   view.type === 'dm' && view.userId === m.id
                     ? 'bg-brand-600/30 text-white font-medium'
                     : 'text-slate-400 hover:text-white hover:bg-slate-700'
                 }`}>
                 <div className="w-5 h-5 rounded-full bg-slate-600 flex items-center justify-center shrink-0 text-[10px] font-bold text-white">
-                  {m.first_name.charAt(0)}
+                  {(m.name ?? '?').charAt(0)}
                 </div>
-                <span className="truncate">{m.first_name} {m.last_name ?? ''}</span>
+                <span className="truncate">{m.name}</span>
               </button>
             ))}
             {filteredMembers.length === 0 && memberSearch && (
