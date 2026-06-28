@@ -107,13 +107,20 @@ export function teamMessageRoutes(db: DatabaseClient) {
       return reply.code(201).send({ success: true, data: row });
     });
 
-    // List team members
+    // List team members. Uses withSuperAdmin because we don't have a tenant role
+    // context here, but the manual tenant_id filter (and the deleted_at filter
+    // added per U6) does the isolation. Important for the user concern
+    // "agent in workspace A must never see / message users from workspace B".
     fastify.get('/team-members', async (req, reply) => {
       const rows = await db.withSuperAdmin(async (client) => {
         const res = await client.query(
           `SELECT id, name, email, role
-           FROM users WHERE tenant_id = $1 AND is_active = true
-           ORDER BY name`,
+             FROM users
+            WHERE tenant_id = $1
+              AND is_active = true
+              AND deleted_at IS NULL
+              AND role != 'super_admin'
+            ORDER BY name`,
           [req.tenant.id],
         );
         return res.rows;

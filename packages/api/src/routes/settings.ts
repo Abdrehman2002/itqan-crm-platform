@@ -275,9 +275,13 @@ export function settingsRoutes(db: DatabaseClient) {
     // List team members (super_admin excluded — internal platform role)
     fastify.get('/team', { preHandler: requireRole('super_admin', 'tenant_admin', 'manager') }, async (req, reply) => {
       const members = await db.withTenant(req.tenant.id, async (client) => {
-        // U3 — department + department_type were missing from the SELECT, so
-        // the frontend column always rendered '—'. U6 — deleted_at filter so
-        // soft-deleted users don't appear in the live team list.
+        // BUG-S — cross-workspace leak. The query relied solely on RLS to scope
+        // rows to the current tenant. Production DB role bypasses RLS (common
+        // with Supabase pooler defaults), so without an explicit
+        // `u.tenant_id = $1` filter Vextria's TA saw demo + clario users too
+        // (25 returned instead of 17). Defense in depth: explicit tenant_id
+        // filter EVEN INSIDE withTenant. Also constrains the LEFT JOIN on users
+        // so a manager_id pointing at a different tenant can't leak a name.
         const result = await client.query(
           `SELECT u.id, u.name, u.email, u.role, u.permissions, u.is_active, u.created_at,
                   u.last_login_at, u.custom_role_id, u.manager_id,
@@ -285,11 +289,13 @@ export function settingsRoutes(db: DatabaseClient) {
                   m.name AS manager_name,
                   r.name AS role_name, r.color AS role_color
            FROM users u
-           LEFT JOIN users m ON m.id = u.manager_id
-           LEFT JOIN roles r ON r.id = u.custom_role_id
-           WHERE u.role != 'super_admin'
+           LEFT JOIN users m ON m.id = u.manager_id AND m.tenant_id = $1
+           LEFT JOIN roles r ON r.id = u.custom_role_id AND r.tenant_id = $1
+           WHERE u.tenant_id = $1
+             AND u.role != 'super_admin'
              AND u.deleted_at IS NULL
            ORDER BY u.name ASC`,
+          [req.tenant.id],
         );
         return result.rows;
       });
@@ -301,14 +307,18 @@ export function settingsRoutes(db: DatabaseClient) {
       const { userId } = req.query as { userId?: string };
       const targetId = userId ?? req.user.sub;
       const reportees = await db.withTenant(req.tenant.id, async (client) => {
+        // Defense in depth: explicit u.tenant_id filter (BUG-S).
         const result = await client.query(
           `SELECT u.id, u.name, u.email, u.role, u.custom_role_id,
                   r.name AS role_name, r.color AS role_color
            FROM users u
-           LEFT JOIN roles r ON r.id = u.custom_role_id
-           WHERE u.manager_id = $1 AND u.role != 'super_admin'
+           LEFT JOIN roles r ON r.id = u.custom_role_id AND r.tenant_id = $2
+           WHERE u.manager_id = $1
+             AND u.tenant_id = $2
+             AND u.role != 'super_admin'
+             AND u.deleted_at IS NULL
            ORDER BY u.name ASC`,
-          [targetId],
+          [targetId, req.tenant.id],
         );
         return result.rows;
       });

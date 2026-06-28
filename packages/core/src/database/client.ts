@@ -28,14 +28,27 @@ export class DatabaseClient {
     logger.info('Database connected');
   }
 
-  // Returns a connection scoped to the given tenant using RLS session variable.
-  // Every query on this connection is automatically filtered by tenant_id via RLS.
+  // Returns a connection scoped to the given tenant.
+  //
+  // RLS policies on tenant-scoped tables read `app.tenant_id` and only return
+  // rows where tenant_id matches. That works when the DB role respects RLS.
+  // In production with the Supabase pooler the connecting role often has
+  // BYPASSRLS, which makes RLS a no-op — that's where we saw 17 + 7 + 1
+  // cross-workspace user rows leaking through `/api/v1/settings/team`.
+  //
+  // Two-part defence:
+  //   1. SET LOCAL app.bypass_rls = 'off' here so any policy that has an
+  //      OR-bypass branch (see migration 035) collapses to the tenant_id check.
+  //   2. Application code MUST also pass an explicit `WHERE x.tenant_id = $1`
+  //      in every query — the BYPASSRLS attribute on the role is a deployment
+  //      configuration we don't control from here, so the application can't
+  //      assume RLS will catch a missing filter.
   async withTenant<T>(tenantId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      // Set RLS context — PostgreSQL RLS policies read this variable
       await client.query(`SELECT set_config('app.tenant_id', $1, true)`, [tenantId]);
+      await client.query(`SET LOCAL app.bypass_rls = 'off'`);
       const result = await fn(client);
       await client.query('COMMIT');
       return result;
