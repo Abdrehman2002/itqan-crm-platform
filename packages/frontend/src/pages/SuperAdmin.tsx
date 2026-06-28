@@ -219,7 +219,7 @@ function CreateWorkspaceModal({ onClose }: { onClose: () => void }) {
   const [slugTouched, setSlugTouched] = useState(false);
   const [selectedFeatures, setSelectedFeatures] = useState<string[]>([]);
   const [step, setStep] = useState<'details' | 'modules'>('details');
-  const [result, setResult] = useState<{ slug: string; adminEmail: string; tempPassword?: string; emailSent?: boolean } | null>(null);
+  const [result, setResult] = useState<{ slug: string; adminEmail: string; tempPassword?: string; emailSent?: boolean; emailErrorCode?: string | null; emailErrorMessage?: string | null } | null>(null);
 
   // Licensable module + feature catalog — the single source of truth (from the API).
   // Adding a module there makes it appear here automatically.
@@ -245,9 +245,19 @@ function CreateWorkspaceModal({ onClose }: { onClose: () => void }) {
       entitledFeatures: selectedFeatures,
     }),
     onSuccess: (res) => {
-      qc.invalidateQueries({ queryKey: ['sa-tenants'] });
+      // A new workspace touches every super-admin surface: tenants list, dashboard
+      // KPI cards, settings dropdowns, billing tenant filter, reports tenant filter.
+      // Invalidate by prefix so all `sa-*` queries refetch — cheaper than refresh.
+      qc.invalidateQueries({ predicate: (q) => typeof q.queryKey[0] === 'string' && (q.queryKey[0] as string).startsWith('sa-') });
       const d = res.data.data;
-      setResult({ slug: d.slug, adminEmail: form.adminEmail, tempPassword: d.tempPassword, emailSent: d.emailSent });
+      setResult({
+        slug: d.slug,
+        adminEmail: form.adminEmail,
+        tempPassword: d.tempPassword,
+        emailSent: d.emailSent,
+        emailErrorCode: d.emailErrorCode ?? null,
+        emailErrorMessage: d.emailErrorMessage ?? null,
+      });
     },
   });
 
@@ -314,10 +324,15 @@ function CreateWorkspaceModal({ onClose }: { onClose: () => void }) {
               )}
             </div>
             {result.tempPassword && !result.emailSent && (
-              <p className="text-xs flex items-start gap-1.5 text-amber-600">
+              <div className="text-xs flex items-start gap-1.5 text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
                 <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                Email delivery failed (no SendGrid / SMTP configured). Copy this password and share it securely — it is shown only once. The customer should change it on first login.
-              </p>
+                <div className="space-y-1">
+                  <p className="font-medium">Email could not be delivered.</p>
+                  <p className="leading-relaxed">{result.emailErrorMessage ?? 'No reason returned from the email provider.'}</p>
+                  {result.emailErrorCode && <p className="font-mono text-[10px] text-amber-600/80">Code: {result.emailErrorCode}</p>}
+                  <p>Copy the password above and share it securely with the customer. It is shown only once.</p>
+                </div>
+              </div>
             )}
             {result.emailSent && !result.tempPassword && (
               <p className="text-xs flex items-start gap-1.5 text-green-700">
@@ -1424,12 +1439,6 @@ function PlatformRoleModal({ role, onClose }: { role?: any; onClose: () => void 
 
         <div className="mb-1">
           <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Platform Permissions</p>
-          <div className="bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 mb-3">
-            <p className="text-xs text-amber-700">
-              ⚠️ <strong>Push to production</strong> should only be granted to trusted senior admins.
-              Sub-admins without this permission can test and configure but cannot deploy.
-            </p>
-          </div>
           <PermissionsMatrix modules={PLATFORM_MODULE_DEFS} permissions={permissions} onChange={setPermissions} />
         </div>
 
@@ -2421,13 +2430,25 @@ function SuperAdminReports() {
             <table className="w-full">
               <thead className="bg-gray-50 border-b border-gray-100 sticky top-0">
                 <tr>
-                  {['Workspace','Slug','Sector','Plan','Status','Modules','Users (Active)','Contacts','Open Deals','Storage','Created','Last Backup'].map(h => (
-                    <th key={h} className={thCls}>{h}</th>
+                  {[
+                    { label: 'Workspace',     align: 'left'   },
+                    { label: 'Slug',          align: 'left'   },
+                    { label: 'Sector',        align: 'left'   },
+                    { label: 'Plan',          align: 'left'   },
+                    { label: 'Status',        align: 'left'   },
+                    { label: 'Modules',       align: 'left'   },
+                    { label: 'Users (Active)',align: 'right'  },
+                    { label: 'Contacts',      align: 'right'  },
+                    { label: 'Storage',       align: 'right'  },
+                    { label: 'Created',       align: 'left'   },
+                    { label: 'Last Backup',   align: 'left'   },
+                  ].map(h => (
+                    <th key={h.label} className={`${thCls} text-${h.align}`}>{h.label}</th>
                   ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
-                {(wsData ?? []).length === 0 && <tr><td colSpan={12} className="px-4 py-12 text-center text-xs text-gray-400">No tenants in this period.</td></tr>}
+                {(wsData ?? []).length === 0 && <tr><td colSpan={11} className="px-4 py-12 text-center text-xs text-gray-400">No tenants in this period.</td></tr>}
                 {(wsData ?? []).map((w: any) => (
                   <tr key={w.id} className="hover:bg-gray-50">
                     <td className={tdCls + ' font-semibold text-gray-900 whitespace-nowrap'}>{w.name}</td>
@@ -2444,10 +2465,9 @@ function SuperAdminReports() {
                         ))}
                       </div>
                     </td>
-                    <td className={tdCls + ' text-center'}>{w.active_users}/{w.user_count}</td>
-                    <td className={tdCls + ' text-center'}>{w.contact_count}</td>
-                    <td className={tdCls + ' text-center'}>{w.open_deals}</td>
-                    <td className={tdCls}>{fmtBytes(Number(w.storage_bytes))}</td>
+                    <td className={tdCls + ' text-right tabular-nums'}>{w.active_users}/{w.user_count}</td>
+                    <td className={tdCls + ' text-right tabular-nums'}>{w.contact_count}</td>
+                    <td className={tdCls + ' text-right tabular-nums whitespace-nowrap'}>{fmtBytes(Number(w.storage_bytes))}</td>
                     <td className={tdCls + ' whitespace-nowrap'}>{fmtDate(w.created_at)}</td>
                     <td className={tdCls + ' whitespace-nowrap'}>
                       {w.last_backup_at ? fmtDate(w.last_backup_at) : <span className="text-red-500 font-semibold text-[10px]">Never</span>}
@@ -2467,13 +2487,13 @@ function SuperAdminReports() {
             <table className="w-full">
               <thead className="bg-gray-50 border-b border-gray-100 sticky top-0">
                 <tr>
-                  {['Workspace','Slug','Status','Last Backup','Days Since Backup','Backup Status'].map(h => (
+                  {['Workspace','Slug','Status','DB Usage','Rows','Last Backup','Days Since Backup','Backup Status'].map(h => (
                     <th key={h} className={thCls}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
-                {(bkData ?? []).length === 0 && <tr><td colSpan={6} className="px-4 py-12 text-center text-xs text-gray-400">No data.</td></tr>}
+                {(bkData ?? []).length === 0 && <tr><td colSpan={8} className="px-4 py-12 text-center text-xs text-gray-400">No data.</td></tr>}
                 {(bkData ?? []).map((bk: any) => {
                   const days = bk.days_since_backup != null ? Math.round(Number(bk.days_since_backup)) : null;
                   const overdue = bk.backup_status === 'overdue' || bk.backup_status === 'never';
@@ -2484,6 +2504,8 @@ function SuperAdminReports() {
                       <td className={tdCls}>
                         <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full capitalize ${STATUS_BADGE[bk.status] ?? 'bg-gray-100 text-gray-600'}`}>{bk.status}</span>
                       </td>
+                      <td className={tdCls + ' text-right tabular-nums whitespace-nowrap'}>{fmtBytes(Number(bk.db_bytes ?? 0))}</td>
+                      <td className={tdCls + ' text-right tabular-nums'}>{Number(bk.db_rows ?? 0).toLocaleString()}</td>
                       <td className={tdCls + ' whitespace-nowrap'}>{bk.last_backup_at ? fmtDate(bk.last_backup_at) : <span className="text-red-600 font-semibold">Never</span>}</td>
                       <td className={tdCls + (overdue ? ' text-red-600 font-bold' : '')}>
                         {days != null ? `${days} day${days !== 1 ? 's' : ''}` : '—'}
@@ -2774,7 +2796,10 @@ export function SuperAdmin() {
           {([
             { key: 'dashboard',  label: 'Dashboard',        icon: BarChart3   },
             { key: 'tenants',    label: 'Tenants',          icon: Building2   },
-            { key: 'billing',    label: 'Billing',          icon: TrendingUp  },
+            // 'billing' tab intentionally hidden — the current bills surface is
+            // being replaced by the finance-team flow. PlatformBillingTab component
+            // is left in place so the route can be re-enabled once the new flow
+            // is designed.
             { key: 'roles',      label: 'Sub-Admin Roles',  icon: Shield      },
             { key: 'sub-admins', label: 'Sub-Admins',       icon: Users       },
             { key: 'reports',    label: 'Reports',          icon: BarChart2   },

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Mail, ArrowLeft, CheckCircle, Loader2 } from 'lucide-react';
+import { Mail, ArrowLeft, CheckCircle, Loader2, AlertTriangle } from 'lucide-react';
 import { api } from '../services/api';
 
 export function ForgotPassword() {
@@ -9,17 +9,26 @@ export function ForgotPassword() {
   const [loading,    setLoading]    = useState(false);
   const [sent,       setSent]       = useState(false);
   const [error,      setError]      = useState('');
+  const [serviceWarning, setServiceWarning] = useState<string | null>(null);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError('');
+    setServiceWarning(null);
     if (!email || !tenantSlug) { setError('Both fields are required.'); return; }
     setLoading(true);
     try {
-      await api.post('/auth/forgot-password', { email, tenantSlug });
+      const r = await api.post('/auth/forgot-password', { email, tenantSlug });
+      const warn = r?.data?.serviceWarning;
+      if (warn) setServiceWarning(warn);
       setSent(true);
-    } catch {
-      setError('Something went wrong. Please try again.');
+    } catch (e: any) {
+      // Surface real API error if one came back; otherwise generic.
+      const msg = e?.response?.data?.error?.message
+        ?? e?.response?.data?.message
+        ?? e?.message
+        ?? 'Could not reach the server. Check your connection and try again.';
+      setError(msg);
     } finally {
       setLoading(false);
     }
@@ -55,13 +64,23 @@ export function ForgotPassword() {
           /* Success state */
           <div className="text-center">
             <div className="flex justify-center mb-4">
-              <CheckCircle className="w-12 h-12 text-emerald-400" />
+              {serviceWarning
+                ? <AlertTriangle className="w-12 h-12 text-amber-400" />
+                : <CheckCircle className="w-12 h-12 text-emerald-400" />}
             </div>
-            <h2 className="text-xl font-bold text-white mb-2">Check your inbox</h2>
-            <p className="text-sm text-white/60 mb-6">
-              If an account with <span className="text-white/80 font-medium">{email}</span> exists in workspace
-              <span className="text-white/80 font-medium"> {tenantSlug}</span>, you'll receive a reset link shortly.
-            </p>
+            <h2 className="text-xl font-bold text-white mb-2">
+              {serviceWarning ? 'Email service unavailable' : 'Check your inbox'}
+            </h2>
+            {serviceWarning ? (
+              <p className="text-sm text-amber-200 bg-amber-500/15 border border-amber-500/30 rounded-xl px-3 py-3 mb-6 text-left leading-relaxed">
+                {serviceWarning}
+              </p>
+            ) : (
+              <p className="text-sm text-white/60 mb-6">
+                If an account with <span className="text-white/80 font-medium">{email}</span> exists in workspace
+                <span className="text-white/80 font-medium"> {tenantSlug}</span>, you'll receive a reset link shortly.
+              </p>
+            )}
             <Link
               to="/login"
               className="flex items-center justify-center gap-2 text-sm font-medium py-2.5 rounded-xl w-full"

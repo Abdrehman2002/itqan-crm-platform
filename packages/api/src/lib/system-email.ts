@@ -8,8 +8,9 @@
 //      (For Gmail App Passwords: host=smtp.gmail.com, port=465, secure=true,
 //       user=vividd.solutions@gmail.com, pass=<16-char app password>.)
 //
-// Returns true on dispatch, false if nothing is configured or the provider
-// errored. Caller decides whether to show the credential on screen as a fallback.
+// Returns a SystemEmailResult so callers can surface the REAL failure (no key vs
+// 401 from SendGrid vs SMTP auth failed vs sender not verified) instead of the
+// useless "email didn't go".
 
 export interface SystemEmailOpts {
   to:       string;
@@ -19,12 +20,56 @@ export interface SystemEmailOpts {
   bodyText: string;
 }
 
-export async function sendSystemEmail(opts: SystemEmailOpts): Promise<boolean> {
+export type SystemEmailErrorCode =
+  | 'NOT_CONFIGURED'        // no SendGrid + no SMTP env vars set
+  | 'SENDGRID_AUTH'         // 401/403 from SendGrid (bad key)
+  | 'SENDGRID_SENDER'       // 403 + sender-identity error (from email not verified)
+  | 'SENDGRID_BAD_REQUEST'  // 400 (malformed payload — usually our bug)
+  | 'SENDGRID_RATE_LIMIT'   // 429
+  | 'SENDGRID_HTTP'         // any other non-2xx from SendGrid
+  | 'SENDGRID_NETWORK'      // fetch threw before we got a response
+  | 'SMTP_AUTH'             // EAUTH from nodemailer
+  | 'SMTP_CONNECTION'       // ECONNECTION / ETIMEDOUT
+  | 'SMTP_SENDER'           // 5xx response that mentions sender / from
+  | 'SMTP_RECIPIENT'        // 5xx response that mentions recipient / to
+  | 'SMTP_UNKNOWN'          // any other nodemailer throw
+  ;
+
+export interface SystemEmailResult {
+  sent:      boolean;
+  provider?: 'sendgrid' | 'smtp';
+  errorCode?: SystemEmailErrorCode;
+  errorDetail?: string;     // raw provider message — for the platform log, NOT for end users
+  userMessage?: string;     // plain-language reason a super_admin should see
+}
+
+// One place to translate technical failures into something the super_admin can act on.
+const USER_MESSAGES: Record<SystemEmailErrorCode, string> = {
+  NOT_CONFIGURED:       'No email provider configured. Add SENDGRID_API_KEY + SENDGRID_FROM_EMAIL (or SYSTEM_SMTP_* vars) on the API server and restart.',
+  SENDGRID_AUTH:        'SendGrid rejected the API key (401/403). Verify SENDGRID_API_KEY is correct and has Mail Send permission.',
+  SENDGRID_SENDER:      'SendGrid rejected the sender address. The SENDGRID_FROM_EMAIL must be a verified Single Sender or part of an authenticated domain.',
+  SENDGRID_BAD_REQUEST: 'SendGrid rejected the payload (400). This is usually a malformed recipient or subject — check API logs.',
+  SENDGRID_RATE_LIMIT:  'SendGrid rate limit hit. Wait a few minutes or upgrade the SendGrid plan.',
+  SENDGRID_HTTP:        'SendGrid returned an unexpected HTTP error. Check API logs for the response body.',
+  SENDGRID_NETWORK:     'Could not reach SendGrid (network/DNS error). Check the API server has outbound HTTPS to api.sendgrid.com.',
+  SMTP_AUTH:            'SMTP authentication failed. Verify SYSTEM_SMTP_USER and SYSTEM_SMTP_PASS. For Gmail, use a 16-character App Password — not your Google account password.',
+  SMTP_CONNECTION:      'Could not connect to the SMTP host. Verify SYSTEM_SMTP_HOST + SYSTEM_SMTP_PORT and that the server allows outbound on that port.',
+  SMTP_SENDER:          'SMTP rejected the sender address. Verify SYSTEM_SMTP_FROM (or SYSTEM_SMTP_USER) is allowed to send mail.',
+  SMTP_RECIPIENT:       'SMTP rejected the recipient address. The email address looks invalid or blocked by the receiving server.',
+  SMTP_UNKNOWN:         'SMTP send failed. Check API logs for the raw nodemailer error.',
+};
+
+function fail(errorCode: SystemEmailErrorCode, errorDetail?: string, provider?: 'sendgrid' | 'smtp'): SystemEmailResult {
+  return { sent: false, provider, errorCode, errorDetail, userMessage: USER_MESSAGES[errorCode] };
+}
+
+export async function sendSystemEmail(opts: SystemEmailOpts): Promise<SystemEmailResult> {
   const sgKey  = process.env.SENDGRID_API_KEY;
   const sgFrom = process.env.SENDGRID_FROM_EMAIL;
   if (sgKey && sgFrom) {
+    let res: Response;
     try {
-      const res = await fetch('https://api.sendgrid.com/v3/mail/send', {
+      res = await fetch('https://api.sendgrid.com/v3/mail/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sgKey}` },
         body: JSON.stringify({
@@ -37,8 +82,18 @@ export async function sendSystemEmail(opts: SystemEmailOpts): Promise<boolean> {
           ],
         }),
       });
-      return res.ok || res.status === 202;
-    } catch { return false; }
+    } catch (e: any) {
+      return fail('SENDGRID_NETWORK', e?.message, 'sendgrid');
+    }
+    if (res.ok || res.status === 202) return { sent: true, provider: 'sendgrid' };
+    // Read the body once so we can categorise the failure precisely.
+    const detail = await res.text().catch(() => '');
+    if (res.status === 401)                       return fail('SENDGRID_AUTH',    detail, 'sendgrid');
+    if (res.status === 403 && /sender/i.test(detail)) return fail('SENDGRID_SENDER', detail, 'sendgrid');
+    if (res.status === 403)                       return fail('SENDGRID_AUTH',    detail, 'sendgrid');
+    if (res.status === 400)                       return fail('SENDGRID_BAD_REQUEST', detail, 'sendgrid');
+    if (res.status === 429)                       return fail('SENDGRID_RATE_LIMIT', detail, 'sendgrid');
+    return fail('SENDGRID_HTTP', `HTTP ${res.status} — ${detail.slice(0, 240)}`, 'sendgrid');
   }
 
   const smtpHost = process.env.SYSTEM_SMTP_HOST;
@@ -64,17 +119,26 @@ export async function sendSystemEmail(opts: SystemEmailOpts): Promise<boolean> {
         html: opts.bodyHtml,
         text: opts.bodyText,
       });
-      return true;
-    } catch { return false; }
+      return { sent: true, provider: 'smtp' };
+    } catch (e: any) {
+      const code = (e?.code ?? '').toString();
+      const msg  = (e?.message ?? '').toString();
+      const resp = (e?.response ?? '').toString();
+      if (code === 'EAUTH')                                                return fail('SMTP_AUTH',       resp || msg, 'smtp');
+      if (code === 'ECONNECTION' || code === 'ETIMEDOUT' || code === 'EDNS') return fail('SMTP_CONNECTION', `${code} ${msg}`, 'smtp');
+      if (/from|sender/i.test(resp) && /\b5\d{2}\b/.test(resp))            return fail('SMTP_SENDER',     resp, 'smtp');
+      if (/recipient|^550\b/i.test(resp))                                  return fail('SMTP_RECIPIENT',  resp, 'smtp');
+      return fail('SMTP_UNKNOWN', msg || resp || code, 'smtp');
+    }
   }
 
-  return false;
+  return fail('NOT_CONFIGURED');
 }
 
 // Convenience wrapper for the very common "your password is X" mail.
 export async function sendTempPasswordEmail(opts: {
   to: string; toName: string; tempPassword: string; subject?: string;
-}): Promise<boolean> {
+}): Promise<SystemEmailResult> {
   return sendSystemEmail({
     to: opts.to,
     toName: opts.toName,
@@ -94,7 +158,7 @@ export async function sendTempPasswordEmail(opts: {
 // Convenience wrapper for password-reset links.
 export async function sendPasswordResetEmail(opts: {
   to: string; toName: string; resetUrl: string;
-}): Promise<boolean> {
+}): Promise<SystemEmailResult> {
   return sendSystemEmail({
     to: opts.to,
     toName: opts.toName,

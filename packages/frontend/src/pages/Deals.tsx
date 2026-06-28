@@ -78,22 +78,53 @@ export function Deals() {
     enabled: !!selected,
   });
 
+  // Helper — apply a stage move to the cached board so the card snaps to the new
+  // column the instant the user releases the mouse. Backend invalidation happens
+  // afterwards in onSettled, but by then the cache already matches the server.
+  const applyMoveToCache = (id: string, stageId: string) => {
+    qc.setQueryData(['board', selectedPipeline], (old: any) => {
+      if (!old?.board) return old;
+      let moved: any = null;
+      const board1 = old.board.map((s: any) => ({
+        ...s,
+        deals: (s.deals ?? []).filter((d: any) => {
+          if (d.id === id) { moved = { ...d, stage_id: stageId }; return false; }
+          return true;
+        }),
+      }));
+      if (!moved) return old;
+      const board2 = board1.map((s: any) =>
+        s.id === stageId ? { ...s, deals: [moved, ...(s.deals ?? [])] } : s,
+      );
+      return { ...old, board: board2 };
+    });
+  };
+
   const moveMutation = useMutation({
     mutationFn: ({ id, stageId }: { id: string; stageId: string }) =>
       api.patch(`/api/v1/deals/${id}/stage`, { stageId }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['board'] }),
+    onMutate: async ({ id, stageId }) => {
+      await qc.cancelQueries({ queryKey: ['board', selectedPipeline] });
+      const prev = qc.getQueryData(['board', selectedPipeline]);
+      applyMoveToCache(id, stageId);
+      return { prev };
+    },
+    onError: (_e, _v, ctx: any) => {
+      if (ctx?.prev) qc.setQueryData(['board', selectedPipeline], ctx.prev);
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['board', selectedPipeline] }),
   });
 
   const wonMutation = useMutation({
     mutationFn: (id: string) => api.post(`/api/v1/deals/${id}/won`),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['board'] }); setSelected(null); },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['board', selectedPipeline] }); setSelected(null); },
   });
 
   const lostMutation = useMutation({
     mutationFn: ({ id, reason }: { id: string; reason: string }) =>
       api.post(`/api/v1/deals/${id}/lost`, { reason }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['board'] });
+      qc.invalidateQueries({ queryKey: ['board', selectedPipeline] });
       setSelected(null);
       setShowLostConfirm(false);
     },
@@ -102,7 +133,7 @@ export function Deals() {
   const createMutation = useMutation({
     mutationFn: (body: any) => api.post('/api/v1/deals', body),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['board'] });
+      qc.invalidateQueries({ queryKey: ['board', selectedPipeline] });
       setShowCreate(false);
       setForm({ name: '', amount: '', stageId: '' });
       createMutation.reset();
@@ -112,7 +143,7 @@ export function Deals() {
   const updateMutation = useMutation({
     mutationFn: ({ id, body }: { id: string; body: any }) => api.patch(`/api/v1/deals/${id}`, body),
     onSuccess: (res) => {
-      qc.invalidateQueries({ queryKey: ['board'] });
+      qc.invalidateQueries({ queryKey: ['board', selectedPipeline] });
       setSelected(res.data.data);
       setShowEdit(false);
     },
@@ -120,16 +151,50 @@ export function Deals() {
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.delete(`/api/v1/deals/${id}`),
+    onMutate: async (id) => {
+      await qc.cancelQueries({ queryKey: ['board', selectedPipeline] });
+      const prev = qc.getQueryData(['board', selectedPipeline]);
+      qc.setQueryData(['board', selectedPipeline], (old: any) => {
+        if (!old?.board) return old;
+        return {
+          ...old,
+          board: old.board.map((s: any) => ({
+            ...s,
+            deals: (s.deals ?? []).filter((d: any) => d.id !== id),
+          })),
+        };
+      });
+      return { prev };
+    },
+    onError: (_e, _v, ctx: any) => {
+      if (ctx?.prev) qc.setQueryData(['board', selectedPipeline], ctx.prev);
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['board', selectedPipeline] }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['board'] });
       setSelected(null);
       setShowDeleteConfirm(false);
     },
   });
 
+  // Dropping into a column does three things depending on the target stage type:
+  //   • 'won'  → move + auto-mark won (so status flips, not just stage_id)
+  //   • 'lost' → move + open the lost-reason dialog (status flips after user types reason)
+  //   • else   → just move
+  // Previously only the move fired — dragging to Won didn't actually win the deal.
   const handleDrop = (stageId: string) => {
-    if (!dragging || dragging.stage_id === stageId) return;
-    moveMutation.mutate({ id: dragging.id, stageId });
+    if (!dragging || dragging.stage_id === stageId) { setDragging(null); return; }
+    const targetStage = stages.find((s: any) => s.id === stageId);
+    const type = getStageType(targetStage?.name ?? '');
+    const dealId = dragging.id;
+    moveMutation.mutate({ id: dealId, stageId });
+    if (type === 'won') {
+      wonMutation.mutate(dealId);
+    } else if (targetStage?.name?.toLowerCase().includes('lost')) {
+      // Open the lost-reason modal pre-targeted at the dropped deal.
+      setSelected(dragging);
+      setSelectedStage(targetStage);
+      setShowLostConfirm(true);
+    }
     setDragging(null);
   };
 

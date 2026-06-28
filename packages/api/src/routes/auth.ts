@@ -327,26 +327,44 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
 
     // ── Forgot password ─────────────────────────────────────────────────
     // POST /api/v1/auth/forgot-password
-    // Always returns 200 (don't reveal whether email exists)
+    // We deliberately DO NOT reveal whether the email/tenant exists (timing aside,
+    // the response shape is identical for those branches). But if the *system itself*
+    // is misconfigured — no SendGrid key, no SMTP creds — that's not a user secret,
+    // it's an operational fact that applies to every request, so we surface it as a
+    // serviceWarning so the user knows why their inbox stayed empty.
     fastify.post('/forgot-password', async (req, reply) => {
       const body = ForgotPasswordSchema.parse(req.body);
+
+      // Probe whether the platform email channel is even configured. Done up-front
+      // so the warning is the same whether or not the email/tenant exists.
+      const platformConfigured =
+        !!(process.env.SENDGRID_API_KEY && process.env.SENDGRID_FROM_EMAIL) ||
+        !!(process.env.SYSTEM_SMTP_HOST && process.env.SYSTEM_SMTP_USER && process.env.SYSTEM_SMTP_PASS);
 
       const [tenant] = await db.withSuperAdmin(async (client) => {
         const r = await client.query('SELECT * FROM tenants WHERE slug = $1', [body.tenantSlug]);
         return r.rows;
       });
-      if (!tenant) return reply.send({ success: true }); // silent
+      // For unknown tenant/user we return the same shape — only the serviceWarning differs,
+      // and that warning is identical for ALL requests, so it leaks nothing about the user.
+      if (!tenant || !platformConfigured) {
+        return reply.send({
+          success: true,
+          serviceWarning: platformConfigured ? null
+            : 'Email service is not configured on the server (no SendGrid key or SMTP credentials). The reset email will not be sent until an administrator configures one.',
+        });
+      }
 
       const [user] = await db.withTenant(tenant.id, async (client) => {
         const r = await client.query('SELECT * FROM users WHERE email = $1 AND is_active = true', [body.email]);
         return r.rows;
       });
-      if (!user) return reply.send({ success: true }); // silent
+      if (!user) return reply.send({ success: true });
 
       // Generate secure token + store hash with 1-hour expiry
       const token     = crypto.randomBytes(32).toString('hex');
       const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-      const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
 
       await db.withSuperAdmin(async (client) => {
         await client.query(
@@ -360,23 +378,23 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
       const appUrl   = process.env.APP_URL ?? process.env.APP_BASE_URL ?? 'http://localhost:5173';
       const resetUrl = `${appUrl}/reset-password?token=${token}&tenant=${body.tenantSlug}`;
 
-      // Try the platform system email FIRST — forgot-password is the one flow where
-      // we cannot rely on the tenant having configured its own outbound connector
-      // (they're locked out and can't log in to set it up). Tenant connector is the
-      // fallback for workspaces that have customised their sender domain.
-      const systemOk = await sendPasswordResetEmail({
+      // Platform system email first (locked-out users can't have set up a tenant connector).
+      const systemResult = await sendPasswordResetEmail({
         to: user.email, toName: user.name, resetUrl,
       });
-      if (!systemOk) {
+      if (!systemResult.sent) {
+        fastify.log.warn({ systemResult, to: user.email }, 'forgot-password system email failed; trying tenant connector');
         await emailSvc.send(tenant.id, {
           to:       user.email,
           subject:  'Reset your password',
           bodyHtml: `<p>Hi ${user.name},</p><p>We received a request to reset your password. <a href="${resetUrl}">Click here to choose a new one</a>. The link expires in 1 hour.</p>`,
           bodyText: `Reset your password: ${resetUrl}\n\nThis link expires in 1 hour.`,
-        }).catch(() => {});
+        }).catch((e) => {
+          fastify.log.warn({ err: e, to: user.email }, 'forgot-password tenant connector also failed');
+        });
       }
 
-      return reply.send({ success: true });
+      return reply.send({ success: true, serviceWarning: null });
     });
 
     // ── Reset password ──────────────────────────────────────────────────

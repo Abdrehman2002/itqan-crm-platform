@@ -54,7 +54,7 @@ export function activityRoutes(db: DatabaseClient, eventBus: EventBus) {
            ${ownerId   ? `AND a.owner_id = '${ownerId}'`   : ''}
            ${dueFrom   ? `AND a.due_at >= '${dueFrom}'`    : ''}
            ${dueTo     ? `AND a.due_at <= '${dueTo}'`      : ''}
-           ORDER BY COALESCE(a.due_at, a.created_at) ASC
+           ORDER BY a.created_at DESC
            LIMIT $1 OFFSET $2`,
           [Number(pageSize), offset],
         );
@@ -77,7 +77,7 @@ export function activityRoutes(db: DatabaseClient, eventBus: EventBus) {
            LEFT JOIN users u ON a.owner_id = u.id
            WHERE a.status = 'pending' AND a.due_at < NOW()
            ${ownerScopeSql('a.owner_id', scopeIds)}
-           ORDER BY a.due_at ASC
+           ORDER BY a.created_at DESC
            LIMIT 100`,
         );
         return result.rows;
@@ -101,7 +101,7 @@ export function activityRoutes(db: DatabaseClient, eventBus: EventBus) {
            WHERE a.status = 'pending'
              AND (a.due_at::date = CURRENT_DATE OR a.scheduled_at::date = CURRENT_DATE)
              ${ownerScopeSql('a.owner_id', scopeIds)}
-           ORDER BY COALESCE(a.scheduled_at, a.due_at) ASC`,
+           ORDER BY a.created_at DESC`,
         );
         return result.rows;
       });

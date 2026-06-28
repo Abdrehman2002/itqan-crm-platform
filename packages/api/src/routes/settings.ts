@@ -726,6 +726,54 @@ export function settingsRoutes(db: DatabaseClient) {
       return reply.send({ success: true });
     });
 
+    // GET /api/v1/settings/password-log — workspace password log for tenant_admin.
+    // Mirror of super-admin's password-log but scoped to THIS tenant only, and shows
+    // every user role (not just tenant_admin). Super-admin sees tenant_admin slice
+    // only via /super-admin/password-log — they are deliberately disjoint views.
+    fastify.get('/password-log', { preHandler: requireRole('tenant_admin', 'manager') }, async (req, reply) => {
+      const rows = await db.withTenant(req.tenant.id, async (client) => {
+        const r = await client.query(`
+          SELECT
+            l.id, l.action, l.notes, l.created_at,
+            u.name AS user_name, u.email AS user_email, u.role AS user_role,
+            a.name AS admin_name
+          FROM super_admin_password_log l
+          LEFT JOIN users u ON u.id = l.user_id
+          LEFT JOIN users a ON a.id = l.changed_by
+          WHERE l.tenant_id = $1
+          ORDER BY l.created_at DESC
+          LIMIT 500
+        `, [req.tenant.id]);
+        return r.rows;
+      });
+      return reply.send({ success: true, data: rows });
+    });
+
+    // GET /api/v1/settings/audit-log — workspace ticket audit log for tenant_admin.
+    // RLS via withTenant enforces a hard isolation — tenant_admin cannot see other
+    // workspaces no matter what they pass in the query.
+    fastify.get('/audit-log', { preHandler: requireRole('tenant_admin', 'manager') }, async (req, reply) => {
+      const { limit = '200', action } = req.query as Record<string, string>;
+      const rows = await db.withTenant(req.tenant.id, async (client) => {
+        const r = await client.query(`
+          SELECT
+            tal.id, tal.action, tal.ticket_id AS entity_id,
+            'ticket'::text AS entity_type,
+            tal.old_value, tal.new_value, tal.created_at,
+            COALESCE(u.name, tal.actor_name) AS actor_name,
+            u.email AS actor_email, u.role AS actor_role
+          FROM ticket_audit_log tal
+          LEFT JOIN users u ON u.id = tal.actor_id
+          WHERE tal.tenant_id = $1
+            AND ($2::text IS NULL OR tal.action = $2)
+          ORDER BY tal.created_at DESC
+          LIMIT $3
+        `, [req.tenant.id, action || null, parseInt(limit, 10)]);
+        return r.rows;
+      });
+      return reply.send({ success: true, data: rows });
+    });
+
     // PATCH /api/v1/settings/tenant — update arbitrary tenant settings flags (e.g. dismiss banners)
     fastify.patch('/tenant', { preHandler: requireRole('super_admin', 'tenant_admin') }, async (req, reply) => {
       const body = req.body as Record<string, unknown>;
