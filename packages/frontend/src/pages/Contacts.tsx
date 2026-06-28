@@ -57,18 +57,54 @@ export function Contacts() {
   const { fields: sectorFields, config: sectorConfig } = useSectorFields();
   const setSectorField = (name: string, value: any) => setSectorValues(prev => ({ ...prev, [name]: value }));
 
-  const { data, isLoading } = useQuery({
+  // Super admin's "Contacts" is the SaaS owner's contact book, NOT the operational
+  // contacts each workspace has. Different endpoint, different shape (kind + tenant_name
+  // instead of first/last_name + status). The operational page is hidden from them.
+  const { data: opsData, isLoading: opsLoading } = useQuery({
     queryKey: ['contacts', search, statusFilter, page],
     queryFn: () =>
       api.get('/api/v1/contacts', { params: { search: search || undefined, status: statusFilter || undefined, page, pageSize: 25 } })
          .then((r) => r.data),
     placeholderData: keepPreviousData,
+    enabled: !isSuperAdmin,
   });
+  // Map the super-admin shape to the existing row shape so the operational UI just renders.
+  //   { kind, name, email, phone, tenant_name, tenant_slug, sector } → { first_name, last_name, email, phone, company_name, status, source }
+  const { data: saContactsData, isLoading: saContactsLoading } = useQuery({
+    queryKey: ['sa-customer-contacts', search],
+    queryFn: () =>
+      api.get('/super-admin/customer-contacts', { params: { search: search || undefined } })
+         .then((r) => {
+           const rows = (r.data.data ?? []).map((x: any) => {
+             const parts = (x.name ?? '').trim().split(/\s+/);
+             return {
+               id: `${x.kind}:${x.id}`,
+               first_name: parts[0] ?? '',
+               last_name:  parts.slice(1).join(' ') || '',
+               email:      x.email ?? '',
+               phone:      x.phone ?? '',
+               company_name: x.tenant_name,
+               status:     x.kind === 'tenant_admin' ? 'customer' : 'prospect',
+               source:     'manual',
+               custom_fields: { workspace: x.tenant_slug, sector: x.sector, remarks: x.remarks, role: x.kind, tenant_id: x.tenant_id },
+               created_at: x.created_at,
+               _sa_kind: x.kind,
+               _sa_tenant_id: x.tenant_id,
+             };
+           });
+           return { data: rows, meta: { total: rows.length, page: 1, pageSize: rows.length, totalPages: 1 } };
+         }),
+    enabled: isSuperAdmin,
+  });
+  const data = isSuperAdmin ? saContactsData : opsData;
+  const isLoading = isSuperAdmin ? saContactsLoading : opsLoading;
 
+  // Timeline only makes sense for real operational contacts. Super-admin's curated
+  // rows are synthesised from users/contacts joins and have no own activity history.
   const { data: timeline } = useQuery({
     queryKey: ['contact-timeline', selected?.id],
     queryFn: () => api.get(`/api/v1/contacts/${selected.id}/timeline`).then((r) => r.data.data),
-    enabled: !!selected,
+    enabled: !!selected && !isSuperAdmin,
   });
 
   const [showEdit, setShowEdit] = useState(false);

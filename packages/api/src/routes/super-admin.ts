@@ -1475,6 +1475,104 @@ export function superAdminRoutes(db: DatabaseClient, tenantService: TenantServic
       return reply.send({ success: true, data: rows });
     });
 
+    // GET /super-admin/customer-contacts — the SaaS owner's view of "contacts" is
+    // NOT the bank's customers (those live inside each workspace) — it's the people
+    // we sold to: the tenant_admin we provisioned plus any POC the super-admin
+    // recorded against a workspace (saved in contacts.custom_fields.poc_name etc.).
+    //
+    // Two row shapes returned, unified into one list:
+    //   { kind: 'tenant_admin', ... }  — one per workspace, from users WHERE role='tenant_admin'
+    //   { kind: 'poc',          ... }  — one per workspace where a POC was recorded
+    fastify.get('/customer-contacts', async (req, reply) => {
+      const { search } = req.query as Record<string, string>;
+      const rows = await db.withSuperAdmin(async (client) => {
+        const params: any[] = [];
+        let admWhere = `u.role = 'tenant_admin' AND u.is_active = true`;
+        let pocWhere = `c.custom_fields ? 'poc_name' AND (c.custom_fields->>'poc_name') <> ''`;
+        if (search) {
+          params.push(`%${search}%`);
+          const p = `$${params.length}`;
+          admWhere += ` AND (u.name ILIKE ${p} OR u.email ILIKE ${p} OR t.name ILIKE ${p})`;
+          pocWhere += ` AND (c.custom_fields->>'poc_name' ILIKE ${p} OR c.custom_fields->>'poc_email' ILIKE ${p} OR t.name ILIKE ${p})`;
+        }
+        const r = await client.query(`
+          SELECT 'tenant_admin'::text AS kind,
+                 u.id, u.name, u.email, u.phone,
+                 t.id   AS tenant_id, t.name AS tenant_name, t.slug AS tenant_slug, t.sector,
+                 NULL::text AS remarks, u.created_at
+            FROM users u JOIN tenants t ON t.id = u.tenant_id
+           WHERE ${admWhere}
+          UNION ALL
+          SELECT 'poc'::text AS kind,
+                 c.id,
+                 c.custom_fields->>'poc_name'  AS name,
+                 c.custom_fields->>'poc_email' AS email,
+                 c.custom_fields->>'poc_phone' AS phone,
+                 t.id   AS tenant_id, t.name AS tenant_name, t.slug AS tenant_slug, t.sector,
+                 c.custom_fields->>'remarks' AS remarks, c.created_at
+            FROM contacts c JOIN tenants t ON t.id = c.tenant_id
+           WHERE ${pocWhere}
+          ORDER BY tenant_name, kind, name
+        `, params);
+        return r.rows;
+      });
+      return reply.send({ success: true, data: rows });
+    });
+
+    // GET /super-admin/customer-companies — list of OUR clients (= each workspace).
+    // The operational /api/v1/companies endpoint returns workspaces' own B2B records;
+    // super-admin sees one row per tenant instead.
+    fastify.get('/customer-companies', async (req, reply) => {
+      const { search } = req.query as Record<string, string>;
+      const rows = await db.withSuperAdmin(async (client) => {
+        const params: any[] = [];
+        let where = '1=1';
+        if (search) { params.push(`%${search}%`); where = `(t.name ILIKE $${params.length} OR t.slug ILIKE $${params.length})`; }
+        const r = await client.query(`
+          SELECT t.id, t.name, t.slug, t.sector, t.plan, t.status, t.created_at,
+                 t.custom_domain AS website,
+                 (SELECT u.name  FROM users u WHERE u.tenant_id=t.id AND u.role='tenant_admin' AND u.is_active=true ORDER BY u.created_at LIMIT 1) AS tenant_admin_name,
+                 (SELECT u.email FROM users u WHERE u.tenant_id=t.id AND u.role='tenant_admin' AND u.is_active=true ORDER BY u.created_at LIMIT 1) AS tenant_admin_email
+            FROM tenants t
+           WHERE ${where}
+           ORDER BY t.name
+        `, params);
+        return r.rows;
+      });
+      return reply.send({ success: true, data: rows });
+    });
+
+    // GET /super-admin/customer-companies/:tenantId/people — the "People to contact"
+    // panel inside a company card. ONLY the tenant_admin user and the recorded POC
+    // (owner of the client) are shown. Agents/managers of that workspace are
+    // intentionally hidden — they aren't the SaaS owner's contact path.
+    fastify.get('/customer-companies/:tenantId/people', async (req, reply) => {
+      const { tenantId } = req.params as { tenantId: string };
+      const rows = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(`
+          SELECT 'tenant_admin'::text AS kind,
+                 u.id, u.name, u.email, u.phone,
+                 NULL::text AS title, u.last_login_at AS last_seen
+            FROM users u
+           WHERE u.tenant_id = $1 AND u.role = 'tenant_admin' AND u.is_active = true
+          UNION ALL
+          SELECT 'owner'::text AS kind,
+                 c.id,
+                 c.custom_fields->>'poc_name'  AS name,
+                 c.custom_fields->>'poc_email' AS email,
+                 c.custom_fields->>'poc_phone' AS phone,
+                 'Point of Contact / Owner' AS title,
+                 NULL::timestamptz AS last_seen
+            FROM contacts c
+           WHERE c.tenant_id = $1 AND c.custom_fields ? 'poc_name'
+                 AND (c.custom_fields->>'poc_name') <> ''
+          ORDER BY kind, name
+        `, [tenantId]);
+        return r.rows;
+      });
+      return reply.send({ success: true, data: rows });
+    });
+
     // GET /super-admin/emails — platform-level emails view.
     // Only surfaces emails sent BY or TO a tenant_admin account, across all workspaces.
     // The agent/manager inbox traffic belongs in the tenant_admin's own emails tab.

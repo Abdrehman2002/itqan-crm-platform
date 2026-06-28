@@ -2,10 +2,11 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Building2, Globe, Phone, Users, Plus, Search, X, Loader2,
-  ChevronRight, TrendingUp, MapPin,
+  ChevronRight, TrendingUp, MapPin, Mail,
 } from 'lucide-react';
 import { api } from '../services/api';
 import { formatCurrency, formatNumber } from '../utils/format';
+import { useIsSuperAdmin } from '../hooks/useRole';
 
 const TYPE_ICONS: Record<string, string> = {
   call: '📞', email: '📧', meeting: '🤝', task: '✅',
@@ -62,6 +63,7 @@ const SIZE_LABELS: Record<string, string> = {
 
 export function Companies() {
   const qc = useQueryClient();
+  const isSuperAdmin = useIsSuperAdmin();
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<any | null>(null);
@@ -70,19 +72,59 @@ export function Companies() {
     name: '', domain: '', industry: '', size: '', country: '', city: '', website: '', phone: '',
   });
 
-  const { data, isLoading } = useQuery({
+  // Operational list (agents/managers/tenant_admin) — banks' B2B records.
+  const { data: opsData, isLoading: opsLoading } = useQuery({
     queryKey: ['companies', search, page],
     queryFn: () =>
       api.get('/api/v1/companies', { params: { search: search || undefined, page, pageSize: 25 } })
         .then((r) => r.data),
+    enabled: !isSuperAdmin,
   });
+  // Super-admin's "Companies" is OUR clients — one row per workspace. Mapped into
+  // the operational shape so the existing card layout renders unchanged.
+  const { data: saData, isLoading: saLoading } = useQuery({
+    queryKey: ['sa-customer-companies', search],
+    queryFn: () =>
+      api.get('/super-admin/customer-companies', { params: { search: search || undefined } })
+         .then((r) => {
+           const rows = (r.data.data ?? []).map((t: any) => ({
+             id:        t.id,
+             name:      t.name,
+             domain:    t.slug ? `${t.slug}.amanahcx.com` : null,
+             industry:  t.sector,
+             size:      null,
+             country:   null,
+             city:      null,
+             website:   t.website,
+             phone:     null,
+             created_at: t.created_at,
+             _sa_tenant_admin_name:  t.tenant_admin_name,
+             _sa_tenant_admin_email: t.tenant_admin_email,
+             _sa_plan:   t.plan,
+             _sa_status: t.status,
+           }));
+           return { data: rows, meta: { total: rows.length, page: 1, pageSize: rows.length, totalPages: 1 } };
+         }),
+    enabled: isSuperAdmin,
+  });
+  const data = isSuperAdmin ? saData : opsData;
+  const isLoading = isSuperAdmin ? saLoading : opsLoading;
 
+  // "People to contact" on the card.
+  //   • Operational: existing /api/v1/contacts filtered by companyId.
+  //   • Super-admin: tenant_admin + POC ("owner") of the selected workspace only.
   const { data: contacts } = useQuery({
     queryKey: ['company-contacts', selected?.id],
     queryFn: () =>
       api.get('/api/v1/contacts', { params: { companyId: selected.id, pageSize: 10 } })
         .then((r) => r.data.data),
-    enabled: !!selected,
+    enabled: !!selected && !isSuperAdmin,
+  });
+  const { data: saPeople } = useQuery({
+    queryKey: ['sa-company-people', selected?.id],
+    queryFn: () =>
+      api.get(`/super-admin/customer-companies/${selected.id}/people`).then((r) => r.data.data),
+    enabled: !!selected && isSuperAdmin,
   });
 
   const { data: deals } = useQuery({
@@ -90,7 +132,7 @@ export function Companies() {
     queryFn: () =>
       api.get('/api/v1/deals', { params: { companyId: selected.id, pageSize: 10 } })
         .then((r) => r.data.data),
-    enabled: !!selected,
+    enabled: !!selected && !isSuperAdmin,
   });
 
   const createMutation = useMutation({
@@ -300,30 +342,39 @@ export function Companies() {
                 </button>
               </div>
 
-              {/* Stats */}
-              <div className="grid grid-cols-3 gap-3">
-                {[
-                  { label: 'Contacts', value: contacts?.length ?? 0 },
-                  { label: 'Open Deals', value: deals?.filter((d: any) => d.status === 'open').length ?? 0 },
-                  { label: 'Pipeline', value: formatCurrency(pipelineValue), isStr: true },
-                ].map((stat) => (
-                  <div key={stat.label} className="bg-gray-50 rounded-xl p-3 text-center">
-                    <p className="text-lg font-bold text-gray-900">{stat.isStr ? stat.value : formatNumber(Number(stat.value))}</p>
-                    <p className="text-xs text-gray-500">{stat.label}</p>
-                  </div>
-                ))}
-              </div>
+              {/* Stats — operational only. Super-admin's row is one workspace = one
+                  client; deals/pipeline are workspace-internal metrics, not relevant. */}
+              {!isSuperAdmin && (
+                <div className="grid grid-cols-3 gap-3">
+                  {[
+                    { label: 'Contacts', value: contacts?.length ?? 0 },
+                    { label: 'Open Deals', value: deals?.filter((d: any) => d.status === 'open').length ?? 0 },
+                    { label: 'Pipeline', value: formatCurrency(pipelineValue), isStr: true },
+                  ].map((stat) => (
+                    <div key={stat.label} className="bg-gray-50 rounded-xl p-3 text-center">
+                      <p className="text-lg font-bold text-gray-900">{stat.isStr ? stat.value : formatNumber(Number(stat.value))}</p>
+                      <p className="text-xs text-gray-500">{stat.label}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
 
               {/* Details */}
               <div className="bg-gray-50 rounded-xl p-4 space-y-3">
-                {[
-                  { label: 'Phone',   value: selected.phone },
-                  { label: 'Size',    value: SIZE_LABELS[selected.size] ?? selected.size },
-                  { label: 'Country', value: selected.country },
-                  { label: 'City',    value: selected.city },
-                  { label: 'Revenue', value: selected.annual_revenue ? formatCurrency(selected.annual_revenue) : null },
-                  { label: 'Owner',   value: selected.owner_name },
-                ].filter((r) => r.value).map((row) => (
+                {(isSuperAdmin ? [
+                  { label: 'Plan',     value: selected._sa_plan ? String(selected._sa_plan).toUpperCase() : null },
+                  { label: 'Status',   value: selected._sa_status ? String(selected._sa_status).toUpperCase() : null },
+                  { label: 'Sector',   value: selected.industry },
+                  { label: 'Domain',   value: selected.domain },
+                  { label: 'Created',  value: selected.created_at ? new Date(selected.created_at).toLocaleDateString() : null },
+                ] : [
+                  { label: 'Phone',    value: selected.phone },
+                  { label: 'Size',     value: SIZE_LABELS[selected.size] ?? selected.size },
+                  { label: 'Country',  value: selected.country },
+                  { label: 'City',     value: selected.city },
+                  { label: 'Revenue',  value: selected.annual_revenue ? formatCurrency(selected.annual_revenue) : null },
+                  { label: 'Owner',    value: selected.owner_name },
+                ]).filter((r) => r.value).map((row) => (
                   <div key={row.label} className="flex justify-between text-sm">
                     <span className="text-gray-500">{row.label}</span>
                     <span className="text-gray-900 font-medium">{row.value}</span>
@@ -331,8 +382,44 @@ export function Companies() {
                 ))}
               </div>
 
-              {/* Contacts */}
-              {contacts && contacts.length > 0 && (
+              {/* People to contact */}
+              {isSuperAdmin ? (
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-700 mb-2">
+                    People to contact <span className="text-gray-400 font-normal">({saPeople?.length ?? 0})</span>
+                  </h3>
+                  {(!saPeople || saPeople.length === 0) ? (
+                    <p className="text-xs text-gray-400 italic">No tenant admin or recorded point of contact for this workspace yet.</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {saPeople.map((p: any) => (
+                        <div key={`${p.kind}:${p.id}`} className="flex items-start gap-2 p-2.5 bg-gray-50 rounded-lg">
+                          <div className={`w-7 h-7 rounded-full flex items-center justify-center text-white text-xs font-bold shrink-0 ${
+                            p.kind === 'tenant_admin' ? 'bg-gradient-to-br from-brand-400 to-purple-500' : 'bg-gradient-to-br from-amber-400 to-orange-500'
+                          }`}>
+                            {(p.name ?? '?')[0]}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <p className="text-sm font-medium text-gray-900 truncate">{p.name || '(no name)'}</p>
+                              <span className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded-full font-semibold ${
+                                p.kind === 'tenant_admin' ? 'bg-brand-50 text-brand-700' : 'bg-amber-50 text-amber-700'
+                              }`}>
+                                {p.kind === 'tenant_admin' ? 'Tenant Admin' : 'Owner / POC'}
+                              </span>
+                            </div>
+                            {p.title && p.kind !== 'tenant_admin' && <p className="text-xs text-gray-400">{p.title}</p>}
+                            <div className="flex items-center gap-3 mt-0.5 flex-wrap">
+                              {p.email && <span className="text-xs text-gray-500 flex items-center gap-1"><Mail className="w-3 h-3" />{p.email}</span>}
+                              {p.phone && <span className="text-xs text-gray-500 flex items-center gap-1"><Phone className="w-3 h-3" />{p.phone}</span>}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : (contacts && contacts.length > 0 && (
                 <div>
                   <h3 className="text-sm font-semibold text-gray-700 mb-2">
                     Contacts <span className="text-gray-400 font-normal">({contacts.length})</span>
@@ -351,7 +438,7 @@ export function Companies() {
                     ))}
                   </div>
                 </div>
-              )}
+              ))}
 
               {/* Open deals — expandable */}
               {deals && deals.filter((d: any) => d.status === 'open').length > 0 && (
