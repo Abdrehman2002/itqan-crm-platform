@@ -8,9 +8,13 @@ const DEPT_TYPES = [
   'finance_billing', 'technical_operations', 'operations',
 ] as const;
 
+// department_type used to be required, which silently rejected every save from
+// the inline "Add Department" form (it only sends name + description). Default
+// to 'operations' so the form works as-is; admins who want a typed department
+// still set it via the picker in the create form or the Edit dialog.
 const CreateSchema = z.object({
   name:           z.string().min(1).max(100),
-  department_type: z.enum(DEPT_TYPES),
+  department_type: z.enum(DEPT_TYPES).default('operations'),
   description:    z.string().optional(),
   head_user_id:   z.string().uuid().optional(),
   color:          z.string().optional(),

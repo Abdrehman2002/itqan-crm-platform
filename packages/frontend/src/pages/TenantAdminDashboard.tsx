@@ -143,19 +143,21 @@ export function TenantAdminDashboard() {
 
       <div className="px-8 py-6 space-y-6 max-w-6xl">
 
-        {/* Stats row */}
+        {/* Stats row — all tiles route to the actual destination (was sending every
+            click to General Settings before, which dropped the user one click short
+            of the actual list/management page). */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <StatCard icon={Users}     label="Total Users"    value={members.length}    sub={`${active.length} active`}      color="#29ABE2" onClick={() => navigate('/settings?tab=team')} />
-          <StatCard icon={UserCheck} label="Active Users"   value={active.length}     sub="currently enabled"              color="#57A93C" onClick={() => navigate('/settings?tab=team')} />
+          <StatCard icon={Users}     label="Total Users"    value={members.length}    sub={`${active.length} active`}      color="#29ABE2" onClick={() => navigate('/admin/users')} />
+          <StatCard icon={UserCheck} label="Active Users"   value={active.length}     sub="currently enabled"              color="#57A93C" onClick={() => navigate('/admin/users?filter=active')} />
           <StatCard icon={Shield}    label="Roles"          value={roles.length}      sub="permission groups"              color="#8b5cf6" onClick={() => navigate('/roles')} />
           <StatCard icon={Building2} label="Departments"    value={depts.length}      sub="organisational units"           color="#f59e0b" onClick={() => navigate('/departments')} />
         </div>
 
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <StatCard icon={Layers}    label="Active Modules" value={activeModules.length}  sub="licensed & enabled"         color="#06b6d4" onClick={() => navigate('/settings?tab=modules')} />
+          <StatCard icon={Layers}    label="Active Modules" value={activeModules.length}  sub="licensed & enabled"         color="#06b6d4" onClick={() => navigate('/admin/modules')} />
           <StatCard icon={Zap}       label="Integrations"   value={connectedCount}        sub={`of ${connectors.length} connected`} color="#29ABE2" onClick={() => navigate('/integrations')} />
-          <StatCard icon={UserX}     label="Inactive Users" value={inactive.length}       sub="access suspended"           color="#ef4444" onClick={() => navigate('/settings?tab=team')} />
-          <StatCard icon={Key}       label="Features"       value={entitledFeatures.length} sub="licensed features"        color="#57A93C" onClick={() => navigate('/settings?tab=modules')} />
+          <StatCard icon={UserX}     label="Inactive Users" value={inactive.length}       sub="access suspended"           color="#ef4444" onClick={() => navigate('/admin/users?filter=inactive')} />
+          <StatCard icon={Key}       label="Features"       value={entitledFeatures.length} sub="licensed features"        color="#57A93C" onClick={() => navigate('/admin/modules')} />
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -164,13 +166,13 @@ export function TenantAdminDashboard() {
           <div className="lg:col-span-2 bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
             <h2 className="text-sm font-bold text-gray-700 uppercase tracking-wider mb-4">Quick Actions</h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <QuickAction icon={UserPlus}   label="Invite Team Member"     desc="Add a user & assign their role"         color="#29ABE2" onClick={() => navigate('/settings?tab=team')} />
+              <QuickAction icon={UserPlus}   label="Invite Team Member"     desc="Add a user & assign their role"         color="#29ABE2" onClick={() => navigate('/admin/users?invite=1')} />
               <QuickAction icon={Shield}     label="Manage Roles"           desc="Create roles & set permissions"         color="#8b5cf6" onClick={() => navigate('/roles')} />
               <QuickAction icon={Building2}  label="Manage Departments"     desc="Create & assign department heads"       color="#f59e0b" onClick={() => navigate('/departments')} />
-              <QuickAction icon={Layers}     label="Enable Modules"         desc="Turn features on or off"                color="#06b6d4" onClick={() => navigate('/settings?tab=modules')} />
+              <QuickAction icon={Layers}     label="Enable Modules"         desc="Turn features on or off"                color="#06b6d4" onClick={() => navigate('/admin/modules')} />
               <QuickAction icon={Zap}        label="Connect Integrations"   desc="Email, SMS, payments, APIs"             color="#29ABE2" onClick={() => navigate('/integrations')} />
               <QuickAction icon={Mail}       label="Email Configuration"    desc="SMTP, SendGrid, Microsoft 365"          color="#57A93C" onClick={() => navigate('/integrations')} />
-              <QuickAction icon={Clock}      label="Routing & SLA"          desc="Ticket assignment & SLA policies"       color="#f59e0b" onClick={() => navigate('/settings?tab=routing')} />
+              <QuickAction icon={Clock}      label="Routing & SLA"          desc="Ticket assignment & SLA policies"       color="#f59e0b" onClick={() => navigate('/admin/routing')} />
               <QuickAction icon={Settings}   label="Workspace Settings"     desc="Name, timezone, locale, branding"       color="#6b7280" onClick={() => navigate('/settings')} />
             </div>
           </div>

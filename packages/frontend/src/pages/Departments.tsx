@@ -25,7 +25,8 @@ export function Departments() {
   const qc = useQueryClient();
   const [adding, setAdding] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
-  const [form, setForm] = useState({ name: '', description: '' });
+  const [form, setForm] = useState({ name: '', description: '', department_type: 'operations' });
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ['departments'],
@@ -36,13 +37,22 @@ export function Departments() {
   });
 
   const createMut = useMutation({
-    mutationFn: (body: { name: string; description: string }) => api.post('/api/v1/departments', body),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['departments'] }); setAdding(false); setForm({ name: '', description: '' }); },
+    mutationFn: (body: { name: string; description: string; department_type: string }) =>
+      api.post('/api/v1/departments', body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['departments'] });
+      setAdding(false);
+      setForm({ name: '', description: '', department_type: 'operations' });
+      setSaveError(null);
+    },
+    onError: (e: any) => setSaveError(e?.response?.data?.error?.message ?? e?.response?.data?.error ?? 'Create failed'),
   });
 
   const updateMut = useMutation({
-    mutationFn: ({ id, ...body }: { id: string; name: string; description: string }) => api.patch(`/api/v1/departments/${id}`, body),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['departments'] }); setEditId(null); },
+    mutationFn: ({ id, ...body }: { id: string; name: string; description: string }) =>
+      api.patch(`/api/v1/departments/${id}`, body),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['departments'] }); setEditId(null); setSaveError(null); },
+    onError: (e: any) => setSaveError(e?.response?.data?.error?.message ?? e?.response?.data?.error ?? 'Update failed'),
   });
 
   const deleteMut = useMutation({
@@ -60,7 +70,7 @@ export function Departments() {
           <p className="text-sm text-gray-500 mt-0.5">Organise your team into departments</p>
         </div>
         <button
-          onClick={() => { setAdding(true); setForm({ name: '', description: '' }); }}
+          onClick={() => { setAdding(true); setForm({ name: '', description: '', department_type: 'operations' }); setSaveError(null); }}
           className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-xl hover:opacity-90"
           style={{ background: 'linear-gradient(135deg, #29ABE2 0%, #1a8cbf 100%)' }}
         >
@@ -81,14 +91,28 @@ export function Departments() {
                 placeholder="Department name"
                 className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"
               />
+              {/* Department type drives the colour badge + SLA matching. Was missing
+                  from this form, which made the backend Zod schema reject every save. */}
+              <select
+                value={form.department_type}
+                onChange={e => setForm(f => ({ ...f, department_type: e.target.value }))}
+                className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-200"
+              >
+                {Object.entries(DEPT_TYPE_LABELS).map(([key, { label }]) => (
+                  <option key={key} value={key}>{label}</option>
+                ))}
+              </select>
               <input
                 value={form.description}
                 onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
                 placeholder="Description (optional)"
                 className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"
               />
+              {saveError && (
+                <p className="text-xs text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{saveError}</p>
+              )}
               <div className="flex gap-2 justify-end">
-                <button onClick={() => setAdding(false)} className="px-3 py-1.5 text-sm text-gray-500 hover:text-gray-700">Cancel</button>
+                <button onClick={() => { setAdding(false); setSaveError(null); }} className="px-3 py-1.5 text-sm text-gray-500 hover:text-gray-700">Cancel</button>
                 <button
                   onClick={() => createMut.mutate(form)}
                   disabled={!form.name.trim() || createMut.isPending}

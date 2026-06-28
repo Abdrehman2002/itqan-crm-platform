@@ -269,15 +269,20 @@ export function settingsRoutes(db: DatabaseClient) {
     // List team members (super_admin excluded — internal platform role)
     fastify.get('/team', { preHandler: requireRole('super_admin', 'tenant_admin', 'manager') }, async (req, reply) => {
       const members = await db.withTenant(req.tenant.id, async (client) => {
+        // U3 — department + department_type were missing from the SELECT, so
+        // the frontend column always rendered '—'. U6 — deleted_at filter so
+        // soft-deleted users don't appear in the live team list.
         const result = await client.query(
           `SELECT u.id, u.name, u.email, u.role, u.permissions, u.is_active, u.created_at,
                   u.last_login_at, u.custom_role_id, u.manager_id,
+                  u.department, u.department_type,
                   m.name AS manager_name,
                   r.name AS role_name, r.color AS role_color
            FROM users u
            LEFT JOIN users m ON m.id = u.manager_id
            LEFT JOIN roles r ON r.id = u.custom_role_id
            WHERE u.role != 'super_admin'
+             AND u.deleted_at IS NULL
            ORDER BY u.name ASC`,
         );
         return result.rows;
@@ -557,10 +562,26 @@ export function settingsRoutes(db: DatabaseClient) {
       if (userId === req.user.sub) {
         return reply.code(400).send({ success: false, error: { code: 'CANNOT_REMOVE_SELF', message: 'Cannot remove your own account' } });
       }
-      await db.withTenant(req.tenant.id, async (client) => {
-        // Explicit tenant_id guard as defence-in-depth alongside RLS
-        await client.query('DELETE FROM users WHERE id = $1 AND tenant_id = $2', [userId, req.tenant.id]);
+      // Soft-delete instead of DELETE — see migration 034. Hard delete used to
+      // fail silently when the user owned tickets/activities/calls (FK RESTRICT),
+      // and even when it worked it broke historical reports because every
+      // ticket.assignee_name became NULL. Soft-delete keeps the row, marks it
+      // inactive, and bumps email so the address can be re-used in a future invite.
+      const [row] = await db.withTenant(req.tenant.id, async (client) => {
+        const r = await client.query(
+          `UPDATE users
+              SET deleted_at = NOW(),
+                  is_active  = false,
+                  email      = email || '+deleted-' || EXTRACT(EPOCH FROM NOW())::bigint
+            WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+            RETURNING id`,
+          [userId, req.tenant.id],
+        );
+        return r.rows;
       });
+      if (!row) {
+        return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'User not found or already removed' } });
+      }
       return reply.code(204).send();
     });
 

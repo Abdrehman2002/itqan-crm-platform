@@ -97,7 +97,12 @@ export function NotificationBell() {
       </button>
 
       {open && (
-        <div className="absolute bottom-full right-0 mb-2 w-80 bg-white rounded-2xl shadow-2xl border border-gray-100 z-50 overflow-hidden">
+        // The bell lives in the bottom-left sidebar. With `right-0` the popup
+        // anchored its RIGHT edge to the bell and extended leftward — straight
+        // off the screen. `left-full ml-2 bottom-0` anchors it just to the
+        // RIGHT of the bell, popping out into the main content area where it's
+        // actually visible.
+        <div className="absolute bottom-0 left-full ml-2 w-80 bg-white rounded-2xl shadow-2xl border border-gray-100 z-50 overflow-hidden">
           <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
             <span className="text-sm font-semibold text-gray-900">Notifications</span>
             <div className="flex items-center gap-2">

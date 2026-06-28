@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   UserPlus, Search, MoreVertical, UserCheck, UserX, Shield,
@@ -277,8 +278,11 @@ function RowMenu({ member, onEdit, onToggleActive, onDelete }: {
       </button>
       {open && (
         <>
-          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-8 z-20 bg-white rounded-xl shadow-lg border border-gray-100 py-1 w-44">
+          {/* U5 — bumped both backdrop and menu z-index above the table header's
+              sticky elements + status badges. Previously z-10/20 was getting
+              shadowed when the list was re-rendered after a sort/filter. */}
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute right-0 top-8 z-50 bg-white rounded-xl shadow-lg border border-gray-100 py-1 w-44">
             <button
               onClick={() => { setOpen(false); onEdit(); }}
               className="w-full flex items-center gap-2.5 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
@@ -307,13 +311,76 @@ function RowMenu({ member, onEdit, onToggleActive, onDelete }: {
   );
 }
 
+// ── Delete Confirm Modal ──────────────────────────────────────────────────────
+// Browser confirm() worked fine but the DELETE endpoint now soft-deletes (see
+// U6) and the user needs to understand: the row stays, the login is killed,
+// historical tickets/calls/deals keep this person's name visible. A proper modal
+// communicates that instead of a one-liner native dialog.
+function DeleteConfirmModal({ member, onCancel, onConfirm, isPending }: {
+  member: Member; onCancel: () => void; onConfirm: () => void; isPending: boolean;
+}) {
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md">
+        <div className="px-6 py-5 border-b border-gray-100">
+          <h2 className="text-base font-bold text-gray-900 flex items-center gap-2">
+            <AlertTriangle className="w-5 h-5 text-amber-500" /> Remove {member.name}?
+          </h2>
+        </div>
+        <div className="px-6 py-5 space-y-3 text-sm">
+          <p className="text-gray-700">
+            <strong>{member.name}</strong> will be removed from the workspace and will no longer
+            be able to log in.
+          </p>
+          <div className="bg-blue-50 border border-blue-100 rounded-xl px-4 py-3 text-xs text-blue-900">
+            <p className="font-semibold mb-1">Their history is preserved.</p>
+            <p>Tickets, calls, deals, and activities they handled in the past stay visible in
+              reports and dashboards under their name. Re-inviting the same email later creates a
+              new account — the historical record stays linked to the original.</p>
+          </div>
+        </div>
+        <div className="flex gap-3 px-6 pb-5">
+          <button onClick={onCancel}
+            className="flex-1 px-4 py-2.5 text-sm text-gray-600 border border-gray-200 rounded-xl hover:bg-gray-50">
+            Cancel
+          </button>
+          <button onClick={onConfirm} disabled={isPending}
+            className="flex-1 px-4 py-2.5 text-sm font-semibold text-white rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-60">
+            {isPending ? 'Removing…' : 'Remove user'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main Page ─────────────────────────────────────────────────────────────────
 export function AdminUsers() {
   const qc = useQueryClient();
+  // Honour ?invite=1 and ?filter=active|inactive from the TA dashboard tiles so
+  // clicking "Total Users" / "Active Users" / "Inactive Users" / "Invite Team
+  // Member" lands here pre-configured instead of dropping the user on a blank page.
+  const [params, setParams] = useSearchParams();
+  const initialFilter = (params.get('filter') as 'all' | 'active' | 'inactive' | null) ?? 'all';
   const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState<'all' | 'active' | 'inactive'>('all');
-  const [showInvite, setShowInvite] = useState(false);
+  const [filter, setFilter] = useState<'all' | 'active' | 'inactive'>(
+    ['active','inactive','all'].includes(initialFilter) ? initialFilter : 'all'
+  );
+  const [showInvite, setShowInvite] = useState(params.get('invite') === '1');
   const [editMember, setEditMember] = useState<Member | null>(null);
+  const [deleteMember, setDeleteMember] = useState<Member | null>(null);
+
+  // Clean the query string after we've consumed it so refreshing doesn't re-open
+  // the invite modal indefinitely.
+  useEffect(() => {
+    if (params.get('invite') === '1' || params.get('filter')) {
+      const next = new URLSearchParams(params);
+      next.delete('invite');
+      next.delete('filter');
+      setParams(next, { replace: true });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const { data: members = [], isLoading } = useQuery<Member[]>({
     queryKey: ['admin-users'],
@@ -333,7 +400,7 @@ export function AdminUsers() {
 
   const deleteMut = useMutation({
     mutationFn: (id: string) => api.delete(`/api/v1/settings/team/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin-users'] }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['admin-users'] }); setDeleteMember(null); },
   });
 
   const filtered = members.filter(m => {
@@ -451,9 +518,7 @@ export function AdminUsers() {
                         member={m}
                         onEdit={() => setEditMember(m)}
                         onToggleActive={() => toggleActive.mutate({ id: m.id, is_active: !m.is_active })}
-                        onDelete={() => {
-                          if (confirm(`Remove ${m.name} from this workspace?`)) deleteMut.mutate(m.id);
-                        }}
+                        onDelete={() => setDeleteMember(m)}
                       />
                     </td>
                   </tr>
@@ -482,6 +547,14 @@ export function AdminUsers() {
           roles={roles}
           onClose={() => setEditMember(null)}
           onSuccess={() => qc.invalidateQueries({ queryKey: ['admin-users'] })}
+        />
+      )}
+      {deleteMember && (
+        <DeleteConfirmModal
+          member={deleteMember}
+          onCancel={() => setDeleteMember(null)}
+          onConfirm={() => deleteMut.mutate(deleteMember.id)}
+          isPending={deleteMut.isPending}
         />
       )}
     </div>
