@@ -1,4 +1,4 @@
-import React, { Suspense, lazy } from 'react';
+import React, { Suspense, lazy, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, NavLink, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import {
@@ -498,7 +498,7 @@ function NotificationsPage() {
     { id: 'team',     label: 'Team',               items: ['New user invited', 'User activated / deactivated', 'Role changed'] },
     { id: 'system',   label: 'System',             items: ['Module enabled / disabled', 'Integration connected / disconnected'] },
   ];
-  const [prefs, setPrefs] = React.useState<Record<string, Record<string, { email: boolean; inApp: boolean }>>>(() =>
+  const [prefs, setPrefs] = useState<Record<string, Record<string, { email: boolean; inApp: boolean }>>>(() =>
     Object.fromEntries(categories.map(c => [c.id, Object.fromEntries(c.items.map(i => [i, { email: true, inApp: true }]))]))
   );
   const toggle = (cat: string, item: string, channel: 'email' | 'inApp') =>
