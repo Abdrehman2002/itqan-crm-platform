@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "preview-fixed",
+      "runtimeExecutable": "npx.cmd",
+      "runtimeArgs": ["vite", "preview", "--port", "4174", "--host", "127.0.0.1"],
+      "port": 4174
+    }
+  ]
+}
