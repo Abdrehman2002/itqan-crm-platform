@@ -39,6 +39,7 @@ export interface NormalizedPaymentEvent {
   amount: number;
   currency: Currency;
   fee?: number;
+  net?: number;                 // amount - fee, populated when the adapter reports it (Stripe balance_transaction)
   metadata?: Record<string, unknown>;
 }
 
