@@ -72,9 +72,23 @@ export function InvoiceDetail() {
   // SWEEP-3 fix used to only apply accentColor; now layout swaps too.
   const { layout, accentColor: accent } = getInvoiceLayout(inv.templateId);
 
-  const downloadPdf = () => {
-    const apiBase = (import.meta as any).env?.VITE_API_URL || '';
-    window.open(`${apiBase}/api/v1/sales/invoices/${inv.id}/pdf`, '_blank');
+  // Fetch via axios (carries the Bearer JWT from the api defaults), open the
+  // response as a blob URL in a new tab. window.open() to the endpoint
+  // directly doesn't work — the new tab is a fresh browsing context with no
+  // Authorization header, so the API returns 401 UNAUTHORIZED. User hit this
+  // first try (2026-06-29).
+  const downloadPdf = async () => {
+    try {
+      const res = await api.get(`/api/v1/sales/invoices/${inv.id}/pdf`, { responseType: 'blob' });
+      const blob = new Blob([res.data], { type: res.headers['content-type'] || 'text/html' });
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank', 'noopener,noreferrer');
+      // Don't revoke immediately — the new tab needs the URL to remain valid
+      // while it loads. 60s is plenty for browser print-dialog navigation.
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (err: any) {
+      alert(`Could not export PDF: ${err?.response?.data?.error?.message ?? err?.message ?? 'unknown error'}`);
+    }
   };
 
   return (
