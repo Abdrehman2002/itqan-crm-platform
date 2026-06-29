@@ -508,20 +508,67 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
   return async function (fastify: FastifyInstance) {
 
     // ── Stats (dashboard) ─────────────────────────────────────────────────
+    // BUG-Y (2026-06-29) — agents reported seeing every other agent's tickets in
+    // the list, stats tiles, and tab counts. Both /stats and / lacked role-based
+    // visibility scoping — RLS only enforced tenant_id, not "your own work".
+    //
+    // Scope model:
+    //   super_admin / tenant_admin / manager  → all tickets in tenant
+    //   line_manager                          → tickets assigned to anyone in
+    //                                            their reportee subtree (via
+    //                                            recursive manager_id CTE)
+    //   agent / viewer                        → tickets where they are the
+    //                                            assignee OR the creator
+    //                                            (covers M5 cross-dept originator
+    //                                            view — they keep visibility of
+    //                                            tickets they raised even after
+    //                                            another dept picks them up)
+    function visibilityClause(role: string, alias = 't'): { sql: string; needsUserId: boolean; needsSubtreeCte: boolean } {
+      if (role === 'super_admin' || role === 'tenant_admin' || role === 'manager') {
+        return { sql: 'TRUE', needsUserId: false, needsSubtreeCte: false };
+      }
+      if (role === 'line_manager') {
+        return {
+          sql: `${alias}.assignee_id IN (SELECT id FROM subtree)`,
+          needsUserId: true,
+          needsSubtreeCte: true,
+        };
+      }
+      // agent, viewer, or any unknown role: own work only
+      return {
+        sql: `(${alias}.assignee_id = $__USERID__ OR ${alias}.created_by = $__USERID__)`,
+        needsUserId: true,
+        needsSubtreeCte: false,
+      };
+    }
+
     fastify.get('/stats', { preHandler: requireScope('tickets:read') }, async (req, reply) => {
       const tenantId = req.tenant.id;
       const userId   = req.user.sub;
+      const role     = (req.user as any).role as string;
+      const vis      = visibilityClause(role);
 
       const [stats] = await db.withTenant(tenantId, async (client) => {
+        const params: unknown[] = [userId];                              // $1 always = caller, used by the "mine" filter even for admins
+        const userParamIdx = 1;
+        let scopeClause = vis.sql.replace(/\$__USERID__/g, `$${userParamIdx}`);
+        let withCte = '';
+        if (vis.needsSubtreeCte) {
+          withCte = `WITH RECURSIVE subtree AS (
+            SELECT id FROM users WHERE id = $${userParamIdx}
+            UNION ALL
+            SELECT u.id FROM users u JOIN subtree s ON u.manager_id = s.id
+          ) `;
+        }
         const r = await client.query(
-          `SELECT
+          `${withCte}SELECT
              COUNT(*)                                                            AS total,
              COUNT(*) FILTER (WHERE status = 'open')                            AS open,
              COUNT(*) FILTER (WHERE status = 'assigned')                        AS assigned,
              COUNT(*) FILTER (WHERE status IN ('accepted','in_progress'))        AS in_progress,
              COUNT(*) FILTER (WHERE status = 'pending')                         AS pending,
              COUNT(*) FILTER (WHERE status = 'resolved')                        AS resolved,
-             COUNT(*) FILTER (WHERE assignee_id = $1
+             COUNT(*) FILTER (WHERE assignee_id = $${userParamIdx}
                                AND status NOT IN ('resolved','closed'))         AS mine,
              COUNT(*) FILTER (WHERE sla_due_at < NOW()
                                AND status NOT IN ('resolved','closed'))         AS overdue,
@@ -531,8 +578,9 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
              COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24 hours') AS created_today,
              COUNT(*) FILTER (WHERE status IN ('accepted','in_progress')
                                AND assignee_id IS NOT NULL)                     AS claimed
-           FROM tickets`,
-          [userId],
+           FROM tickets t
+           WHERE ${scopeClause}`,
+          params,
         );
         return r.rows;
       });
@@ -1031,11 +1079,22 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
       const query    = ListQuerySchema.parse(req.query);
       const tenantId = req.tenant.id;
       const userId   = req.user.sub;
+      const role     = (req.user as any).role as string;
       const offset   = (query.page - 1) * query.pageSize;
 
       const params: unknown[] = [];
       const where: string[] = ['1=1'];
       let idx = 1;
+
+      // BUG-Y — role-based visibility (same scope helper as /stats above).
+      // Agent reported seeing every other agent's tickets at /tickets — RLS
+      // only checks tenant_id, not "your own work".
+      const vis = visibilityClause(role);
+      if (vis.sql !== 'TRUE') {
+        const userIdx = idx++;
+        params.push(userId);
+        where.push(vis.sql.replace(/\$__USERID__/g, `$${userIdx}`));
+      }
 
       if (query.status) {
         // Allow comma-separated multi-status: "open,assigned"
@@ -1075,14 +1134,26 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
       const whereStr = where.join(' AND ');
       const orderBy  = `t.${query.sortBy} ${query.sortOrder}`;
 
+      // BUG-Y — line_manager scope needs a recursive subtree CTE; build it once
+      // and prepend to both COUNT and SELECT queries when applicable.
+      // userId is already the FIRST param pushed by visibilityClause above for
+      // non-admin roles; for line_manager that's the seed for the recursion.
+      const withCte = vis.needsSubtreeCte
+        ? `WITH RECURSIVE subtree AS (
+             SELECT id FROM users WHERE id = $1
+             UNION ALL
+             SELECT u.id FROM users u JOIN subtree s ON u.manager_id = s.id
+           ) `
+        : '';
+
       const [count, tickets] = await db.withTenant(tenantId, async (client) => {
         const cntR = await client.query(
-          `SELECT COUNT(*) FROM tickets t WHERE ${whereStr}`, params,
+          `${withCte}SELECT COUNT(*) FROM tickets t WHERE ${whereStr}`, params,
         );
         const listR = await client.query(
           // M5: Add assignee_department + is_originated_by_me + contact NIC for
           // the originator-view badge + Customer 360 hover card.
-          `SELECT t.*,
+          `${withCte}SELECT t.*,
              u.name  AS assignee_name,
              u.avatar AS assignee_avatar,
              u.department AS assignee_department,
