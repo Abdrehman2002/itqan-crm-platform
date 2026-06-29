@@ -34,6 +34,17 @@ export function LoginPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    // BUG-V3 — empty-field client-side check. Was relying purely on HTML5
+    // `required` which the SQA bot found wasn't surfacing a visible error
+    // when the user hit Sign in on a blank form.
+    if (!form.email.trim() || !form.password) {
+      setError('Please enter both email and password.');
+      return;
+    }
+    if (!isSubdomain && !form.tenantSlug.trim()) {
+      setError('Please enter your workspace name.');
+      return;
+    }
     setLoading(true);
     try {
       if (remember) {
@@ -44,7 +55,21 @@ export function LoginPage() {
       await login(form.email, form.password, isSubdomain ? undefined : form.tenantSlug);
       navigate('/dashboard');
     } catch (err: any) {
-      setError(err.response?.data?.error?.message ?? 'Invalid credentials. Please try again.');
+      // BUG-V1 — earlier, the axios response interceptor swallowed 401 on
+      // /auth/login (treating it as token-expiry → refresh-loop → logout
+      // redirect), so this catch never ran and `setLoading(false)` never
+      // fired. Fixed in services/api.ts (AUTH_BYPASS allow-list). The error
+      // now propagates here cleanly. We also surface specific codes the
+      // server may return.
+      const code = err.response?.data?.error?.code;
+      const msg = err.response?.data?.error?.message;
+      if (code === 'ACCOUNT_INACTIVE') {
+        setError(msg ?? 'This account has been deactivated. Please contact your workspace admin.');
+      } else if (code === 'ACCOUNT_LOCKED') {
+        setError(msg ?? 'Too many failed attempts. Try again later.');
+      } else {
+        setError(msg ?? 'Invalid credentials. Please try again.');
+      }
     } finally {
       setLoading(false);
     }
@@ -157,7 +182,7 @@ export function LoginPage() {
                       className="px-3 flex items-center text-xs border-l"
                       style={{ color: '#29ABE2', borderColor: 'rgba(255,255,255,0.1)' }}
                     >
-                      .vivid.app
+                      .amanahcx.com
                     </span>
                   </div>
                 </div>

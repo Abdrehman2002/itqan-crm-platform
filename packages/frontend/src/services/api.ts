@@ -18,11 +18,20 @@ function flushQueue(err: unknown, token: string | null) {
   pendingRejectors = [];
 }
 
+// URLs that must NEVER trigger the refresh-loop:
+//  - /auth/login: a 401 here means "user typed the wrong password" — surface it
+//    to the form so the spinner stops and "Invalid credentials" renders. (BUG-V1)
+//  - /auth/refresh: the refresh endpoint itself failing means our refresh token
+//    is dead; looping would be infinite.
+//  - /auth/logout: cleanup call, no need to interpret 401 as expiry.
+const AUTH_BYPASS = ['/auth/login', '/auth/refresh', '/auth/logout'];
+
 api.interceptors.response.use(
   (res) => res,
   async (error) => {
     const original = error.config;
-    if (error.response?.status !== 401 || original._retry) {
+    const isAuthCall = AUTH_BYPASS.some((u) => (original?.url ?? '').endsWith(u));
+    if (error.response?.status !== 401 || original._retry || isAuthCall) {
       return Promise.reject(error);
     }
 
