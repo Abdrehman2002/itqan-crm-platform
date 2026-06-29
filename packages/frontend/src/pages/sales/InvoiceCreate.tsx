@@ -35,8 +35,20 @@ export function InvoiceCreate() {
     queryFn: () => api.get('/api/v1/sales/billing-contacts').then(r => r.data.data ?? []),
   });
 
+  // Saved tax rates live in the dedicated tax_rates table (migration 037). The
+  // line item Tax dropdown picks from these instead of free-text entry. Falls
+  // back to the legacy sales_settings.taxRates blob when the new table is empty
+  // (e.g. fresh tenants before any rate has been created).
+  const { data: savedTaxRates = [] } = useQuery<{ id: string; name: string; ratePercent: number; isDefault: boolean }[]>({
+    queryKey: ['tax-rates'],
+    queryFn: () => api.get('/api/v1/sales/tax-rates').then(r => r.data.data ?? []),
+  });
+
   const s = settings ?? DEFAULT_SETTINGS;
-  const defaultTax = s.taxRates.find(t => t.isDefault)?.rate ?? 0;
+  const effectiveTaxRates = savedTaxRates.length
+    ? savedTaxRates.map(t => ({ id: t.id, name: t.name, rate: t.ratePercent, isDefault: t.isDefault }))
+    : (s.taxRates ?? []);
+  const defaultTax = effectiveTaxRates.find(t => t.isDefault)?.rate ?? 0;
 
   const [templateId, setTemplateId] = useState(preselectedTemplate || 'tpl-classic');
   const [contactId, setContactId] = useState('');
@@ -86,7 +98,7 @@ export function InvoiceCreate() {
     },
   });
 
-  const taxOpts = (s.taxRates ?? []).map(t => ({ value: String(t.rate), label: `${t.name} (${t.rate}%)` }));
+  const taxOpts = effectiveTaxRates.map(t => ({ value: String(t.rate), label: `${t.name} (${t.rate}%)` }));
   const contactOpts = [{ value: '', label: 'Select a contact…' }, ...(contactsData ?? []).map(c => ({ value: c.id, label: c.name }))];
   const currencyOpts = CURRENCIES.map(c => ({ value: c.code, label: `${c.code} — ${c.name}` }));
 

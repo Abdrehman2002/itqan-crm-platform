@@ -21,7 +21,7 @@ const TABS: { id: Tab; label: string; icon: React.ElementType }[] = [
 
 // ── Profile ──────────────────────────────────────────────────────────────────
 
-function ProfileSettings() {
+export function ProfileSettings() {
   const { user } = useAuthStore();
   const qc = useQueryClient();
   const [name, setName]   = useState(user?.name ?? '');
@@ -88,8 +88,11 @@ function ProfileSettings() {
 }
 
 // ── Appearance ────────────────────────────────────────────────────────────────
+// Persists via zustand `persist` middleware in store/appearance.store.ts
+// (localStorage key `crm-appearance`). The "Save Appearance" button is just
+// a visual confirmation — settings are already saved on every change.
 
-function AppearanceSettings() {
+export function AppearanceSettings() {
   const {
     theme, setTheme, density, setDensity,
     fontFamily, setFontFamily, fontSize, setFontSize,
@@ -241,7 +244,7 @@ function AppearanceSettings() {
 
 // ── Notifications ─────────────────────────────────────────────────────────────
 
-function NotificationSettings() {
+export function NotificationSettings() {
   const [prefs, setPrefs] = useState({
     dealWon: true, dealLost: false, newContact: true, voiceCall: true,
     weeklyReport: true, monthlyReport: false, systemAlerts: true,
@@ -286,7 +289,7 @@ function NotificationSettings() {
 
 // ── Security ──────────────────────────────────────────────────────────────────
 
-function SecuritySettings() {
+export function SecuritySettings() {
   const isSuperAdmin = useIsSuperAdmin();
   const { logout } = useAuthStore();
   const [currentPw, setCurrentPw] = useState('');

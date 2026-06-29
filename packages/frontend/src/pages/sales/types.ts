@@ -62,16 +62,29 @@ export const CURRENCIES = [
   { code: 'SAR', name: 'Saudi Riyal',        symbol: '﷼'    },
 ];
 
-export const INVOICE_TEMPLATES = [
-  { id: 'tpl-classic',      name: 'Classic Professional', sector: 'General Business',       accentColor: '#2563eb' },
-  { id: 'tpl-minimal',      name: 'Minimal Modern',       sector: 'Freelance / Creative',   accentColor: '#0f172a' },
-  { id: 'tpl-consulting',   name: 'Consulting Statement', sector: 'Consulting / Legal',      accentColor: '#4f46e5' },
-  { id: 'tpl-retail',       name: 'Retail / Product',     sector: 'Retail / E-commerce',    accentColor: '#f97316' },
-  { id: 'tpl-construction', name: 'Construction',         sector: 'Construction / RE',      accentColor: '#d97706' },
-  { id: 'tpl-medical',      name: 'Medical',              sector: 'Healthcare',             accentColor: '#0d9488' },
-  { id: 'tpl-agency',       name: 'Digital Agency',       sector: 'Marketing / Agency',     accentColor: '#9333ea' },
-  { id: 'tpl-logistics',    name: 'Logistics / Freight',  sector: 'Logistics / Transport',  accentColor: '#0284c7' },
+export type InvoiceLayout = 'classic' | 'minimal' | 'consulting';
+
+export const INVOICE_TEMPLATES: Array<{
+  id: string;
+  name: string;
+  sector: string;
+  accentColor: string;
+  layout: InvoiceLayout;
+}> = [
+  { id: 'tpl-classic',      name: 'Classic Professional', sector: 'General Business',       accentColor: '#2563eb', layout: 'classic'    },
+  { id: 'tpl-minimal',      name: 'Minimal Modern',       sector: 'Freelance / Creative',   accentColor: '#0f172a', layout: 'minimal'    },
+  { id: 'tpl-consulting',   name: 'Consulting Statement', sector: 'Consulting / Legal',     accentColor: '#4f46e5', layout: 'consulting' },
+  { id: 'tpl-retail',       name: 'Retail / Product',     sector: 'Retail / E-commerce',    accentColor: '#f97316', layout: 'classic'    },
+  { id: 'tpl-construction', name: 'Construction',         sector: 'Construction / RE',      accentColor: '#d97706', layout: 'classic'    },
+  { id: 'tpl-medical',      name: 'Medical',              sector: 'Healthcare',             accentColor: '#0d9488', layout: 'minimal'    },
+  { id: 'tpl-agency',       name: 'Digital Agency',       sector: 'Marketing / Agency',     accentColor: '#9333ea', layout: 'consulting' },
+  { id: 'tpl-logistics',    name: 'Logistics / Freight',  sector: 'Logistics / Transport',  accentColor: '#0284c7', layout: 'classic'    },
 ];
+
+export function getInvoiceLayout(templateId?: string): { layout: InvoiceLayout; accentColor: string } {
+  const tpl = INVOICE_TEMPLATES.find(t => t.id === templateId);
+  return { layout: tpl?.layout ?? 'classic', accentColor: tpl?.accentColor ?? '#2563eb' };
+}
 
 export function formatCurrency(amount: number, currency = 'USD') {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency, minimumFractionDigits: 2 }).format(amount);

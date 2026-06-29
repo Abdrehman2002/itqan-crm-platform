@@ -128,6 +128,45 @@ export function teamMessageRoutes(db: DatabaseClient) {
       return reply.send({ success: true, data: rows });
     });
 
+    // GET /api/v1/messages/dm-summary
+    // Per-peer summary so the contact list can show an "X unread" badge next to
+    // each user. Frontend tracks "last seen" per peer in localStorage; backend
+    // returns the last message and a 30-day-window unread count from each peer.
+    // The frontend filters/decides what's actually unread vs already-viewed.
+    //
+    // Without this, the only way to know you have a new DM was to open the exact
+    // conversation — user reported (2026-06-29) sending from TA → Omar, Omar
+    // didn't see it (he wasn't on that thread).
+    fastify.get('/dm-summary', async (req, reply) => {
+      const myId = req.user.sub;
+      const rows = await db.withSuperAdmin(async (client) => {
+        const r = await client.query(
+          `SELECT peer_id,
+                  MAX(created_at) AS last_at,
+                  COUNT(*) FILTER (
+                    WHERE sender_id = peer_id
+                      AND created_at > NOW() - INTERVAL '30 days'
+                  ) AS recent_from_peer,
+                  (ARRAY_AGG(content     ORDER BY created_at DESC))[1] AS last_content,
+                  (ARRAY_AGG(sender_name ORDER BY created_at DESC))[1] AS last_sender_name,
+                  (ARRAY_AGG(sender_id   ORDER BY created_at DESC))[1] AS last_sender_id
+             FROM (
+               SELECT id, sender_id, sender_name, recipient_id, content, created_at,
+                      CASE WHEN sender_id = $1 THEN recipient_id ELSE sender_id END AS peer_id
+                 FROM team_messages
+                WHERE tenant_id = $2
+                  AND message_type = 'dm'
+                  AND (sender_id = $1 OR recipient_id = $1)
+             ) t
+            GROUP BY peer_id
+            ORDER BY last_at DESC NULLS LAST`,
+          [myId, req.tenant.id],
+        );
+        return r.rows;
+      });
+      return reply.send({ success: true, data: rows });
+    });
+
     // Get DM thread with a user (messages between me and them, both directions)
     fastify.get('/dm/:userId', async (req, reply) => {
       const { userId } = req.params as { userId: string };

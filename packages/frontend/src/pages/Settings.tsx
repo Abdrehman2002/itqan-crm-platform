@@ -1,21 +1,33 @@
 import { useState, useEffect, useRef } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Save, Loader2, Building2, Users, Clock,
   UserPlus, Trash2, Edit2, Check, X, Search, Crown,
   ShieldCheck, UserCheck, Eye,
   Route, Tag, Plus, AlertCircle, Layers, ToggleLeft, ToggleRight,
+  User, Palette, Bell, Lock,
 } from 'lucide-react';
 import { api } from '../services/api';
 import { MilestoneSettings } from './MilestoneSettings';
 import { useAuthStore } from '../store/auth.store';
 import { useIsAdmin } from '../hooks/useRole';
+import {
+  ProfileSettings, AppearanceSettings, NotificationSettings, SecuritySettings,
+} from './PersonalSettings';
 
-type Tab = 'workspace' | 'tags';
+// Tabs grouped under "General Settings" in the left nav.
+// Order matches the spec: General → Profile → Appearance → Notifications → Tags → Password.
+// The old "Security & Password" tab is merged here as "Password" (same SecuritySettings component).
+type Tab = 'general' | 'profile' | 'appearance' | 'notifications' | 'tags' | 'password';
 
 const TABS: { id: Tab; label: string; icon: any }[] = [
-  { id: 'workspace', label: 'General',  icon: Building2 },
-  { id: 'tags',      label: 'Tags',     icon: Tag       },
+  { id: 'general',       label: 'General',       icon: Building2 },
+  { id: 'profile',       label: 'Profile',       icon: User      },
+  { id: 'appearance',    label: 'Appearance',    icon: Palette   },
+  { id: 'notifications', label: 'Notifications', icon: Bell      },
+  { id: 'tags',          label: 'Tags',          icon: Tag       },
+  { id: 'password',      label: 'Password',      icon: Lock      },
 ];
 
 function WorkspaceSettings() {
@@ -1085,22 +1097,33 @@ export function ModulesSettings() {
 }
 
 const TAB_CONTENT: Record<Tab, React.FC> = {
-  workspace: WorkspaceSettings,
-  tags:      TagsSettings,
+  general:       WorkspaceSettings,
+  profile:       ProfileSettings,
+  appearance:    AppearanceSettings,
+  notifications: NotificationSettings,
+  tags:          TagsSettings,
+  password:      SecuritySettings,
 };
 
 export function Settings() {
-  const [tab, setTab] = useState<Tab>('workspace');
-  const TabContent = TAB_CONTENT[tab];
+  // URL pattern: /settings, /settings/general, /settings/profile, /settings/appearance,
+  // /settings/notifications, /settings/tags, /settings/password.
+  const { tab: urlTab } = useParams<{ tab?: string }>();
+  const navigate = useNavigate();
+  const activeTab: Tab = (TABS.find(t => t.id === urlTab)?.id) ?? 'general';
+  const TabContent = TAB_CONTENT[activeTab];
+
+  const goto = (id: Tab) => navigate(`/settings/${id}`);
+
   return (
     <div className="flex h-full">
       {/* Sidebar */}
       <div className="w-52 border-r border-gray-100 p-3 space-y-0.5">
         <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider px-3 mb-3">General Settings</p>
         {TABS.map(({ id, label, icon: Icon }) => (
-          <button key={id} onClick={() => setTab(id)}
+          <button key={id} onClick={() => goto(id)}
             className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors text-left ${
-              tab === id ? 'bg-brand-50 text-brand-700 font-medium' : 'text-gray-600 hover:bg-gray-50'
+              activeTab === id ? 'bg-brand-50 text-brand-700 font-medium' : 'text-gray-600 hover:bg-gray-50'
             }`}>
             <Icon className="w-4 h-4 shrink-0" />
             {label}

@@ -4,9 +4,10 @@ import { useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   UserPlus, Search, MoreVertical, UserCheck, UserX, Shield,
-  Mail, Trash2, RefreshCw, ChevronDown, X, Check, AlertTriangle,
+  Mail, Trash2, RefreshCw, ChevronDown, X, Check, AlertTriangle, Upload,
 } from 'lucide-react';
 import { api } from '../../services/api';
+import { BulkUploadModal } from '../../components/BulkUploadModal';
 
 interface Member {
   id: string;
@@ -455,6 +456,7 @@ export function AdminUsers() {
     ['active','inactive','all'].includes(initialFilter) ? initialFilter : 'all'
   );
   const [showInvite, setShowInvite] = useState(params.get('invite') === '1');
+  const [showBulkUpload, setShowBulkUpload] = useState(false);
   const [editMember, setEditMember] = useState<Member | null>(null);
   const [deleteMember, setDeleteMember] = useState<Member | null>(null);
 
@@ -518,13 +520,21 @@ export function AdminUsers() {
               {members.length} total · {activeCount} active · {inactiveCount} inactive
             </p>
           </div>
-          <button
-            onClick={() => setShowInvite(true)}
-            className="flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white rounded-xl hover:opacity-90 transition-opacity"
-            style={{ background: 'linear-gradient(135deg, #29ABE2 0%, #1a8cbf 100%)' }}
-          >
-            <UserPlus className="w-4 h-4" /> Invite User
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setShowBulkUpload(true)}
+              className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 border border-gray-200 rounded-xl hover:bg-gray-50 transition-colors"
+            >
+              <Upload className="w-4 h-4" /> Bulk Upload
+            </button>
+            <button
+              onClick={() => setShowInvite(true)}
+              className="flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white rounded-xl hover:opacity-90 transition-opacity"
+              style={{ background: 'linear-gradient(135deg, #29ABE2 0%, #1a8cbf 100%)' }}
+            >
+              <UserPlus className="w-4 h-4" /> Invite User
+            </button>
+          </div>
         </div>
       </div>
 
@@ -662,6 +672,25 @@ export function AdminUsers() {
           onConfirm={() => deleteMut.mutate(deleteMember.id)}
           isPending={deleteMut.isPending}
           error={deleteError}
+        />
+      )}
+      {showBulkUpload && (
+        <BulkUploadModal
+          endpoint="/api/v1/settings/team/bulk"
+          title="Bulk Upload Users"
+          columns={[
+            { key: 'name',          label: 'Full name', required: true },
+            { key: 'email',         label: 'Email',     required: true },
+            { key: 'role',          label: 'Role',      required: true, hint: 'agent | line_manager | manager | tenant_admin' },
+            { key: 'department',    label: 'Department' },
+            { key: 'manager_email', label: 'Manager email', hint: 'must match an existing user; leave blank for none' },
+          ]}
+          sampleRows={[
+            { name: 'Sara Iqbal',  email: 'sara@example.com',  role: 'agent',        department: 'Sales',   manager_email: 'manager@example.com' },
+            { name: 'Omar Raza',   email: 'omar@example.com',  role: 'line_manager', department: 'Support', manager_email: '' },
+          ]}
+          invalidateKeys={[['admin-users']]}
+          onClose={() => setShowBulkUpload(false)}
         />
       )}
     </div>

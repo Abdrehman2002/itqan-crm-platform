@@ -9,6 +9,7 @@ import { api } from '../services/api';
 import { formatDate } from '../utils/format';
 import { useCan, useIsSuperAdmin } from '../hooks/useRole';
 import { ContactImportModal } from '../components/ContactImportModal';
+import { BulkUploadModal } from '../components/BulkUploadModal';
 import { useSectorFields } from '../hooks/useSectorFields';
 import { SectorFieldsForm } from '../components/SectorFieldsForm';
 import { SECTORS } from '@crm/shared';
@@ -48,6 +49,7 @@ export function Contacts() {
   const [selected, setSelected] = useState<any | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  const [showBulkUpload, setShowBulkUpload] = useState(false);
   const [form, setForm] = useState({ firstName: '', lastName: '', email: '', phone: '', status: 'lead', source: 'manual' });
   const [sectorValues, setSectorValues] = useState<Record<string, any>>({});
   // Super admin form state
@@ -239,6 +241,9 @@ export function Contacts() {
               <div className="flex gap-2">
                 <button onClick={() => setShowImport(true)} className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-50">
                   <Upload className="w-3.5 h-3.5" /> Import
+                </button>
+                <button onClick={() => setShowBulkUpload(true)} className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-50">
+                  <Upload className="w-3.5 h-3.5" /> Bulk Upload
                 </button>
                 <button
                   onClick={() => setShowCreate(true)}
@@ -509,6 +514,27 @@ export function Contacts() {
       )}
 
       {showImport && <ContactImportModal onClose={() => setShowImport(false)} />}
+
+      {showBulkUpload && (
+        <BulkUploadModal
+          endpoint="/api/v1/contacts/bulk"
+          title="Bulk Upload Contacts"
+          columns={[
+            { key: 'first_name',   label: 'First name', required: true },
+            { key: 'last_name',    label: 'Last name' },
+            { key: 'email',        label: 'Email',      hint: 'valid email or blank' },
+            { key: 'phone',        label: 'Phone' },
+            { key: 'company_name', label: 'Company name', hint: 'matched to an existing company (case-insensitive); blank if no match' },
+            { key: 'nic_number',   label: 'CNIC',       hint: 'Pakistani CNIC — 13 digits, e.g. 12345-1234567-1' },
+          ]}
+          sampleRows={[
+            { first_name: 'Ayesha', last_name: 'Khan', email: 'ayesha@example.com', phone: '+923001234567', company_name: 'Acme Corp', nic_number: '12345-1234567-1' },
+            { first_name: 'Bilal',  last_name: 'Ahmed', email: '', phone: '+923331112222', company_name: '', nic_number: '' },
+          ]}
+          invalidateKeys={[['contacts']]}
+          onClose={() => setShowBulkUpload(false)}
+        />
+      )}
 
       {/* Edit contact modal — Super Admin */}
       {showEdit && isSuperAdmin && (

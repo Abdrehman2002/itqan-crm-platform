@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
-  Building2, Globe, Phone, Users, Plus, Search, X, Loader2,
+  Building2, Globe, Phone, Users, Plus, Search, X, Loader2, Upload,
   ChevronRight, TrendingUp, MapPin, Mail,
 } from 'lucide-react';
 import { api } from '../services/api';
 import { formatCurrency, formatNumber } from '../utils/format';
 import { useIsSuperAdmin } from '../hooks/useRole';
+import { BulkUploadModal } from '../components/BulkUploadModal';
 
 const TYPE_ICONS: Record<string, string> = {
   call: '📞', email: '📧', meeting: '🤝', task: '✅',
@@ -68,6 +69,7 @@ export function Companies() {
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<any | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [showBulkUpload, setShowBulkUpload] = useState(false);
   const [form, setForm] = useState({
     name: '', domain: '', industry: '', size: '', country: '', city: '', website: '', phone: '',
   });
@@ -212,12 +214,20 @@ export function Companies() {
               <h1 className="text-lg font-semibold text-gray-900">Companies</h1>
               <p className="text-xs text-gray-400">{meta.total ?? 0} total</p>
             </div>
-            <button
-              onClick={() => setShowCreate(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-brand-600 text-white text-xs rounded-lg hover:bg-brand-700"
-            >
-              <Plus className="w-3.5 h-3.5" /> Add Company
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowBulkUpload(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-gray-200 rounded-lg text-gray-600 hover:bg-gray-50"
+              >
+                <Upload className="w-3.5 h-3.5" /> Bulk Upload
+              </button>
+              <button
+                onClick={() => setShowCreate(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-brand-600 text-white text-xs rounded-lg hover:bg-brand-700"
+              >
+                <Plus className="w-3.5 h-3.5" /> Add Company
+              </button>
+            </div>
           </div>
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
@@ -676,6 +686,29 @@ export function Companies() {
             </div>
           </div>
         </div>
+      )}
+
+      {showBulkUpload && (
+        <BulkUploadModal
+          endpoint="/api/v1/companies/bulk"
+          title="Bulk Upload Companies"
+          columns={[
+            { key: 'name',                  label: 'Company name', required: true },
+            { key: 'industry',              label: 'Industry' },
+            { key: 'website',               label: 'Website',  hint: 'must include http:// or https://' },
+            { key: 'phone',                 label: 'Phone' },
+            { key: 'email',                 label: 'Email',    hint: 'stored on custom_fields.email' },
+            { key: 'billing_address_line1', label: 'Street address', hint: 'stored on custom_fields.address_line1' },
+            { key: 'billing_address_city',  label: 'City' },
+            { key: 'billing_country',       label: 'Country' },
+          ]}
+          sampleRows={[
+            { name: 'Acme Corp', industry: 'Technology', website: 'https://acme.com', phone: '+12025550100', email: 'hello@acme.com', billing_address_line1: '500 Park Ave', billing_address_city: 'New York', billing_country: 'USA' },
+            { name: 'Karachi Textiles', industry: 'Manufacturing', website: '', phone: '+922135678901', email: '', billing_address_line1: 'Plot 12, SITE Area', billing_address_city: 'Karachi', billing_country: 'Pakistan' },
+          ]}
+          invalidateKeys={[['companies']]}
+          onClose={() => setShowBulkUpload(false)}
+        />
       )}
     </div>
   );

@@ -5,6 +5,7 @@ import type { DatabaseClient } from '@crm/core';
 import { requireRole } from '../middlewares/auth.middleware';
 import { EmailService } from '../services/email.service';
 import { MODULE_CATALOG } from './super-admin';
+import { readCsvFromRequest, validateRows, type BulkRowError } from '../lib/bulk-csv';
 
 // system_audit_log INSERT helper. Records cross-domain admin activity (user
 // CRUD, role changes, dept changes, settings) so the tenant_admin dashboard
@@ -634,6 +635,154 @@ export function settingsRoutes(db: DatabaseClient) {
           newValue: { email: user.email, role: user.role, department: user.department } });
 
       return reply.code(201).send({ success: true, data: user });
+    });
+
+    // BULK UPLOAD team members from a multipart CSV file.
+    // POST /api/v1/settings/team/bulk  (tenant_admin only)
+    // Expected headers (lower-cased on parse):
+    //   name, email, role, department, manager_email
+    // role ∈ { agent | line_manager | manager | tenant_admin }
+    // manager_email is resolved against existing users → manager_id (optional).
+    //
+    // For each row we generate a temporary password, create the user, and
+    // best-effort send an invite email with the password and login link.
+    fastify.post('/team/bulk', { preHandler: requireRole('super_admin', 'tenant_admin') }, async (req, reply) => {
+      const rawRows = await readCsvFromRequest(req, reply);
+      if (!rawRows) return;
+
+      const BulkUserRowSchema = z.object({
+        name:          z.string().min(1, 'required'),
+        email:         z.string().email(),
+        role:          z.enum(['agent', 'line_manager', 'manager', 'tenant_admin']),
+        department:    z.string().optional().default(''),
+        manager_email: z.string().email().optional().or(z.literal('')).transform((v) => v || undefined),
+      });
+
+      const { valid, failed } = validateRows(rawRows, BulkUserRowSchema);
+      const errors: BulkRowError[] = [...failed];
+      const tenantId = req.tenant.id;
+
+      let inserted = 0;
+      const createdInvites: { email: string; name: string; tempPassword: string; role: string }[] = [];
+
+      if (valid.length > 0) {
+        const bcrypt = (await import('bcryptjs')).default;
+
+        await db.withTenant(tenantId, async (client) => {
+          // Pre-resolve manager_email → user id (single query)
+          const wantedManagers = Array.from(
+            new Set(valid.map((v) => v.value.manager_email).filter((m): m is string => !!m)),
+          );
+          const managerMap = new Map<string, string>();
+          if (wantedManagers.length > 0) {
+            const r = await client.query(
+              `SELECT id, lower(email) AS email_lc FROM users
+                 WHERE lower(email) = ANY($1) AND deleted_at IS NULL`,
+              [wantedManagers.map((e) => e.toLowerCase())],
+            );
+            for (const row of r.rows) managerMap.set(row.email_lc, row.id);
+          }
+
+          for (const { row, value } of valid) {
+            await client.query('SAVEPOINT bulk_row');
+            try {
+              const managerId = value.manager_email
+                ? managerMap.get(value.manager_email.toLowerCase()) ?? null
+                : null;
+
+              // Validation: manager_email supplied but not found
+              if (value.manager_email && !managerId) {
+                throw new Error(`manager_email '${value.manager_email}' not found in this workspace`);
+              }
+
+              // Generate temp password (12 hex chars = 48 bits entropy — good enough
+              // for one-time onboarding; user is prompted to change it).
+              const tempPassword = crypto.randomBytes(6).toString('hex');
+              const passwordHash = await bcrypt.hash(tempPassword, 12);
+
+              // Map role to permissions (line_manager → manager defaults; auth middleware
+              // already recognises line_manager as a tier between agent and manager).
+              const effectiveRoleForPerms = value.role === 'line_manager' ? 'manager' : value.role;
+              const perms = defaultPermissions(effectiveRoleForPerms);
+
+              const r = await client.query(
+                `INSERT INTO users
+                   (tenant_id, email, name, role, password_hash, permissions,
+                    department, manager_id, is_active)
+                 VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,true)
+                 RETURNING id, email, name, role`,
+                [
+                  tenantId,
+                  value.email.toLowerCase(),
+                  value.name,
+                  value.role,
+                  passwordHash,
+                  JSON.stringify(perms),
+                  value.department || null,
+                  managerId,
+                ],
+              );
+
+              await client.query('RELEASE SAVEPOINT bulk_row');
+              inserted++;
+              createdInvites.push({
+                email: r.rows[0].email,
+                name:  r.rows[0].name,
+                tempPassword,
+                role:  r.rows[0].role,
+              });
+            } catch (err: any) {
+              await client.query('ROLLBACK TO SAVEPOINT bulk_row');
+              errors.push({ row, errors: [err.message ?? 'insert failed'] });
+            }
+          }
+        });
+      }
+
+      // Send invite emails (best-effort, outside the DB tx so a flaky SMTP
+      // can't roll back successful inserts).
+      const [tenantRow] = await db.withSuperAdmin(async (client) => {
+        const r = await client.query('SELECT name FROM tenants WHERE id = $1', [tenantId]);
+        return r.rows;
+      });
+      const workspaceName = tenantRow?.name ?? 'your workspace';
+      const appUrl = process.env.APP_URL ?? 'http://localhost:5173';
+
+      for (const inv of createdInvites) {
+        try {
+          await emailSvc.send(tenantId, {
+            to:      inv.email,
+            toName:  inv.name,
+            subject: `Your ${workspaceName} CRM account is ready`,
+            bodyHtml: `
+              <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;padding:32px 24px;">
+                <h2 style="color:#111827;">Welcome to ${workspaceName} 👋</h2>
+                <p style="color:#6b7280;line-height:1.6;">
+                  An account has been created for you as <strong>${inv.role}</strong>.
+                  Use the temporary password below to sign in, then change it from your profile.
+                </p>
+                <div style="background:#f3f4f6;border-radius:8px;padding:14px 18px;margin:18px 0;">
+                  <div style="font-size:12px;color:#9ca3af;margin-bottom:4px;">Email</div>
+                  <div style="font-family:monospace;color:#111827;">${inv.email}</div>
+                  <div style="font-size:12px;color:#9ca3af;margin:10px 0 4px;">Temporary password</div>
+                  <div style="font-family:monospace;color:#111827;">${inv.tempPassword}</div>
+                </div>
+                <a href="${appUrl}/login" style="display:inline-block;background:#29ABE2;color:#fff;text-decoration:none;padding:12px 28px;border-radius:8px;font-weight:600;">Sign in</a>
+              </div>
+            `,
+            bodyText: `Welcome to ${workspaceName}.\n\nEmail: ${inv.email}\nTemp password: ${inv.tempPassword}\n\nSign in: ${appUrl}/login`,
+          });
+        } catch {
+          // Email failure does not undo the create — admin can resend manually.
+        }
+      }
+
+      await audit(db, tenantId,
+        { id: req.user.sub, role: req.user.role },
+        { action: 'users_bulk_uploaded', entityType: 'user',
+          newValue: { inserted, failed: errors.length } });
+
+      return reply.send({ success: true, data: { inserted, failed: errors } });
     });
 
     // Remove team member

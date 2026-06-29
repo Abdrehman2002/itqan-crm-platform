@@ -1,9 +1,114 @@
 import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../services/api';
-import { CURRENCIES, DEFAULT_SETTINGS, type SalesSettings, type TaxRate } from './types';
-import { Save, Plus, Trash2, Upload, Mail } from 'lucide-react';
-import { v4 as uuid } from 'uuid';
+import { CURRENCIES, DEFAULT_SETTINGS, type SalesSettings } from './types';
+import { Save, Plus, Trash2, Upload, Mail, Edit2, Check, X, Loader2 } from 'lucide-react';
+
+// ── Tax Rates CRUD (backed by tax_rates table, migration 037) ────────────────
+// Replaces the legacy JSONB blob on sales_settings.tax_rates. Listed in this
+// file under the "Tax Rates" section.
+
+type ApiTaxRate = {
+  id: string;
+  name: string;
+  ratePercent: number;
+  isDefault: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+function TaxRatesSection() {
+  const qc = useQueryClient();
+  const { data: rates = [], isLoading } = useQuery<ApiTaxRate[]>({
+    queryKey: ['tax-rates'],
+    queryFn: () => api.get('/api/v1/sales/tax-rates').then(r => r.data.data ?? []),
+  });
+
+  const [newName, setNewName] = useState('');
+  const [newRate, setNewRate] = useState('');
+  const [newDefault, setNewDefault] = useState(false);
+  const [editId, setEditId] = useState<string | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editRate, setEditRate] = useState('');
+
+  const createMut = useMutation({
+    mutationFn: () => api.post('/api/v1/sales/tax-rates', {
+      name: newName.trim(), ratePercent: Number(newRate), isDefault: newDefault,
+    }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['tax-rates'] });
+      setNewName(''); setNewRate(''); setNewDefault(false);
+    },
+  });
+
+  const patchMut = useMutation({
+    mutationFn: ({ id, body }: { id: string; body: Partial<ApiTaxRate> }) =>
+      api.patch(`/api/v1/sales/tax-rates/${id}`, body),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['tax-rates'] }); setEditId(null); },
+  });
+
+  const deleteMut = useMutation({
+    mutationFn: (id: string) => api.delete(`/api/v1/sales/tax-rates/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['tax-rates'] }),
+  });
+
+  return (
+    <div className="space-y-2 mb-4">
+      {isLoading && <Loader2 className="w-4 h-4 animate-spin text-gray-300" />}
+      {rates.map(t => (
+        <div key={t.id} className="flex items-center gap-3 p-2.5 border border-gray-100 rounded-lg">
+          {editId === t.id ? (
+            <>
+              <input value={editName} onChange={e => setEditName(e.target.value)}
+                className="flex-1 text-sm border border-blue-300 rounded px-2 py-1 outline-none" />
+              <input type="number" value={editRate} onChange={e => setEditRate(e.target.value)}
+                className="w-20 text-sm border border-blue-300 rounded px-2 py-1 outline-none" />
+              <button
+                onClick={() => patchMut.mutate({ id: t.id, body: { name: editName.trim(), ratePercent: Number(editRate) } })}
+                className="p-1 text-blue-600 hover:bg-blue-50 rounded"><Check size={13} /></button>
+              <button onClick={() => setEditId(null)} className="p-1 text-gray-400 hover:bg-gray-50 rounded"><X size={13} /></button>
+            </>
+          ) : (
+            <>
+              <div className="flex-1">
+                <span className="text-sm font-medium text-gray-800">{t.name}</span>
+                <span className="ml-2 text-xs text-gray-400">{t.ratePercent}%</span>
+              </div>
+              {t.isDefault
+                ? <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded">Default</span>
+                : <button onClick={() => patchMut.mutate({ id: t.id, body: { isDefault: true } })}
+                    className="text-xs text-blue-500 hover:text-blue-700">Set Default</button>}
+              <button onClick={() => { setEditId(t.id); setEditName(t.name); setEditRate(String(t.ratePercent)); }}
+                className="text-gray-300 hover:text-blue-500"><Edit2 size={13} /></button>
+              <button onClick={() => { if (confirm(`Delete tax rate "${t.name}"?`)) deleteMut.mutate(t.id); }}
+                className="text-gray-300 hover:text-red-500"><Trash2 size={13} /></button>
+            </>
+          )}
+        </div>
+      ))}
+      <div className="flex gap-2 items-end pt-2">
+        <div className="flex flex-col gap-1 flex-1">
+          <label className="text-xs font-medium text-gray-700">Tax Name</label>
+          <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="e.g. VAT 10%"
+            className="text-sm border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+        </div>
+        <div className="flex flex-col gap-1 w-24">
+          <label className="text-xs font-medium text-gray-700">Rate (%)</label>
+          <input type="number" step="0.001" value={newRate} onChange={e => setNewRate(e.target.value)} placeholder="10"
+            className="text-sm border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+        </div>
+        <label className="flex items-center gap-1.5 text-xs text-gray-600 pb-2 cursor-pointer">
+          <input type="checkbox" checked={newDefault} onChange={e => setNewDefault(e.target.checked)} />
+          Default
+        </label>
+        <button onClick={() => createMut.mutate()} disabled={!newName.trim() || !newRate || createMut.isPending}
+          className="flex items-center gap-1 px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 text-sm text-gray-700 disabled:opacity-50">
+          {createMut.isPending ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />} Add
+        </button>
+      </div>
+    </div>
+  );
+}
 
 const TERMS_OPTIONS = [
   { value: '0', label: 'Due on Receipt' }, { value: '7', label: 'Net 7' },
@@ -19,8 +124,6 @@ export function SalesSettingsPage() {
   });
 
   const [form, setForm] = useState<SalesSettings>(DEFAULT_SETTINGS);
-  const [newTaxName, setNewTaxName] = useState('');
-  const [newTaxRate, setNewTaxRate] = useState('');
   const [saved, setSaved] = useState(false);
 
   useEffect(() => { if (remote) setForm(remote); }, [remote]);
@@ -29,12 +132,6 @@ export function SalesSettingsPage() {
     mutationFn: (body: SalesSettings) => api.put('/api/v1/sales/settings', body),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['sales-settings'] }); setSaved(true); setTimeout(() => setSaved(false), 2000); },
   });
-
-  const addTax = () => {
-    if (!newTaxName || !newTaxRate) return;
-    setForm(f => ({ ...f, taxRates: [...f.taxRates, { id: uuid(), name: newTaxName, rate: Number(newTaxRate), isDefault: false }] }));
-    setNewTaxName(''); setNewTaxRate('');
-  };
 
   const addr = form.companyAddress ?? { line1: '', city: '', state: '', country: '', postalCode: '' };
   const setAddr = (field: string, val: string) => setForm(f => ({ ...f, companyAddress: { ...addr, [field]: val } as any }));
@@ -109,34 +206,10 @@ export function SalesSettingsPage() {
         </div>
       </div>
 
-      {/* Tax Rates */}
+      {/* Tax Rates — backed by tax_rates table via /api/v1/sales/tax-rates CRUD. */}
       <div className="bg-white rounded-xl border border-gray-200 p-5">
         <div className="text-sm font-semibold text-gray-900 mb-4 pb-3 border-b border-gray-100">Tax Rates</div>
-        <div className="space-y-2 mb-4">
-          {form.taxRates.map(t => (
-            <div key={t.id} className="flex items-center gap-3 p-2.5 border border-gray-100 rounded-lg">
-              <div className="flex-1"><span className="text-sm font-medium text-gray-800">{t.name}</span><span className="ml-2 text-xs text-gray-400">{t.rate}%</span></div>
-              {t.isDefault ? <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded">Default</span>
-                : <button onClick={() => setForm(f => ({ ...f, taxRates: f.taxRates.map(r => ({ ...r, isDefault: r.id === t.id })) }))} className="text-xs text-blue-500 hover:text-blue-700">Set Default</button>}
-              <button onClick={() => setForm(f => ({ ...f, taxRates: f.taxRates.filter(r => r.id !== t.id) }))} className="text-gray-300 hover:text-red-500"><Trash2 size={13} /></button>
-            </div>
-          ))}
-        </div>
-        <div className="flex gap-2 items-end">
-          <div className="flex flex-col gap-1 flex-1">
-            <label className="text-xs font-medium text-gray-700">Tax Name</label>
-            <input value={newTaxName} onChange={e => setNewTaxName(e.target.value)} placeholder="e.g. VAT 10%"
-              className="text-sm border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-          </div>
-          <div className="flex flex-col gap-1 w-24">
-            <label className="text-xs font-medium text-gray-700">Rate (%)</label>
-            <input type="number" value={newTaxRate} onChange={e => setNewTaxRate(e.target.value)} placeholder="10"
-              className="text-sm border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-          </div>
-          <button onClick={addTax} className="flex items-center gap-1 px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 text-sm text-gray-700">
-            <Plus size={13} /> Add
-          </button>
-        </div>
+        <TaxRatesSection />
       </div>
 
       {/* Email Config */}

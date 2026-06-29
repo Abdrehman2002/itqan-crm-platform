@@ -5,6 +5,7 @@ import type { EventBus } from '@crm/core';
 import { CRM_EVENTS } from '@crm/core';
 import { requireScope } from '../middlewares/auth.middleware';
 import { getVisibleUserIds, ownerScopeSql } from '../lib/visibility';
+import { readCsvFromRequest, validateRows, type BulkRowError } from '../lib/bulk-csv';
 
 const CreateContactSchema = z.object({
   firstName: z.string().min(1),
@@ -149,7 +150,101 @@ export function contactRoutes(db: DatabaseClient, eventBus: EventBus) {
       return reply.code(201).send({ success: true, data: contact });
     });
 
-    // BULK IMPORT contacts from CSV
+    // BULK UPLOAD contacts from a multipart CSV file.
+    // POST /api/v1/contacts/bulk
+    // multipart field "file" — see packages/api/src/lib/bulk-csv.ts for format.
+    // Expected headers (lower-cased on parse):
+    //   first_name, last_name, email, phone, company_name, nic_number
+    fastify.post('/bulk', { preHandler: requireScope('contacts:write') }, async (req, reply) => {
+      const rawRows = await readCsvFromRequest(req, reply);
+      if (!rawRows) return; // readCsvFromRequest already sent a reply
+
+      const BulkContactRowSchema = z.object({
+        first_name:   z.string().min(1, 'required'),
+        last_name:    z.string().optional().default(''),
+        email:        z.string().email().optional().or(z.literal('')).transform((v) => v || undefined),
+        phone:        z.string().optional().default(''),
+        company_name: z.string().optional().default(''),
+        // Pakistani CNIC: 13 digits, hyphens allowed (e.g. 12345-1234567-1)
+        nic_number:   z
+          .string()
+          .optional()
+          .default('')
+          .refine(
+            (v) => v === '' || /^\d{5}-?\d{7}-?\d{1}$/.test(v.replace(/\s/g, '')),
+            'must be 13 digits (CNIC format: 12345-1234567-1)',
+          ),
+      });
+
+      const { valid, failed } = validateRows(rawRows, BulkContactRowSchema);
+      const errors: BulkRowError[] = [...failed];
+      const tenantId = req.tenant.id;
+      const ownerId  = req.user.sub;
+
+      let inserted = 0;
+
+      if (valid.length > 0) {
+        // Whole batch runs inside one withTenant — db.client wraps it in
+        // BEGIN/COMMIT, so any thrown DB error rolls back the whole upload.
+        // We accumulate per-row errors INSIDE the try/catch to keep going
+        // for benign errors (e.g. duplicate email) without aborting the
+        // transaction — a single rejected row collects its message but
+        // doesn't poison the others, since we use a SAVEPOINT per row.
+        await db.withTenant(tenantId, async (client) => {
+          // Pre-resolve company names → ids (one query, then map lookup).
+          const wantedCompanies = Array.from(
+            new Set(valid.map((v) => v.value.company_name).filter((n): n is string => !!n)),
+          );
+          const companyMap = new Map<string, string>();
+          if (wantedCompanies.length > 0) {
+            const r = await client.query(
+              `SELECT id, lower(name) AS name_lc FROM companies WHERE lower(name) = ANY($1)`,
+              [wantedCompanies.map((n) => n.toLowerCase())],
+            );
+            for (const row of r.rows) companyMap.set(row.name_lc, row.id);
+          }
+
+          for (const { row, value } of valid) {
+            await client.query('SAVEPOINT bulk_row');
+            try {
+              const companyId = value.company_name
+                ? companyMap.get(value.company_name.toLowerCase()) ?? null
+                : null;
+              await client.query(
+                `INSERT INTO contacts
+                   (tenant_id, first_name, last_name, email, phone,
+                    company_id, nic_number, owner_id, status, source)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'lead','bulk_upload')`,
+                [
+                  tenantId,
+                  value.first_name,
+                  value.last_name || null,
+                  value.email || null,
+                  value.phone || null,
+                  companyId,
+                  value.nic_number ? value.nic_number.replace(/\s/g, '') : null,
+                  ownerId,
+                ],
+              );
+              await client.query('RELEASE SAVEPOINT bulk_row');
+              inserted++;
+            } catch (err: any) {
+              await client.query('ROLLBACK TO SAVEPOINT bulk_row');
+              errors.push({ row, errors: [err.message ?? 'insert failed'] });
+            }
+          }
+        });
+      }
+
+      await eventBus.publish(tenantId, CRM_EVENTS.CONTACT_CREATED, {
+        bulk: true, inserted, failed: errors.length,
+      });
+
+      return reply.send({ success: true, data: { inserted, failed: errors } });
+    });
+
+    // BULK IMPORT contacts from CSV (legacy JSON endpoint — used by
+    // ContactImportModal's column-mapping flow).
     // POST /api/v1/contacts/import
     // Body: { rows: Array<Record<string,string>>, mapping: Record<string,string> }
     // mapping maps CSV header → CRM field, e.g. { "Email Address": "email" }

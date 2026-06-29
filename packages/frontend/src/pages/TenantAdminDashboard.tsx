@@ -208,6 +208,12 @@ export function TenantAdminDashboard() {
           </div>
         </div>
 
+        {/* Activity audit log — surfaces the cross-domain admin trail recorded
+            in system_audit_log + ticket_audit_log (UNION endpoint). User asked
+            for "an audit log of all activities done by Tenant admin and sub
+            admins with date / activity / user". */}
+        <AuditActivityPanel />
+
         {/* Recent team members */}
         {members.length > 0 && (
           <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
@@ -238,6 +244,94 @@ export function TenantAdminDashboard() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ── Audit activity panel ──────────────────────────────────────────────────
+// Surfaces the combined ticket_audit_log + system_audit_log feed for the
+// tenant admin. Reads /api/v1/settings/audit-log which UNIONs both.
+interface AuditRow {
+  id: string;
+  action: string;
+  entity_type: string;
+  entity_id: string | null;
+  entity_label: string | null;
+  actor_name: string | null;
+  actor_email: string | null;
+  actor_role: string | null;
+  created_at: string;
+  old_value?: any;
+  new_value?: any;
+}
+
+function AuditActivityPanel() {
+  const navigate = useNavigate();
+  const { data: rows } = useQuery<AuditRow[]>({
+    queryKey: ['audit-log-recent'],
+    queryFn: () => api.get('/api/v1/settings/audit-log?limit=20').then((r) => r.data.data),
+    refetchInterval: 30_000,
+  });
+  const recent = rows ?? [];
+
+  function describe(r: AuditRow): string {
+    const labelPart = r.entity_label ? ` "${r.entity_label}"` : '';
+    const action = r.action.replace(/_/g, ' ');
+    return `${action} ${r.entity_type}${labelPart}`;
+  }
+
+  function timeAgo(iso: string): string {
+    const ms = Date.now() - new Date(iso).getTime();
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return `${s}s ago`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ago`;
+    const d = Math.floor(h / 24);
+    return `${d}d ago`;
+  }
+
+  return (
+    <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <Activity className="w-4 h-4 text-gray-500" />
+          <h2 className="text-sm font-bold text-gray-700 uppercase tracking-wider">Activity Audit Log</h2>
+        </div>
+        <button onClick={() => navigate('/settings?tab=audit')} className="text-xs text-blue-600 hover:underline flex items-center gap-1">
+          View all <ArrowRight className="w-3 h-3" />
+        </button>
+      </div>
+      {recent.length === 0 ? (
+        <p className="text-xs text-gray-400">No activity yet — admin actions like user invites, role changes, and ticket updates will appear here.</p>
+      ) : (
+        <div className="divide-y divide-gray-50">
+          {recent.slice(0, 8).map((r) => (
+            <div key={r.id} className="flex items-start gap-3 py-2.5">
+              <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 text-xs font-bold text-white ${
+                r.entity_type === 'user'       ? 'bg-blue-500' :
+                r.entity_type === 'role'       ? 'bg-violet-500' :
+                r.entity_type === 'department' ? 'bg-amber-500' :
+                r.entity_type === 'ticket'     ? 'bg-emerald-500' :
+                                                 'bg-gray-400'
+              }`}>
+                {(r.actor_name ?? '?').charAt(0).toUpperCase()}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm text-gray-900 leading-snug">
+                  <span className="font-medium">{r.actor_name ?? 'System'}</span>
+                  <span className="text-gray-500"> — {describe(r)}</span>
+                </p>
+                <p className="text-[11px] text-gray-400 mt-0.5">
+                  {timeAgo(r.created_at)} · {new Date(r.created_at).toLocaleString()}
+                  {r.actor_role && <> · <span className="capitalize">{r.actor_role.replace('_', ' ')}</span></>}
+                </p>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

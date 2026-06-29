@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { DatabaseClient, EventBus } from '@crm/core';
 import { requireScope } from '../middlewares/auth.middleware';
+import { readCsvFromRequest, validateRows, type BulkRowError } from '../lib/bulk-csv';
 
 const CreateCompanySchema = z.object({
   name: z.string().min(1),
@@ -125,6 +126,81 @@ export function companyRoutes(db: DatabaseClient, eventBus: EventBus) {
 
       if (!company) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Company not found' } });
       return reply.send({ success: true, data: company });
+    });
+
+    // BULK UPLOAD companies from a multipart CSV file.
+    // POST /api/v1/companies/bulk
+    // Expected headers (lower-cased on parse):
+    //   name, industry, website, phone, email, billing_address_line1,
+    //   billing_address_city, billing_country
+    //
+    // Note: the `companies` table doesn't have address_line1/email columns —
+    // we map billing_address_line1 → custom_fields.address_line1,
+    // billing_address_city → city, billing_country → country, email → custom_fields.email.
+    // This keeps the CSV spec stable across modules even where the table shape differs.
+    fastify.post('/bulk', { preHandler: requireScope('contacts:write') }, async (req, reply) => {
+      const rawRows = await readCsvFromRequest(req, reply);
+      if (!rawRows) return;
+
+      const BulkCompanyRowSchema = z.object({
+        name:                  z.string().min(1, 'required'),
+        industry:              z.string().optional().default(''),
+        website:               z
+          .string()
+          .optional()
+          .default('')
+          .refine((v) => v === '' || /^https?:\/\//i.test(v), 'must start with http:// or https://'),
+        phone:                 z.string().optional().default(''),
+        email:                 z.string().email().optional().or(z.literal('')).transform((v) => v || undefined),
+        billing_address_line1: z.string().optional().default(''),
+        billing_address_city:  z.string().optional().default(''),
+        billing_country:       z.string().optional().default(''),
+      });
+
+      const { valid, failed } = validateRows(rawRows, BulkCompanyRowSchema);
+      const errors: BulkRowError[] = [...failed];
+      const tenantId = req.tenant.id;
+      const ownerId  = req.user.sub;
+
+      let inserted = 0;
+
+      if (valid.length > 0) {
+        await db.withTenant(tenantId, async (client) => {
+          for (const { row, value } of valid) {
+            await client.query('SAVEPOINT bulk_row');
+            try {
+              const customFields: Record<string, string> = {};
+              if (value.billing_address_line1) customFields.address_line1 = value.billing_address_line1;
+              if (value.email)                 customFields.email         = value.email;
+
+              await client.query(
+                `INSERT INTO companies
+                   (tenant_id, name, industry, website, phone,
+                    city, country, owner_id, custom_fields)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)`,
+                [
+                  tenantId,
+                  value.name,
+                  value.industry || null,
+                  value.website  || null,
+                  value.phone    || null,
+                  value.billing_address_city || null,
+                  value.billing_country      || null,
+                  ownerId,
+                  JSON.stringify(customFields),
+                ],
+              );
+              await client.query('RELEASE SAVEPOINT bulk_row');
+              inserted++;
+            } catch (err: any) {
+              await client.query('ROLLBACK TO SAVEPOINT bulk_row');
+              errors.push({ row, errors: [err.message ?? 'insert failed'] });
+            }
+          }
+        });
+      }
+
+      return reply.send({ success: true, data: { inserted, failed: errors } });
     });
 
     fastify.delete('/:id', { preHandler: requireScope('contacts:write') }, async (req, reply) => {

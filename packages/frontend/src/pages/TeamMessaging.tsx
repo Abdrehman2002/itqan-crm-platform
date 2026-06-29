@@ -184,6 +184,45 @@ export function TeamMessaging() {
     queryFn: () => api.get('/api/v1/messages/team-members').then((r) => r.data.data),
   });
 
+  // Per-peer DM summary so we can show an "unread" badge next to each user
+  // in the contact list. User reported (2026-06-29): "sent from tenant admin
+  // to Omar but Omar didn't see it" — there was no UI cue. Now: poll every
+  // 10s, and if the most recent message in a thread came FROM that peer AND
+  // its timestamp is newer than what we stored locally for "last seen this
+  // thread", show a small badge with the count.
+  interface DmSummaryRow {
+    peer_id: string;
+    last_at: string | null;
+    recent_from_peer: string;       // count as string from COUNT(*)
+    last_content: string | null;
+    last_sender_name: string | null;
+    last_sender_id: string | null;
+  }
+  const { data: dmSummary } = useQuery<DmSummaryRow[]>({
+    queryKey: ['dm-summary'],
+    queryFn: () => api.get('/api/v1/messages/dm-summary').then((r) => r.data.data),
+    refetchInterval: 10_000,
+  });
+
+  const dmSummaryByPeer = new Map<string, DmSummaryRow>(
+    (dmSummary ?? []).map((r) => [r.peer_id, r]),
+  );
+
+  // Per-peer "last seen" tracked in localStorage (key = peerId). When the
+  // user opens a DM thread, stamp it; the badge math compares last_at > seen.
+  const SEEN_KEY = (peerId: string) => `dm-seen:${peerId}`;
+  function markPeerSeen(peerId: string) {
+    try { localStorage.setItem(SEEN_KEY(peerId), new Date().toISOString()); } catch {}
+  }
+  function unreadFromPeer(peerId: string): number {
+    const row = dmSummaryByPeer.get(peerId);
+    if (!row || !row.last_at || row.last_sender_id !== peerId) return 0;
+    let seenAt = 0;
+    try { seenAt = Date.parse(localStorage.getItem(SEEN_KEY(peerId)) ?? '') || 0; } catch {}
+    return Date.parse(row.last_at) > seenAt ? parseInt(row.recent_from_peer || '0', 10) : 0;
+  }
+  const [unreadOnly, setUnreadOnly] = useState(false);
+
   const messagesKey = view.type === 'channel'
     ? ['channel-messages', view.name]
     : ['dm-messages', view.userId];
@@ -198,7 +237,11 @@ export function TeamMessaging() {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+    // When a DM thread is open and we receive new messages from the peer, mark
+    // the thread as seen so the badge clears (otherwise the badge stays even
+    // though the user is literally looking at the message).
+    if (view.type === 'dm') markPeerSeen(view.userId);
+  }, [messages, view]);
 
   const sendMutation = useMutation({
     mutationFn: (content: string) => view.type === 'channel'
@@ -218,8 +261,10 @@ export function TeamMessaging() {
 
   const filteredMembers = (members ?? []).filter((m) =>
     m.id !== myId &&
-    `${m.name} ${m.email}`.toLowerCase().includes(memberSearch.toLowerCase())
+    `${m.name} ${m.email}`.toLowerCase().includes(memberSearch.toLowerCase()) &&
+    (!unreadOnly || unreadFromPeer(m.id) > 0)
   );
+  const totalUnread = (members ?? []).reduce((acc, m) => acc + (m.id === myId ? 0 : unreadFromPeer(m.id)), 0);
 
   const currentTitle = view.type === 'channel' ? `#${view.name}` : view.userName;
 
@@ -266,29 +311,56 @@ export function TeamMessaging() {
 
         {/* Direct Messages */}
         <div className="px-3 pt-4 flex-1 overflow-y-auto">
-          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2 px-1">Direct Messages</p>
-          <div className="mb-2">
+          <div className="flex items-center justify-between mb-2 px-1">
+            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Direct Messages</p>
+            {totalUnread > 0 && (
+              <span className="bg-red-500 text-white text-[10px] font-bold rounded-full px-1.5 py-px min-w-[1rem] text-center">
+                {totalUnread > 99 ? '99+' : totalUnread}
+              </span>
+            )}
+          </div>
+          <div className="mb-2 space-y-1.5">
             <input value={memberSearch} onChange={(e) => setMemberSearch(e.target.value)}
               placeholder="Search teammates..."
               className="w-full px-2 py-1.5 text-xs bg-slate-700 text-white rounded-lg outline-none placeholder-slate-500 border border-slate-600 focus:border-brand-400" />
+            <label className="flex items-center gap-1.5 text-[10px] text-slate-400 cursor-pointer hover:text-slate-300 px-1">
+              <input type="checkbox" checked={unreadOnly} onChange={(e) => setUnreadOnly(e.target.checked)}
+                className="w-3 h-3 accent-brand-500" />
+              Only show unread
+            </label>
           </div>
           <div className="space-y-0.5">
-            {filteredMembers.map((m) => (
-              <button key={m.id}
-                onClick={() => setView({ type: 'dm', userId: m.id, userName: m.name })}
-                className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs transition-colors text-left ${
-                  view.type === 'dm' && view.userId === m.id
-                    ? 'bg-brand-600/30 text-white font-medium'
-                    : 'text-slate-400 hover:text-white hover:bg-slate-700'
-                }`}>
-                <div className="w-5 h-5 rounded-full bg-slate-600 flex items-center justify-center shrink-0 text-[10px] font-bold text-white">
-                  {(m.name ?? '?').charAt(0)}
-                </div>
-                <span className="truncate">{m.name}</span>
-              </button>
-            ))}
-            {filteredMembers.length === 0 && memberSearch && (
-              <p className="text-xs text-slate-500 px-2 py-2">No teammates found</p>
+            {filteredMembers.map((m) => {
+              const unread = unreadFromPeer(m.id);
+              const isActive = view.type === 'dm' && view.userId === m.id;
+              return (
+                <button key={m.id}
+                  onClick={() => { markPeerSeen(m.id); setView({ type: 'dm', userId: m.id, userName: m.name }); }}
+                  className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs transition-colors text-left ${
+                    isActive
+                      ? 'bg-brand-600/30 text-white font-medium'
+                      : unread > 0
+                        ? 'text-white font-medium hover:bg-slate-700'
+                        : 'text-slate-400 hover:text-white hover:bg-slate-700'
+                  }`}>
+                  <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 text-[10px] font-bold text-white ${
+                    unread > 0 && !isActive ? 'bg-brand-500' : 'bg-slate-600'
+                  }`}>
+                    {(m.name ?? '?').charAt(0)}
+                  </div>
+                  <span className="truncate flex-1">{m.name}</span>
+                  {unread > 0 && !isActive && (
+                    <span className="bg-red-500 text-white text-[9px] font-bold rounded-full px-1.5 py-px min-w-[0.9rem] text-center shrink-0">
+                      {unread > 99 ? '99+' : unread}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+            {filteredMembers.length === 0 && (memberSearch || unreadOnly) && (
+              <p className="text-xs text-slate-500 px-2 py-2">
+                {unreadOnly ? 'No unread messages' : 'No teammates found'}
+              </p>
             )}
           </div>
         </div>

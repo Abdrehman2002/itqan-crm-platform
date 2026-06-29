@@ -39,8 +39,10 @@ import { notificationRoutes } from './routes/notifications';
 import { emailRoutes } from './routes/emails';
 import { voiceBotRoutes } from './routes/voice-bot';
 import { invoiceRoutes } from './routes/sales/invoices';
+import { invoicePdfRoutes } from './routes/sales/invoice-pdf';
 import { billingContactRoutes } from './routes/sales/billing-contacts';
 import { salesSettingsRoutes } from './routes/sales/sales-settings';
+import { taxRatesRoutes } from './routes/sales/tax-rates';
 import { salesDashboardRoutes } from './routes/sales/sales-dashboard';
 import { invoiceTemplateRoutes } from './routes/sales/invoice-templates';
 import { sectorRoutes } from './routes/sector';
@@ -343,8 +345,10 @@ async function buildServer() {
   await fastify.register(rolesRoutes(db), { prefix: '/api/v1/roles' });
   // Sales & Invoicing module routes
   await fastify.register(invoiceRoutes(db),        { prefix: '/api/v1/sales/invoices' });
+  await fastify.register(invoicePdfRoutes(db),     { prefix: '/api/v1/sales/invoices' });
   await fastify.register(billingContactRoutes(db), { prefix: '/api/v1/sales/billing-contacts' });
   await fastify.register(salesSettingsRoutes(db),      { prefix: '/api/v1/sales/settings' });
+  await fastify.register(taxRatesRoutes(db),           { prefix: '/api/v1/sales/tax-rates' });
   await fastify.register(salesDashboardRoutes(db),     { prefix: '/api/v1/sales/dashboard' });
   await fastify.register(invoiceTemplateRoutes(db),    { prefix: '/api/v1/sales/templates' });
   await fastify.register(sectorRoutes(db),         { prefix: '/api/v1/sector' });

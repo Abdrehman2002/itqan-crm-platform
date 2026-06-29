@@ -2,7 +2,8 @@ import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../services/api';
-import { formatCurrency, getStatusColor, DEFAULT_SETTINGS, INVOICE_TEMPLATES, type Invoice, type SalesSettings } from './types';
+import { formatCurrency, getInvoiceLayout, DEFAULT_SETTINGS, type Invoice, type SalesSettings } from './types';
+import { InvoiceLayoutView } from './InvoiceLayouts';
 import { Mail, Download, Plus, CheckCircle2, ChevronLeft } from 'lucide-react';
 
 export function InvoiceDetail() {
@@ -66,11 +67,15 @@ export function InvoiceDetail() {
   const modeOpts = s.paymentModes.map(m => ({ value: m.id, label: m.name }));
   const bankOpts = s.bankAccounts.map(b => ({ value: b.id, label: `${b.bankName} — ${b.accountName}` }));
 
-  // Resolve the preset template the invoice was saved with so its accent
-  // colour actually shows up — previously every invoice rendered with the
-  // hardcoded blue tile/number regardless of templateId.
-  const tplPreset = INVOICE_TEMPLATES.find(t => t.id === inv.templateId);
-  const accent = tplPreset?.accentColor ?? '#2563eb';
+  // Resolve the preset template the invoice was saved with — pick both the
+  // accent colour AND the visual layout (classic / minimal / consulting). The
+  // SWEEP-3 fix used to only apply accentColor; now layout swaps too.
+  const { layout, accentColor: accent } = getInvoiceLayout(inv.templateId);
+
+  const downloadPdf = () => {
+    const apiBase = (import.meta as any).env?.VITE_API_URL || '';
+    window.open(`${apiBase}/api/v1/sales/invoices/${inv.id}/pdf`, '_blank');
+  };
 
   return (
     <div className="p-6 max-w-4xl mx-auto space-y-5">
@@ -88,8 +93,9 @@ export function InvoiceDetail() {
             className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-700">
             <Mail size={14} /> {emailSent ? 'Sent!' : 'Email Invoice'}
           </button>
-          <button className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-700">
-            <Download size={14} /> PDF
+          <button onClick={downloadPdf}
+            className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-700">
+            <Download size={14} /> Export as PDF
           </button>
           {inv.amountDue > 0 && (
             <button onClick={() => setShowPayForm(true)}
@@ -100,80 +106,8 @@ export function InvoiceDetail() {
         </div>
       </div>
 
-      {/* Invoice Card */}
-      <div className="bg-white rounded-xl border border-gray-200 p-8">
-        <div className="flex justify-between items-start mb-8">
-          <div>
-            <div
-              className="w-14 h-14 rounded-xl flex items-center justify-center text-white font-bold text-xl mb-3"
-              style={{ backgroundColor: accent }}
-            >
-              {inv.contactName?.[0] ?? '?'}
-            </div>
-            <div className="text-xl font-bold text-gray-900">INVOICE</div>
-            <div className="text-3xl font-black mt-1" style={{ color: accent }}>{inv.number}</div>
-          </div>
-          <div className="text-right space-y-1">
-            <div className="text-sm text-gray-500">Issue: <span className="text-gray-900 font-medium">{new Date(inv.issueDate).toLocaleDateString()}</span></div>
-            <div className="text-sm text-gray-500">Due: <span className="text-gray-900 font-medium">{new Date(inv.dueDate).toLocaleDateString()}</span></div>
-            {inv.poReference && <div className="text-sm text-gray-500">PO: <span className="text-gray-900 font-medium">{inv.poReference}</span></div>}
-            <div className="mt-2">
-              <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${getStatusColor(inv.status)}`}>{inv.status}</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="mb-8">
-          <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Billed To</div>
-          <div className="font-semibold text-gray-900">{inv.contactName}</div>
-          <div className="text-sm text-gray-500">{inv.contactCompany}</div>
-          <div className="text-sm text-gray-500">{inv.contactEmail}</div>
-          {inv.contactBillingAddress && (
-            <div className="text-sm text-gray-500">{inv.contactBillingAddress.line1}, {inv.contactBillingAddress.city}, {inv.contactBillingAddress.country}</div>
-          )}
-        </div>
-
-        <table className="w-full text-sm mb-6">
-          <thead>
-            <tr className="bg-gray-900 text-white">
-              <th className="text-left px-4 py-2.5 rounded-l-lg text-xs">Description</th>
-              <th className="text-center px-4 py-2.5 text-xs">Qty</th>
-              <th className="text-right px-4 py-2.5 text-xs">Unit Price</th>
-              <th className="text-right px-4 py-2.5 text-xs">Tax</th>
-              <th className="text-right px-4 py-2.5 rounded-r-lg text-xs">Total</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(inv.lineItems ?? []).map((li: any) => (
-              <tr key={li.id} className="border-b border-gray-100">
-                <td className="px-4 py-3 text-gray-800">{li.description}</td>
-                <td className="px-4 py-3 text-center text-gray-600">{li.quantity}</td>
-                <td className="px-4 py-3 text-right text-gray-600">{formatCurrency(li.unit_price ?? li.unitPrice, inv.currency)}</td>
-                <td className="px-4 py-3 text-right text-gray-600">{formatCurrency(li.tax_amount ?? li.taxAmount, inv.currency)}</td>
-                <td className="px-4 py-3 text-right font-medium text-gray-900">{formatCurrency(li.total, inv.currency)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-
-        <div className="flex justify-end">
-          <div className="w-64 space-y-2 text-sm">
-            <div className="flex justify-between text-gray-600"><span>Subtotal</span><span>{formatCurrency(inv.subtotal, inv.currency)}</span></div>
-            <div className="flex justify-between text-gray-600"><span>Tax</span><span>{formatCurrency(inv.totalTax, inv.currency)}</span></div>
-            <div className="flex justify-between font-bold text-gray-900 text-base border-t border-gray-200 pt-2">
-              <span>Total</span><span>{formatCurrency(inv.total, inv.currency)}</span>
-            </div>
-            {inv.amountPaid > 0 && <div className="flex justify-between text-green-600"><span>Paid</span><span>-{formatCurrency(inv.amountPaid, inv.currency)}</span></div>}
-            {inv.amountDue > 0 && (
-              <div className="flex justify-between font-bold text-red-600 text-base border-t border-gray-200 pt-2">
-                <span>Balance Due</span><span>{formatCurrency(inv.amountDue, inv.currency)}</span>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {inv.notes && <div className="mt-6 text-sm text-gray-500"><div className="font-semibold text-gray-700 mb-1">Notes</div><p>{inv.notes}</p></div>}
-      </div>
+      {/* Invoice Card — layout swaps based on the saved template (classic / minimal / consulting) */}
+      <InvoiceLayoutView layout={layout} inv={inv} accent={accent} settings={s} />
 
       {/* Payment History */}
       {(inv.payments ?? []).length > 0 && (

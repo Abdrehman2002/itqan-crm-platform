@@ -606,8 +606,13 @@ function AppLayout() {
           <Route path="/billing"     element={op(<Billing />)} />
           <Route path="/integrations" element={<Integrations />} />
           <Route path="/settings"          element={<Settings />} />
+          {/* Sub-tabs (general/profile/appearance/notifications/tags/password) render
+              inside the unified Settings page; URL pattern preserved per spec. */}
+          <Route path="/settings/:tab"     element={<Settings />} />
+          {/* Legacy aliases — keep the old PersonalSettings page reachable for any
+              deep links or in-app references while the new unified Settings is the canonical UI. */}
           <Route path="/settings/personal" element={<PersonalSettings />} />
-          <Route path="/settings/notifications" element={<AdminPageWrapper title="Notifications" subtitle="Control which alerts and emails you receive"><NotificationsPage /></AdminPageWrapper>} />
+          <Route path="/settings/notifications-legacy" element={<AdminPageWrapper title="Notifications" subtitle="Control which alerts and emails you receive"><NotificationsPage /></AdminPageWrapper>} />
           <Route path="/departments"       element={<Departments />} />
           <Route path="/roles"        element={<RolesPage />} />
           <Route path="/super-admin" element={<SuperAdmin />} />
