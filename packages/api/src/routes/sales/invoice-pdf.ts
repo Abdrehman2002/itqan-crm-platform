@@ -291,6 +291,10 @@ export function invoicePdfRoutes(db: DatabaseClient) {
       const { id } = req.params as { id: string };
       const tenantId = req.tenant.id;
 
+      // BUG-AB (2026-06-29) — the original query referenced a `workspace_settings`
+      // table that doesn't exist in this schema. Workspace name comes from the
+      // `tenants` table directly. The redundant invoice_payments subquery is also
+      // dropped since `invoices.amount_paid` is already maintained on the row.
       const [inv] = await db.withTenant(tenantId, (client) =>
         client.query(
           `SELECT i.*,
@@ -298,20 +302,20 @@ export function invoicePdfRoutes(db: DatabaseClient) {
                   bc.email   AS contact_email,
                   bc.company AS contact_company,
                   bc.billing_address AS contact_billing_address,
-                  ws.name    AS workspace_name,
-                  ws.email   AS workspace_email,
-                  ws.address AS workspace_address,
-                  COALESCE(p.total_paid, 0) AS amount_paid
+                  t.name     AS workspace_name,
+                  t.settings AS workspace_settings_json
            FROM invoices i
            LEFT JOIN billing_contacts bc ON bc.id = i.billing_contact_id
-           LEFT JOIN workspace_settings ws ON ws.tenant_id = $1
-           LEFT JOIN (SELECT invoice_id, SUM(amount) AS total_paid FROM invoice_payments GROUP BY invoice_id) p
-                  ON p.invoice_id = i.id
+           LEFT JOIN tenants          t  ON t.id  = i.tenant_id
            WHERE i.tenant_id = $1 AND i.id = $2`,
           [tenantId, id],
         ).then(r => r.rows),
       );
       if (!inv) return reply.status(404).send({ success: false, error: 'Invoice not found' });
+      // Pull optional contact fields out of the workspace settings JSONB if present.
+      const wsSettings: any = inv.workspace_settings_json ?? {};
+      inv.workspace_email   = wsSettings.contactEmail   ?? wsSettings.email   ?? null;
+      inv.workspace_address = wsSettings.contactAddress ?? wsSettings.address ?? null;
 
       const lineItems = await db.withTenant(tenantId, (client) =>
         client.query(`SELECT * FROM invoice_line_items WHERE invoice_id = $1 ORDER BY sort_order`, [id]).then(r => r.rows),
