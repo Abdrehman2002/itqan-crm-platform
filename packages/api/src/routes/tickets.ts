@@ -55,6 +55,10 @@ const CreateTicketSchema = z.object({
   ticketType:        z.enum(['complaint','inquiry','sales']).default('complaint'),
   tags:              z.array(z.string()).optional(),
   customFields:  z.record(z.unknown()).optional(),
+  // A5 — when an agent creates a ticket from their dashboard, the frontend
+  // sets autoAccept=true so the backend skips the "open → assigned → accepted"
+  // dance: status becomes 'accepted' immediately and the creator is the assignee.
+  autoAccept:    z.boolean().optional(),
 });
 
 const UpdateTicketSchema = z.object({
@@ -875,27 +879,51 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
       const sla        = await findSlaPolicy(db, tenantId, body.slaPolicyId, body.priority);
 
       const [ticket] = await db.withTenant(tenantId, async (client) => {
-        // Auto-assign to default queue if none given
+        // A4 — if an agent creates this ticket and didn't (couldn't) pick a
+        // queue, route to their department's queue. Falls back to the
+        // workspace default.
         let queueId = body.queueId;
+        if (!queueId && body.autoAccept) {
+          const dept = (req as any).user?.department as string | undefined;
+          if (dept) {
+            const qr = await client.query(
+              `SELECT id FROM ticket_queues WHERE LOWER(name) = LOWER($1) LIMIT 1`,
+              [dept],
+            );
+            queueId = qr.rows[0]?.id;
+          }
+        }
         if (!queueId) {
           const qr = await client.query('SELECT id FROM ticket_queues WHERE is_default = true LIMIT 1');
           queueId = qr.rows[0]?.id;
         }
 
-        const status = body.assigneeId ? 'assigned' : 'open';
+        // A5 — agent self-create → status='accepted' + assignee=themselves
+        // in the same INSERT. Skip the "open → assigned → accepted" dance the
+        // user would otherwise have to walk through.
+        let assigneeId = body.assigneeId ?? null;
+        let status: string;
+        if (body.autoAccept) {
+          assigneeId = req.user.sub;
+          status     = 'accepted';
+        } else {
+          status = assigneeId ? 'assigned' : 'open';
+        }
+
+        const acceptedAtFrag = body.autoAccept ? ', NOW()' : ', NULL';
         const r = await client.query(
           `INSERT INTO tickets
              (tenant_id, ticket_number, subject, description, status, priority, channel,
               queue_id, sla_policy_id, contact_id, company_id, assignee_id,
               reporter_email, reporter_name, reporter_phone, reporter_whatsapp,
-              preferred_channel, ticket_type, tags, custom_fields)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+              preferred_channel, ticket_type, tags, custom_fields, accepted_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20${acceptedAtFrag})
            RETURNING *`,
           [tenantId, ticketNum, body.subject, body.description ?? null,
            status, body.priority, body.channel,
            queueId ?? null, sla?.id ?? null,
            body.contactId ?? null, body.companyId ?? null,
-           body.assigneeId ?? null,
+           assigneeId,
            body.reporterEmail ?? null, body.reporterName ?? null, body.reporterPhone ?? null,
             body.reporterWhatsapp ?? null, body.preferredChannel ?? 'email',
             body.ticketType ?? 'complaint',

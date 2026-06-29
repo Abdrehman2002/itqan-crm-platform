@@ -1156,15 +1156,17 @@ export function Dashboard() {
       ]
     : isManager
     ? [
-        { label: 'New Ticket',  to: '/tickets',            icon: Ticket,      color: C.orange },
+        // A1 fix — was '/tickets' (list); now opens the create modal directly.
+        { label: 'New Ticket',  to: '/tickets?create=1',   icon: Ticket,      color: C.orange },
         { label: 'Voice Calls', to: '/voice',              icon: PhoneCall,   color: C.cyan   },
         { label: 'Bot Calls',   to: '/voice-bot',          icon: Bot,         color: C.purple },
         { label: 'Reports',     to: '/sales/reports',      icon: BarChart2,   color: C.gold   },
       ]
     : [
-        { label: 'New Ticket',  to: '/tickets',            icon: Ticket,      color: C.orange },
+        // A1 fix + A3 fix — Bot Calls removed (agents don't manage the bot;
+        // they only handle tickets/calls/invoices that the bot creates).
+        { label: 'New Ticket',  to: '/tickets?create=1',   icon: Ticket,      color: C.orange },
         { label: 'Voice Calls', to: '/voice',              icon: PhoneCall,   color: C.cyan   },
-        { label: 'Bot Calls',   to: '/voice-bot',          icon: Bot,         color: C.purple },
         { label: 'New Invoice', to: '/sales/invoices/new', icon: TrendingUp,  color: C.green  },
       ];
 

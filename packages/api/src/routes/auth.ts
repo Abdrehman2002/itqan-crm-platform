@@ -246,15 +246,19 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
         });
       }
 
-      // BUG-M: super_admin path pre-loaded user in the same JOIN as the tenant
-      // to save a DB round-trip and let slug-less login work. Skip this second
-      // lookup when we already have the user object.
+      // BUG-M: super_admin path pre-loaded user in the same JOIN as the tenant.
+      // BUG-T: was filtering `is_active = true` here, so an inactive user looked
+      // identical to "wrong password" — which fed the failure counter and locked
+      // them out after 5 retries. ("endless rotating spinner" reported on Sara's
+      // account.) Drop the is_active filter from the SELECT, check it AFTER the
+      // password validates so the message we surface matches reality. The
+      // password-correct-but-inactive case skips the failure counter entirely.
       const [user] = preloadedUser ? [preloadedUser] : await db.withSuperAdmin(async (client) => {
         const result = await client.query(
           `SELECT u.*, r.name as role_name, r.color as role_color, r.permissions as role_permissions
            FROM users u
            LEFT JOIN roles r ON u.custom_role_id = r.id
-           WHERE u.tenant_id = $1 AND u.email = $2 AND u.is_active = true`,
+           WHERE u.tenant_id = $1 AND u.email = $2 AND u.deleted_at IS NULL`,
           [tenant.id, body.email],
         );
         return result.rows;
@@ -266,6 +270,20 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
       const dummyHash = '$2b$14$invalidhashfortimingattackprevention0000000000000000000';
       const hashToCheck = user?.password_hash ?? dummyHash;
       const valid = await bcrypt.compare(body.password, hashToCheck);
+
+      // BUG-T — credentials VALID but user is_active=false: tell them clearly
+      // instead of treating it as a wrong-password attempt. Don't bump the
+      // failure counter (they DID type the right password — they shouldn't
+      // get locked out for an admin-side state change).
+      if (user && valid && user.is_active === false) {
+        return reply.code(403).send({
+          success: false,
+          error: {
+            code: 'ACCOUNT_INACTIVE',
+            message: 'This account has been deactivated. Please contact your workspace admin to reactivate it.',
+          },
+        });
+      }
 
       if (!user || !user.password_hash || !valid) {
         // Increment failure counter with 30-minute sliding window

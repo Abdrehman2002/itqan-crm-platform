@@ -24,7 +24,9 @@
  */
 
 import { useState, useMemo, useRef, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useAuthStore } from '../store/auth.store';
 import {
   Plus, Search, Clock, CheckCircle, AlertTriangle,
   User, Loader2, X, Send, Lock, MessageSquare,
@@ -394,6 +396,11 @@ function TicketCard({
 // ── Create ticket modal ────────────────────────────────────────────────────
 function CreateTicketModal({ queues, onClose }: { queues: Queue[]; onClose: () => void }) {
   const qc = useQueryClient();
+  const { user } = useAuthStore();
+  // A4 — agents (sales / support) don't route — the queue is decided by their
+  // department + smart matching on the backend. Managers + tenant_admin keep
+  // the queue picker so they can move a ticket to a specific queue.
+  const isAgent = user?.role === 'agent';
   const [form, setForm] = useState({
     subject: '', description: '', priority: 'medium',
     queueId: '', reporterName: '', reporterEmail: '', reporterPhone: '',
@@ -406,7 +413,13 @@ function CreateTicketModal({ queues, onClose }: { queues: Queue[]; onClose: () =
       description:   form.description || undefined,
       priority:      form.priority,
       channel:       'manual',
-      queueId:       form.queueId       || undefined,
+      // A5 — agents auto-accept tickets they create themselves. The backend
+      // sees autoAccept=true + the JWT user.sub and sets status='accepted' +
+      // assignee_id=req.user.sub in the same INSERT, so the agent doesn't
+      // see an "accept this ticket" prompt for one they just typed in.
+      autoAccept:    isAgent ? true : undefined,
+      // A4 — never let an agent's payload set queueId.
+      queueId:       isAgent ? undefined : (form.queueId || undefined),
       reporterName:     form.reporterName     || undefined,
       reporterEmail:    form.reporterEmail    || undefined,
       reporterPhone:     form.reporterPhone     || undefined,
@@ -483,8 +496,8 @@ function CreateTicketModal({ queues, onClose }: { queues: Queue[]; onClose: () =
               className="w-full bg-white border border-gray-200 text-gray-900 placeholder-gray-400 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-brand-500/60 resize-none" />
           </div>
 
-          {/* Priority + Queue */}
-          <div className="grid grid-cols-2 gap-3">
+          {/* Priority + Queue (agents skip the queue picker — auto-routed) */}
+          <div className={isAgent ? '' : 'grid grid-cols-2 gap-3'}>
             <div>
               <p className="text-xs font-medium text-gray-400 mb-1.5">Priority</p>
               <div className="flex gap-1.5 flex-wrap">
@@ -498,15 +511,22 @@ function CreateTicketModal({ queues, onClose }: { queues: Queue[]; onClose: () =
                 ))}
               </div>
             </div>
-            <div>
-              <p className="text-xs font-medium text-gray-400 mb-1.5">Queue</p>
-              <select value={form.queueId} onChange={set('queueId')}
-                className="w-full bg-white border border-gray-200 text-gray-700 rounded-xl px-3 py-2 text-sm outline-none focus:border-brand-500/60">
-                <option value="">Default queue</option>
-                {queues.map(q => <option key={q.id} value={q.id}>{q.name}</option>)}
-              </select>
-            </div>
+            {!isAgent && (
+              <div>
+                <p className="text-xs font-medium text-gray-400 mb-1.5">Queue</p>
+                <select value={form.queueId} onChange={set('queueId')}
+                  className="w-full bg-white border border-gray-200 text-gray-700 rounded-xl px-3 py-2 text-sm outline-none focus:border-brand-500/60">
+                  <option value="">Default queue</option>
+                  {queues.map(q => <option key={q.id} value={q.id}>{q.name}</option>)}
+                </select>
+              </div>
+            )}
           </div>
+          {isAgent && (
+            <p className="text-[11px] text-gray-400 italic">
+              The ticket is auto-routed to your department's queue and assigned to you immediately.
+            </p>
+          )}
         </div>
 
         <div className="px-6 pb-5 flex gap-2">
@@ -1082,8 +1102,18 @@ export function Tickets() {
   const [tab, setTab]           = useState<Tab>('all');
   const [search, setSearch]     = useState('');
   const [priority, setPriority] = useState('');
-  const [showCreate, setCreate] = useState(false);
+  // A1 fix — honour ?create=1 from the Dashboard "New Ticket" quick action so
+  // the create modal opens immediately instead of dumping the user on the list.
+  const [search$, setSearch$]   = useSearchParams();
+  const [showCreate, setCreate] = useState(search$.get('create') === '1');
   const [selectedId, setSelect] = useState<string | null>(null);
+  useEffect(() => {
+    if (search$.get('create') === '1') {
+      const next = new URLSearchParams(search$); next.delete('create');
+      setSearch$(next, { replace: true });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Derive API params
   const params = useMemo(() => {

@@ -270,19 +270,8 @@ export function LoginPage() {
               </button>
             </form>
 
-            {/* Divider + register */}
-            <div className="mt-6 pt-6 border-t text-center" style={{ borderColor: 'rgba(255,255,255,0.08)' }}>
-              <p className="text-sm text-white/40">
-                Don't have an account?{' '}
-                <Link
-                  to="/register"
-                  className="font-semibold transition-colors hover:opacity-80"
-                  style={{ color: '#F5C518' }}
-                >
-                  Start free trial →
-                </Link>
-              </p>
-            </div>
+            {/* Self-service "Start free trial" CTA removed — workspaces are
+                provisioned by the platform admin, not via self-signup. */}
           </div>
 
           {/* Footer note */}
