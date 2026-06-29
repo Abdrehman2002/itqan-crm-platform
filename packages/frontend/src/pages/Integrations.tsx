@@ -232,7 +232,7 @@ function ExternalApiCard() {
           <p className="text-sm font-semibold text-gray-900">Using your own CRM or Call Centre?</p>
           <p className="text-xs text-gray-500 mt-1 leading-relaxed">
             If your organisation already has an existing CRM, call centre solution, or any third-party platform,
-            you can push tickets, contacts, and events into Vivid CRM using our REST API or inbound webhooks.
+            you can push tickets, contacts, and events into AmanaCX using our REST API or inbound webhooks.
             All preferred channel settings (Email, SMS, WhatsApp) apply to all tickets regardless of source.
           </p>
           <div className="flex flex-wrap gap-2 mt-3">
@@ -419,8 +419,8 @@ export function Integrations() {
             <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 text-sm text-blue-700">
               <p className="font-medium mb-1">Inbound & Outbound Webhooks</p>
               <p className="text-xs leading-relaxed">
-                Outbound webhooks fire when events happen in Vivid CRM — your external CRM or call centre receives them in real time.
-                For inbound (pushing data into Vivid), use the REST API with an API Key.
+                Outbound webhooks fire when events happen in AmanaCX — your external CRM or call centre receives them in real time.
+                For inbound (pushing data into AmanaCX), use the REST API with an API Key.
               </p>
             </div>
             <div className="flex items-center justify-between">

@@ -70,7 +70,7 @@ function rowToInvoice(row: Record<string, any>) {
 
   return {
     id: row.id,
-    number: row.invoice_number,
+    number: row.number ?? row.invoice_number,
     status,
     billingContactId: row.billing_contact_id,
     contactName: row.contact_name ?? row.client_name,
@@ -83,7 +83,7 @@ function rowToInvoice(row: Record<string, any>) {
     currency: row.currency,
     templateId: row.template_id,
     subtotal: Number(row.subtotal),
-    totalTax: Number(row.tax),
+    totalTax: Number(row.total_tax ?? row.tax ?? 0),
     total,
     amountPaid,
     amountDue: amountDue > 0 ? amountDue : 0,
@@ -208,14 +208,18 @@ export function invoiceRoutes(db: DatabaseClient) {
       }
 
       const [inv] = await db.withTenant(tenantId, async (client) => {
+        // Column names must match migration 008_sales_invoicing.sql:
+        //   number, due_date, total_tax  (NOT invoice_number/due_at/tax)
+        // status CHECK only permits draft|sent|viewed|partial|paid|overdue|cancelled
+        // (so 'open' would violate the constraint and surface as "Unexpected Error").
         const insertResult = await client.query(
-          `INSERT INTO invoices (tenant_id, invoice_number, status, billing_contact_id, issue_date, due_at, due_date,
-            currency, po_reference, template_id, subtotal, tax, total, provider, notes, terms)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
-          [tenantId, invoiceNumber, body.status === 'draft' ? 'open' : body.status,
+          `INSERT INTO invoices (tenant_id, number, status, billing_contact_id, issue_date, due_date,
+            currency, po_reference, template_id, subtotal, total_tax, total, notes, terms)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+          [tenantId, invoiceNumber, body.status,
            resolvedContactId,
-           body.issueDate, body.dueDate, body.dueDate, body.currency, body.poReference ?? null,
-           body.templateId, body.subtotal, body.totalTax, body.total, 'manual',
+           body.issueDate, body.dueDate, body.currency, body.poReference ?? null,
+           body.templateId, body.subtotal, body.totalTax, body.total,
            body.notes ?? null, body.terms ?? null]
         );
         const row = insertResult.rows[0];
@@ -249,7 +253,7 @@ export function invoiceRoutes(db: DatabaseClient) {
       const tenantId = req.tenant.id;
       const sets: string[] = [];
       const vals: unknown[] = [tenantId, id];
-      if (body.status !== undefined)     { sets.push(`status = $${vals.length + 1}`);      vals.push(body.status === 'sent' ? 'open' : body.status); }
+      if (body.status !== undefined)     { sets.push(`status = $${vals.length + 1}`);      vals.push(body.status); }
       if (body.dueDate !== undefined)    { sets.push(`due_date = $${vals.length + 1}`);     vals.push(body.dueDate); }
       if (body.notes !== undefined)      { sets.push(`notes = $${vals.length + 1}`);        vals.push(body.notes); }
       if (body.terms !== undefined)      { sets.push(`terms = $${vals.length + 1}`);        vals.push(body.terms); }
@@ -352,7 +356,7 @@ export function invoiceRoutes(db: DatabaseClient) {
         });
       }
 
-      const subject = body.subject ?? `Invoice ${inv.invoice_number} from ${inv.workspace_name ?? 'Us'}`;
+      const subject = body.subject ?? `Invoice ${inv.number} from ${inv.workspace_name ?? 'Us'}`;
 
       const formattedTotal  = new Intl.NumberFormat('en-US', { style: 'currency', currency: inv.currency ?? 'USD' }).format(inv.total ?? 0);
       const formattedDue    = inv.due_date ? new Date(inv.due_date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'N/A';
@@ -370,7 +374,7 @@ export function invoiceRoutes(db: DatabaseClient) {
     <table style="width:100%;border-collapse:collapse;margin:20px 0;font-size:14px;">
       <tr style="background:#e2e8f0;">
         <td style="padding:10px 14px;font-weight:bold;">Invoice Number</td>
-        <td style="padding:10px 14px;">${inv.invoice_number}</td>
+        <td style="padding:10px 14px;">${inv.number}</td>
       </tr>
       <tr>
         <td style="padding:10px 14px;font-weight:bold;background:#f8fafc;">Issue Date</td>
@@ -396,7 +400,7 @@ export function invoiceRoutes(db: DatabaseClient) {
 </div>`.trim();
 
       const bodyText = [
-        `Invoice ${inv.invoice_number}`,
+        `Invoice ${inv.number}`,
         body.message ?? '',
         `Amount Due: ${formattedTotal}`,
         `Due Date: ${formattedDue}`,

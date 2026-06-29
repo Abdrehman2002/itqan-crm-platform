@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { api } from '../../services/api';
-import { formatCurrency, CURRENCIES, DEFAULT_SETTINGS, type LineItem, type SalesSettings, type BillingContact } from './types';
+import { formatCurrency, CURRENCIES, DEFAULT_SETTINGS, INVOICE_TEMPLATES, type LineItem, type SalesSettings, type BillingContact } from './types';
 import { Plus, Trash2, Save, Send, ChevronLeft } from 'lucide-react';
 import { v4 as uuid } from 'uuid';
 
@@ -111,10 +111,9 @@ export function InvoiceCreate() {
               <select value={templateId} onChange={e => setTemplateId(e.target.value)}
                 className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
                 <optgroup label="Preset Themes">
-                  <option value="tpl-classic">Classic Professional</option>
-                  <option value="tpl-minimal">Minimal Modern</option>
-                  <option value="tpl-consulting">Consulting Statement</option>
-                  <option value="tpl-retail">Retail / Product</option>
+                  {INVOICE_TEMPLATES.map(t => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
+                  ))}
                 </optgroup>
                 {(savedTemplates ?? []).length > 0 && (
                   <optgroup label="My Saved Templates">

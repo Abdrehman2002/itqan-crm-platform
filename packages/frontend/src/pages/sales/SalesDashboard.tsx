@@ -14,15 +14,28 @@ const PERIOD_OPTIONS = [
   { value: 'last_month', label: 'Last Month' },
   { value: 'this_quarter', label: 'This Quarter' },
   { value: 'this_year', label: 'This Year' },
+  { value: 'custom', label: 'Custom Range' },
 ];
 const PIE_COLORS = ['#3b82f6','#f59e0b','#ef4444','#10b981','#6366f1'];
 
+// Default custom range: current month [first day, today]
+const todayIso = () => new Date().toISOString().slice(0, 10);
+const monthStartIso = () => {
+  const d = new Date(); d.setDate(1);
+  return d.toISOString().slice(0, 10);
+};
+
 export function SalesDashboard() {
   const [period, setPeriod] = useState('this_month');
+  const [from, setFrom] = useState(monthStartIso());
+  const [to, setTo] = useState(todayIso());
 
+  const isCustom = period === 'custom';
   const { data, isLoading } = useQuery<DashboardStats>({
-    queryKey: ['sales-dashboard', period],
-    queryFn: () => api.get('/api/v1/sales/dashboard', { params: { period } }).then(r => r.data.data),
+    queryKey: ['sales-dashboard', period, isCustom ? from : null, isCustom ? to : null],
+    queryFn: () => api.get('/api/v1/sales/dashboard', {
+      params: isCustom ? { period, from, to } : { period },
+    }).then(r => r.data.data),
   });
 
   const { data: recentInvoices } = useQuery<any[]>({
@@ -51,6 +64,15 @@ export function SalesDashboard() {
             className="text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
             {PERIOD_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
+          {isCustom && (
+            <>
+              <input type="date" value={from} max={to} onChange={e => setFrom(e.target.value)}
+                className="text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500" />
+              <span className="text-xs text-gray-400">to</span>
+              <input type="date" value={to} min={from} max={todayIso()} onChange={e => setTo(e.target.value)}
+                className="text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </>
+          )}
           <Link to="/sales/invoices/new"
             className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors">
             + New Invoice

@@ -75,10 +75,10 @@ export function LoginPage() {
 
         {/* Wordmark */}
         <h1 className="text-4xl font-extrabold text-white tracking-tight mb-2">
-          Vivid Solutions
+          AmanaCX
         </h1>
         <p className="text-lg font-medium mb-10" style={{ color: '#F5C518' }}>
-          &amp; Services
+          Banking Operations
         </p>
 
         {/* Tagline */}
@@ -115,8 +115,8 @@ export function LoginPage() {
                 <path d="M5 5 L10 12 L5 19 H9 L12 14.5 L15 19 H19 L14 12 L19 5 H15 L12 9.5 L9 5 Z" />
               </svg>
             </div>
-            <h2 className="text-xl font-bold text-white">Vivid Solutions</h2>
-            <p className="text-sm font-medium" style={{ color: '#F5C518' }}>&amp; Services</p>
+            <h2 className="text-xl font-bold text-white">AmanaCX</h2>
+            <p className="text-sm font-medium" style={{ color: '#F5C518' }}>Banking Operations</p>
           </div>
 
           {/* Card */}
@@ -276,7 +276,7 @@ export function LoginPage() {
 
           {/* Footer note */}
           <p className="mt-6 text-center text-xs text-white/25">
-            © {new Date().getFullYear()} Vivid Solutions &amp; Services. All rights reserved.
+            © {new Date().getFullYear()} AmanaCX. All rights reserved.
           </p>
         </div>
       </div>

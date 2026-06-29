@@ -35,45 +35,23 @@ export function billingContactRoutes(db: DatabaseClient) {
         const searchClause = search ? `AND (name ILIKE $2 OR email ILIKE $2 OR company ILIKE $2)` : '';
         const params = search ? [tenantId, `%${search}%`] : [tenantId];
 
-        // Return dedicated billing contacts + CRM contacts (deduplicated by name)
+        // Only return rows that actually exist in `billing_contacts` for this
+        // tenant. The previous UNION with the CRM `contacts` table polluted
+        // the invoice dropdown with names that weren't in the user-visible
+        // contact list and had IDs that couldn't be referenced by
+        // billing_contact_id without an awkward auto-create dance. RLS also
+        // enforces tenant scoping, but we keep the explicit predicate.
         const result = await client.query(
           `SELECT id, name, email, phone, company, currency, tax_id, billing_address,
                   'billing' AS source
            FROM billing_contacts
            WHERE tenant_id = $1 ${searchClause}
-
-           UNION
-
-           SELECT
-             c.id,
-             TRIM(c.first_name || ' ' || COALESCE(c.last_name, '')) AS name,
-             c.email,
-             c.phone,
-             comp.name AS company,
-             'USD' AS currency,
-             NULL AS tax_id,
-             '{}' :: jsonb AS billing_address,
-             'crm' AS source
-           FROM contacts c
-           LEFT JOIN companies comp ON comp.id = c.company_id
-           WHERE c.tenant_id = $1
-             AND c.email IS NOT NULL
-             AND NOT EXISTS (
-               SELECT 1 FROM billing_contacts bc
-               WHERE bc.tenant_id = $1
-                 AND bc.email = c.email
-             )
-             ${search ? `AND (
-               TRIM(c.first_name || ' ' || COALESCE(c.last_name,'')) ILIKE $2
-               OR c.email ILIKE $2
-               OR comp.name ILIKE $2
-             )` : ''}
-
            ORDER BY name`,
           params,
         );
         return result.rows;
       });
+      reply.header('Cache-Control', 'private, max-age=30');
       return reply.send({ success: true, data: rows });
     });
 

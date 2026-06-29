@@ -172,7 +172,11 @@ export function TenantAdminDashboard() {
               <QuickAction icon={Layers}     label="Enable Modules"         desc="Turn features on or off"                color="#06b6d4" onClick={() => navigate('/admin/modules')} />
               <QuickAction icon={Zap}        label="Connect Integrations"   desc="Email, SMS, payments, APIs"             color="#29ABE2" onClick={() => navigate('/integrations')} />
               <QuickAction icon={Mail}       label="Email Configuration"    desc="SMTP, SendGrid, Microsoft 365"          color="#57A93C" onClick={() => navigate('/integrations')} />
-              <QuickAction icon={Clock}      label="Routing & SLA"          desc="Ticket assignment & SLA policies"       color="#f59e0b" onClick={() => navigate('/admin/routing')} />
+              {/* Was: navigate('/admin/routing'); RoutingSettings re-renders the
+                  general Settings page, so users hit "General Settings" instead of the
+                  ticket-routing config they expected. /tickets/queues is the real
+                  routing screen (queue-based auto-assignment + push routing). */}
+              <QuickAction icon={Clock}      label="Routing & SLA"          desc="Ticket queues & SLA policies"           color="#f59e0b" onClick={() => navigate('/tickets/queues')} />
               <QuickAction icon={Settings}   label="Workspace Settings"     desc="Name, timezone, locale, branding"       color="#6b7280" onClick={() => navigate('/settings')} />
             </div>
           </div>

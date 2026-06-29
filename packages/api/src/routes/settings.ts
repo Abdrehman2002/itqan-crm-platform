@@ -6,6 +6,48 @@ import { requireRole } from '../middlewares/auth.middleware';
 import { EmailService } from '../services/email.service';
 import { MODULE_CATALOG } from './super-admin';
 
+// system_audit_log INSERT helper. Records cross-domain admin activity (user
+// CRUD, role changes, dept changes, settings) so the tenant_admin dashboard
+// can show "all activities done by tenant admin and sub admins" as the user
+// requested 2026-06-29. Best-effort: any DB error is logged but never thrown
+// — we don't want a failed audit insert to undo the actual mutation.
+async function audit(
+  db: DatabaseClient,
+  tenantId: string,
+  actor: { id?: string; name?: string; email?: string; role?: string },
+  payload: {
+    action: string;
+    entityType: 'user' | 'role' | 'department' | 'settings' | string;
+    entityId?: string | null;
+    entityLabel?: string | null;
+    oldValue?: unknown;
+    newValue?: unknown;
+    meta?: Record<string, unknown>;
+  },
+) {
+  try {
+    await db.withTenant(tenantId, async (client) => {
+      await client.query(
+        `INSERT INTO system_audit_log
+           (tenant_id, actor_id, actor_name, actor_email, actor_role,
+            action, entity_type, entity_id, entity_label, old_value, new_value, meta)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12::jsonb)`,
+        [
+          tenantId, actor.id ?? null, actor.name ?? null, actor.email ?? null, actor.role ?? null,
+          payload.action, payload.entityType, payload.entityId ?? null, payload.entityLabel ?? null,
+          payload.oldValue ? JSON.stringify(payload.oldValue) : null,
+          payload.newValue ? JSON.stringify(payload.newValue) : null,
+          JSON.stringify(payload.meta ?? {}),
+        ],
+      );
+    });
+  } catch (err) {
+    // Don't crash the request just because audit logging hiccupped.
+    // eslint-disable-next-line no-console
+    console.error('[audit] insert failed:', (err as Error).message);
+  }
+}
+
 // ── Module permission definitions ─────────────────────────────────────────
 // Each module can have access level: 'none' | 'view' | 'full'
 // 'none' = module hidden, 'view' = read-only, 'full' = create/edit/delete
@@ -191,6 +233,22 @@ export function settingsRoutes(db: DatabaseClient) {
         return result.rows;
       });
       return reply.send({ success: true, data: tenant });
+    });
+
+    // PATCH /api/v1/settings/profile — update the caller's own display name.
+    // Was missing — frontend PATCHes here from PersonalSettings.tsx but the
+    // endpoint didn't exist, so the request 404'd silently and the user saw
+    // "not able to save display name changed".
+    fastify.patch('/profile', async (req, reply) => {
+      const ProfileSchema = z.object({ name: z.string().min(1).max(120).trim() });
+      const body = ProfileSchema.parse(req.body);
+      await db.withTenant(req.tenant.id, async (client) => {
+        await client.query(
+          `UPDATE users SET name = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3`,
+          [body.name, req.user.sub, req.tenant.id],
+        );
+      });
+      return reply.send({ success: true });
     });
 
     // Update workspace settings
@@ -563,11 +621,17 @@ export function settingsRoutes(db: DatabaseClient) {
               </p>
             </div>
           `,
-          bodyText: `You've been invited to join ${workspaceName} on Vivid CRM as ${role ?? 'agent'}.\n\nSet your password here: ${inviteUrl}\n\nThis link expires in 7 days.`,
+          bodyText: `You've been invited to join ${workspaceName} on AmanaCX as ${role ?? 'agent'}.\n\nSet your password here: ${inviteUrl}\n\nThis link expires in 7 days.`,
         });
       } catch {
         // Email failure should not block the invite — user is created, admin can resend
       }
+
+      await audit(db, req.tenant.id,
+        { id: req.user.sub, role: req.user.role },
+        { action: 'user_invited', entityType: 'user',
+          entityId: user.id, entityLabel: user.name || user.email,
+          newValue: { email: user.email, role: user.role, department: user.department } });
 
       return reply.code(201).send({ success: true, data: user });
     });
@@ -598,6 +662,9 @@ export function settingsRoutes(db: DatabaseClient) {
       if (!row) {
         return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'User not found or already removed' } });
       }
+      await audit(db, req.tenant.id,
+        { id: req.user.sub, role: req.user.role },
+        { action: 'user_deleted', entityType: 'user', entityId: userId });
       return reply.code(204).send();
     });
 
@@ -681,6 +748,14 @@ export function settingsRoutes(db: DatabaseClient) {
       });
 
       if (!user) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'User not found' } });
+
+      await audit(db, req.tenant.id,
+        { id: req.user.sub, role: req.user.role },
+        { action: 'user_updated', entityType: 'user',
+          entityId: user.id, entityLabel: user.name || user.email,
+          newValue: { role: user.role, department: user.department,
+                      manager_id: user.manager_id, is_active: user.is_active } });
+
       return reply.send({ success: true, data: user });
     });
 
@@ -786,26 +861,39 @@ export function settingsRoutes(db: DatabaseClient) {
       return reply.send({ success: true, data: rows });
     });
 
-    // GET /api/v1/settings/audit-log — workspace ticket audit log for tenant_admin.
-    // RLS via withTenant enforces a hard isolation — tenant_admin cannot see other
-    // workspaces no matter what they pass in the query.
+    // GET /api/v1/settings/audit-log — combined audit log for tenant_admin.
+    // UNIONs ticket_audit_log (ticket-domain events) with system_audit_log
+    // (user/role/dept/settings events) so the dashboard widget can show every
+    // admin action with date, activity, who, and target entity in one feed.
+    // RLS via withTenant enforces tenant isolation.
     fastify.get('/audit-log', { preHandler: requireRole('tenant_admin', 'manager') }, async (req, reply) => {
-      const { limit = '200', action } = req.query as Record<string, string>;
+      const { limit = '200', action, entityType } = req.query as Record<string, string>;
       const rows = await db.withTenant(req.tenant.id, async (client) => {
         const r = await client.query(`
-          SELECT
-            tal.id, tal.action, tal.ticket_id AS entity_id,
-            'ticket'::text AS entity_type,
-            tal.old_value, tal.new_value, tal.created_at,
-            COALESCE(u.name, tal.actor_name) AS actor_name,
-            u.email AS actor_email, u.role AS actor_role
-          FROM ticket_audit_log tal
-          LEFT JOIN users u ON u.id = tal.actor_id
-          WHERE tal.tenant_id = $1
-            AND ($2::text IS NULL OR tal.action = $2)
-          ORDER BY tal.created_at DESC
-          LIMIT $3
-        `, [req.tenant.id, action || null, parseInt(limit, 10)]);
+          (SELECT
+             tal.id, tal.action, tal.ticket_id AS entity_id,
+             'ticket'::text AS entity_type, NULL::text AS entity_label,
+             tal.old_value, tal.new_value, tal.created_at,
+             COALESCE(u.name, tal.actor_name) AS actor_name,
+             u.email AS actor_email, u.role AS actor_role
+           FROM ticket_audit_log tal
+           LEFT JOIN users u ON u.id = tal.actor_id
+           WHERE tal.tenant_id = $1
+             AND ($2::text IS NULL OR tal.action = $2)
+             AND ($3::text IS NULL OR $3 = 'ticket'))
+          UNION ALL
+          (SELECT
+             sal.id, sal.action, sal.entity_id,
+             sal.entity_type, sal.entity_label,
+             sal.old_value, sal.new_value, sal.created_at,
+             sal.actor_name, sal.actor_email, sal.actor_role
+           FROM system_audit_log sal
+           WHERE sal.tenant_id = $1
+             AND ($2::text IS NULL OR sal.action = $2)
+             AND ($3::text IS NULL OR sal.entity_type = $3))
+          ORDER BY created_at DESC
+          LIMIT $4
+        `, [req.tenant.id, action || null, entityType || null, parseInt(limit, 10)]);
         return r.rows;
       });
       return reply.send({ success: true, data: rows });

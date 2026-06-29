@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useLayoutEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
@@ -19,12 +20,29 @@ interface Member {
   is_active: boolean;
   last_login_at?: string;
   created_at: string;
+  manager_id?: string | null;
+  manager_name?: string | null;
 }
 
 interface Role {
   id: string;
   name: string;
   color?: string;
+}
+
+// U7 — Build "Display Name — Base Role" label so the admin sees the customised
+// label AND the underlying system role it inherits from (e.g.
+// "Sales Executive — Agent"). For system roles where the display name matches
+// the base role, we just show the display name to avoid "Agent — Agent".
+function formatRoleLabel(role: any): string {
+  const display = String(role?.name ?? '').trim();
+  const base = String((role as any)?.base_role ?? '').trim();
+  if (!display) return base || 'Role';
+  if (!base) return display;
+  if (display.toLowerCase() === base.toLowerCase()) return display;
+  // Capitalise base role for display ("agent" -> "Agent")
+  const baseLabel = base.charAt(0).toUpperCase() + base.slice(1);
+  return `${display} — ${baseLabel}`;
 }
 
 
@@ -73,8 +91,10 @@ function parseRoleKey(key: string, allRoles: Role[]): { role: string; custom_rol
 }
 
 // ── Invite User Modal ─────────────────────────────────────────────────────────
-function InviteModal({ roles, onClose, onSuccess }: { roles: Role[]; onClose: () => void; onSuccess: () => void }) {
-  const [form, setForm] = useState({ name: '', email: '', role_key: 'system:agent', department_id: '' });
+function InviteModal({ roles, members, onClose, onSuccess }: {
+  roles: Role[]; members: Member[]; onClose: () => void; onSuccess: () => void;
+}) {
+  const [form, setForm] = useState({ name: '', email: '', role_key: 'system:agent', department_id: '', manager_id: '' });
   const [error, setError] = useState('');
 
   const { data: departments = [] } = useQuery<Department[]>({
@@ -84,6 +104,13 @@ function InviteModal({ roles, onClose, onSuccess }: { roles: Role[]; onClose: ()
 
   const systemRoles = roles.filter((r: any) => r.is_system && r.base_role !== 'tenant_admin');
   const customRoles = roles.filter((r: any) => !r.is_system);
+
+  // U-LM — eligible line managers: anyone whose role lets them manage others
+  // (manager/line_manager/tenant_admin). Backend column is `manager_id` and any
+  // user with sufficient seniority is a valid pick.
+  const managerOptions = members.filter(m =>
+    m.is_active && ['manager', 'line_manager', 'tenant_admin'].includes(m.role)
+  );
 
   const mut = useMutation({
     mutationFn: () => {
@@ -96,6 +123,7 @@ function InviteModal({ roles, onClose, onSuccess }: { roles: Role[]; onClose: ()
         custom_role_id,
         department: dept?.name,
         departmentType: dept?.department_type,
+        manager_id: form.manager_id || undefined,
       });
     },
     onSuccess: () => { onSuccess(); onClose(); },
@@ -150,17 +178,33 @@ function InviteModal({ roles, onClose, onSuccess }: { roles: Role[]; onClose: ()
               className="w-full px-3 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-200 bg-white"
             >
               {systemRoles.map(r => (
-                <option key={r.id} value={`system:${(r as any).base_role}`}>{r.name}</option>
+                <option key={r.id} value={`system:${(r as any).base_role}`}>{formatRoleLabel(r)}</option>
               ))}
               {customRoles.length > 0 && (
                 <optgroup label="Custom Roles">
                   {customRoles.map(r => (
-                    <option key={r.id} value={`custom:${r.id}`}>{r.name}</option>
+                    <option key={r.id} value={`custom:${r.id}`}>{formatRoleLabel(r)}</option>
                   ))}
                 </optgroup>
               )}
             </select>
             <p className="text-xs text-gray-400 mt-1">Controls what this member can see and do</p>
+          </div>
+          {/* U-LM — Line Manager picker. Optional; sourced from existing managers
+              of the same workspace. Backend stores the choice in users.manager_id. */}
+          <div>
+            <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">Line Manager</label>
+            <select
+              value={form.manager_id}
+              onChange={e => setForm(f => ({ ...f, manager_id: e.target.value }))}
+              className="w-full px-3 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-200 bg-white"
+            >
+              <option value="">— None —</option>
+              {managerOptions.map(m => (
+                <option key={m.id} value={m.id}>{m.name} ({m.role_name ?? m.role})</option>
+              ))}
+            </select>
+            <p className="text-xs text-gray-400 mt-1">Who this user reports to (optional)</p>
           </div>
           {error && (
             <div className="flex items-center gap-2 px-3 py-2.5 bg-red-50 text-red-700 rounded-xl text-sm border border-red-100">
@@ -231,12 +275,12 @@ function EditRoleModal({ member, roles, onClose, onSuccess }: {
               className="w-full px-3 py-2.5 border border-gray-200 rounded-xl text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-200"
             >
               {systemRoles.map(r => (
-                <option key={r.id} value={`system:${(r as any).base_role}`}>{r.name}</option>
+                <option key={r.id} value={`system:${(r as any).base_role}`}>{formatRoleLabel(r)}</option>
               ))}
               {customRoles.length > 0 && (
                 <optgroup label="Custom Roles">
                   {customRoles.map(r => (
-                    <option key={r.id} value={`custom:${r.id}`}>{r.name}</option>
+                    <option key={r.id} value={`custom:${r.id}`}>{formatRoleLabel(r)}</option>
                   ))}
                 </optgroup>
               )}
@@ -261,6 +305,14 @@ function EditRoleModal({ member, roles, onClose, onSuccess }: {
 }
 
 // ── Row Actions Menu ──────────────────────────────────────────────────────────
+// U5/U8 — Two bugs combined:
+//   1. Bottom rows: menu opened *below* the trigger and was clipped by the
+//      table card's `overflow-hidden` + viewport bottom.
+//   2. Inactive filter: when only a few rows remain, the menu rendered inside
+//      the same container collapsed onto a row with no space below it.
+// Fix: render the popup in a Portal (document.body) with `position: fixed`
+// coords computed from the trigger button, and FLIP UP automatically when the
+// trigger is in the bottom half of the viewport.
 function RowMenu({ member, onEdit, onToggleActive, onDelete }: {
   member: Member;
   onEdit: () => void;
@@ -268,21 +320,51 @@ function RowMenu({ member, onEdit, onToggleActive, onDelete }: {
   onDelete: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const [pos, setPos] = useState<{ top: number; left: number; flipUp: boolean }>({ top: 0, left: 0, flipUp: false });
+
+  useLayoutEffect(() => {
+    if (!open || !triggerRef.current) return;
+    const r = triggerRef.current.getBoundingClientRect();
+    const menuW = 176; // matches w-44
+    const menuH = 140; // approx height of 3 buttons + divider
+    const vh = window.innerHeight;
+    const flipUp = r.bottom + menuH + 8 > vh;
+    const top = flipUp ? r.top - menuH - 4 : r.bottom + 4;
+    const left = Math.max(8, r.right - menuW); // right-align to trigger, keep on-screen
+    setPos({ top, left, flipUp });
+  }, [open]);
+
+  // Close on scroll/resize — popup is fixed-position and would otherwise float
+  // away from its trigger when the table scrolls.
+  useEffect(() => {
+    if (!open) return;
+    const close = () => setOpen(false);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [open]);
+
   return (
-    <div className="relative">
+    <>
       <button
+        ref={triggerRef}
         onClick={() => setOpen(o => !o)}
         className="p-1.5 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
       >
         <MoreVertical className="w-4 h-4" />
       </button>
-      {open && (
+      {open && createPortal(
         <>
-          {/* U5 — bumped both backdrop and menu z-index above the table header's
-              sticky elements + status badges. Previously z-10/20 was getting
-              shadowed when the list was re-rendered after a sort/filter. */}
-          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-8 z-50 bg-white rounded-xl shadow-lg border border-gray-100 py-1 w-44">
+          <div className="fixed inset-0 z-[60]" onClick={() => setOpen(false)} />
+          <div
+            className="fixed z-[70] bg-white rounded-xl shadow-lg border border-gray-100 py-1 w-44"
+            style={{ top: pos.top, left: pos.left }}
+            role="menu"
+          >
             <button
               onClick={() => { setOpen(false); onEdit(); }}
               className="w-full flex items-center gap-2.5 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
@@ -305,9 +387,10 @@ function RowMenu({ member, onEdit, onToggleActive, onDelete }: {
               <Trash2 className="w-3.5 h-3.5" /> Remove User
             </button>
           </div>
-        </>
+        </>,
+        document.body,
       )}
-    </div>
+    </>
   );
 }
 
@@ -316,8 +399,8 @@ function RowMenu({ member, onEdit, onToggleActive, onDelete }: {
 // U6) and the user needs to understand: the row stays, the login is killed,
 // historical tickets/calls/deals keep this person's name visible. A proper modal
 // communicates that instead of a one-liner native dialog.
-function DeleteConfirmModal({ member, onCancel, onConfirm, isPending }: {
-  member: Member; onCancel: () => void; onConfirm: () => void; isPending: boolean;
+function DeleteConfirmModal({ member, onCancel, onConfirm, isPending, error }: {
+  member: Member; onCancel: () => void; onConfirm: () => void; isPending: boolean; error?: string | null;
 }) {
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
@@ -338,6 +421,11 @@ function DeleteConfirmModal({ member, onCancel, onConfirm, isPending }: {
               reports and dashboards under their name. Re-inviting the same email later creates a
               new account — the historical record stays linked to the original.</p>
           </div>
+          {error && (
+            <div className="flex items-center gap-2 px-3 py-2.5 bg-red-50 text-red-700 rounded-xl text-xs border border-red-100">
+              <AlertTriangle className="w-4 h-4 shrink-0" />{error}
+            </div>
+          )}
         </div>
         <div className="flex gap-3 px-6 pb-5">
           <button onClick={onCancel}
@@ -398,9 +486,16 @@ export function AdminUsers() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin-users'] }),
   });
 
+  // U6 — deleteMut had no onError, so a 4xx/5xx response was silently swallowed
+  // and the modal stayed stuck on "Removing…". Surface the error and reset the
+  // pending state so the admin can retry or see why it failed (e.g. trying to
+  // remove themselves, or a stale row already soft-deleted).
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const deleteMut = useMutation({
     mutationFn: (id: string) => api.delete(`/api/v1/settings/team/${id}`),
+    onMutate: () => setDeleteError(null),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['admin-users'] }); setDeleteMember(null); },
+    onError: (e: any) => setDeleteError(e?.response?.data?.error?.message ?? 'Failed to remove user'),
   });
 
   const filtered = members.filter(m => {
@@ -501,13 +596,23 @@ export function AdminUsers() {
                       <RoleBadge role={m.role} roleName={m.role_name} color={m.role_color} />
                     </td>
                     <td className="px-4 py-3.5 hidden lg:table-cell">
-                      <span className="text-sm text-gray-500">{m.department ?? '—'}</span>
+                      {/* U-DEPT — show '—' for both null AND empty string; old
+                          `?? '—'` left blank cells when department='' */}
+                      <span className="text-sm text-gray-500">{m.department?.trim() ? m.department : '—'}</span>
                     </td>
                     <td className="px-4 py-3.5">
                       <StatusPill active={m.is_active} />
                     </td>
                     <td className="px-4 py-3.5 hidden xl:table-cell">
-                      <span className="text-xs text-gray-400">
+                      {/* U-LL — "Last Login" shows users.last_login_at (set by
+                          auth.ts on successful login). Admin actions like
+                          activate/deactivate do NOT update this. Hover for the
+                          exact timestamp so admins can tell whether the date
+                          they see really is the user's last sign-in. */}
+                      <span
+                        className="text-xs text-gray-400"
+                        title={m.last_login_at ? new Date(m.last_login_at).toLocaleString() : 'User has never signed in'}
+                      >
                         {m.last_login_at
                           ? new Date(m.last_login_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
                           : 'Never'}
@@ -537,6 +642,7 @@ export function AdminUsers() {
       {showInvite && (
         <InviteModal
           roles={roles}
+          members={members}
           onClose={() => setShowInvite(false)}
           onSuccess={() => qc.invalidateQueries({ queryKey: ['admin-users'] })}
         />
@@ -552,9 +658,10 @@ export function AdminUsers() {
       {deleteMember && (
         <DeleteConfirmModal
           member={deleteMember}
-          onCancel={() => setDeleteMember(null)}
+          onCancel={() => { setDeleteMember(null); setDeleteError(null); }}
           onConfirm={() => deleteMut.mutate(deleteMember.id)}
           isPending={deleteMut.isPending}
+          error={deleteError}
         />
       )}
     </div>

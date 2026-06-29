@@ -6,7 +6,7 @@ import { Plus, Pencil, Trash2, X, Save } from 'lucide-react';
 import { v4 as uuid } from 'uuid';
 
 const COUNTRY_OPTS = ['USA','UK','India','UAE','Singapore','Australia','Canada','Germany','Other'].map(c => ({ value: c, label: c }));
-const empty = (): BillingContact => ({ id: uuid(), name: '', email: '', phone: '', company: '', currency: 'USD', taxId: '', billingAddress: { line1: '', city: '', state: '', country: 'USA', postalCode: '' } });
+const empty = (): BillingContact => ({ id: uuid(), name: '', email: '', phone: '', company: '', currency: 'PKR', taxId: '', billingAddress: { line1: '', city: '', state: '', country: 'Pakistan', postalCode: '' } });
 
 export function SalesContacts() {
   const qc = useQueryClient();
@@ -17,6 +17,10 @@ export function SalesContacts() {
   const { data, isLoading } = useQuery<BillingContact[]>({
     queryKey: ['billing-contacts', search],
     queryFn: () => api.get('/api/v1/sales/billing-contacts', { params: { search: search || undefined } }).then(r => r.data.data ?? []),
+    staleTime: 60_000,
+    gcTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    placeholderData: (prev) => prev,
   });
 
   const createMut = useMutation({

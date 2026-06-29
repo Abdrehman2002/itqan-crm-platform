@@ -40,7 +40,7 @@ export function SalesPayments() {
 
   const saveBank = () => {
     if (!newBank.bankName || !newBank.accountName || !newBank.accountNumber) return;
-    const bank: BankAccount = { id: uuid(), bankName: newBank.bankName!, accountName: newBank.accountName!, accountNumber: newBank.accountNumber!, ifsc: newBank.ifsc, swift: newBank.swift, iban: newBank.iban, isDefault: newBank.isDefault ?? false };
+    const bank: BankAccount = { id: uuid(), bankName: newBank.bankName!, accountName: newBank.accountName!, accountNumber: newBank.accountNumber!, swift: newBank.swift, iban: newBank.iban, isDefault: newBank.isDefault ?? false };
     saveMut.mutate({ bankAccounts: [...s.bankAccounts, bank] });
     setNewBank({ isDefault: false }); setShowBankForm(false);
   };
@@ -76,9 +76,8 @@ export function SalesPayments() {
                   <div className="font-medium text-sm text-gray-900">{b.bankName}</div>
                   <div className="text-xs text-gray-500">{b.accountName}</div>
                   <div className="text-xs text-gray-400 font-mono">{b.accountNumber}</div>
-                  {b.ifsc && <div className="text-xs text-gray-400">IFSC: {b.ifsc}</div>}
-                  {b.swift && <div className="text-xs text-gray-400">SWIFT: {b.swift}</div>}
                   {b.iban && <div className="text-xs text-gray-400">IBAN: {b.iban}</div>}
+                  {b.swift && <div className="text-xs text-gray-400">SWIFT: {b.swift}</div>}
                 </div>
                 <div className="flex items-center gap-2">
                   {b.isDefault && <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded">Default</span>}
@@ -92,7 +91,7 @@ export function SalesPayments() {
                   <div className="text-sm font-semibold text-gray-700">New Bank Account</div>
                   <button onClick={() => setShowBankForm(false)}><X size={14} className="text-gray-400" /></button>
                 </div>
-                {[['Bank Name','bankName','Chase Bank'],['Account Name','accountName',''],['Account Number','accountNumber',''],['IFSC (India)','ifsc','Optional'],['SWIFT','swift','Optional'],['IBAN','iban','Optional']].map(([label, field, placeholder]) => (
+                {[['Bank Name','bankName','e.g. HBL, Meezan, UBL'],['Account Title','accountName',''],['Account Number','accountNumber',''],['IBAN','iban','PK00 XXXX 0000 0000 0000 0000'],['SWIFT / BIC','swift','Optional']].map(([label, field, placeholder]) => (
                   <div key={field} className="flex flex-col gap-1">
                     <label className="text-xs font-medium text-gray-700">{label}</label>
                     <input placeholder={placeholder} value={(newBank as any)[field] ?? ''} onChange={e => setNewBank({ ...newBank, [field]: e.target.value })}

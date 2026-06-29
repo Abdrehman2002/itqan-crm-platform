@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../services/api';
-import { formatCurrency, getStatusColor, DEFAULT_SETTINGS, type Invoice, type SalesSettings } from './types';
+import { formatCurrency, getStatusColor, DEFAULT_SETTINGS, INVOICE_TEMPLATES, type Invoice, type SalesSettings } from './types';
 import { Mail, Download, Plus, CheckCircle2, ChevronLeft } from 'lucide-react';
 
 export function InvoiceDetail() {
@@ -66,6 +66,12 @@ export function InvoiceDetail() {
   const modeOpts = s.paymentModes.map(m => ({ value: m.id, label: m.name }));
   const bankOpts = s.bankAccounts.map(b => ({ value: b.id, label: `${b.bankName} — ${b.accountName}` }));
 
+  // Resolve the preset template the invoice was saved with so its accent
+  // colour actually shows up — previously every invoice rendered with the
+  // hardcoded blue tile/number regardless of templateId.
+  const tplPreset = INVOICE_TEMPLATES.find(t => t.id === inv.templateId);
+  const accent = tplPreset?.accentColor ?? '#2563eb';
+
   return (
     <div className="p-6 max-w-4xl mx-auto space-y-5">
       {/* Toolbar */}
@@ -98,11 +104,14 @@ export function InvoiceDetail() {
       <div className="bg-white rounded-xl border border-gray-200 p-8">
         <div className="flex justify-between items-start mb-8">
           <div>
-            <div className="w-14 h-14 bg-blue-600 rounded-xl flex items-center justify-center text-white font-bold text-xl mb-3">
+            <div
+              className="w-14 h-14 rounded-xl flex items-center justify-center text-white font-bold text-xl mb-3"
+              style={{ backgroundColor: accent }}
+            >
               {inv.contactName?.[0] ?? '?'}
             </div>
             <div className="text-xl font-bold text-gray-900">INVOICE</div>
-            <div className="text-3xl font-black text-blue-600 mt-1">{inv.number}</div>
+            <div className="text-3xl font-black mt-1" style={{ color: accent }}>{inv.number}</div>
           </div>
           <div className="text-right space-y-1">
             <div className="text-sm text-gray-500">Issue: <span className="text-gray-900 font-medium">{new Date(inv.issueDate).toLocaleDateString()}</span></div>

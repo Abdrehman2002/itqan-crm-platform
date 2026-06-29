@@ -6,6 +6,11 @@ export function salesDashboardRoutes(db: DatabaseClient) {
   return async function (fastify: FastifyInstance) {
     fastify.get('/', { preHandler: requireScope('contacts:read') }, async (req, reply) => {
       const tenantId = req.tenant.id;
+      const q = req.query as { from?: string; to?: string };
+      const from = q.from && /^\d{4}-\d{2}-\d{2}$/.test(q.from) ? q.from : null;
+      const to   = q.to   && /^\d{4}-\d{2}-\d{2}$/.test(q.to)   ? q.to   : null;
+      const rangeClause = from && to ? `AND i.issue_date >= $2::date AND i.issue_date <= $3::date` : '';
+      const rangeParams: unknown[] = from && to ? [from, to] : [];
 
       const [totals] = await db.withTenant(tenantId, (client) =>
         client.query(
@@ -22,8 +27,8 @@ export function salesDashboardRoutes(db: DatabaseClient) {
              COUNT(*) FILTER (WHERE i.status = 'cancelled') AS cancelled_count
            FROM invoices i
            LEFT JOIN (SELECT invoice_id, SUM(amount) as paid FROM invoice_payments GROUP BY invoice_id) p ON p.invoice_id = i.id
-           WHERE i.tenant_id = $1`,
-          [tenantId]
+           WHERE i.tenant_id = $1 ${rangeClause}`,
+          [tenantId, ...rangeParams]
         ).then(r => r.rows)
       );
 
@@ -81,7 +86,11 @@ export function salesDashboardRoutes(db: DatabaseClient) {
         ).then(r => r.rows)
       );
 
-      // Monthly revenue (last 6 months)
+      // Monthly revenue (custom range when from/to provided, else last 6 months)
+      const monthlyRangeClause = from && to
+        ? `AND i.issue_date >= $2::date AND i.issue_date <= $3::date`
+        : `AND i.issue_date >= NOW() - INTERVAL '6 months'`;
+      const monthlyParams: unknown[] = from && to ? [tenantId, from, to] : [tenantId];
       const monthly = await db.withTenant(tenantId, (client) =>
         client.query(
           `SELECT to_char(date_trunc('month', i.issue_date),'Mon') AS month,
@@ -89,10 +98,10 @@ export function salesDashboardRoutes(db: DatabaseClient) {
                   COALESCE(SUM(COALESCE(p.paid, 0)),0) AS collected
            FROM invoices i
            LEFT JOIN (SELECT invoice_id, SUM(amount) as paid FROM invoice_payments GROUP BY invoice_id) p ON p.invoice_id = i.id
-           WHERE i.tenant_id=$1 AND i.issue_date >= NOW() - INTERVAL '6 months'
+           WHERE i.tenant_id=$1 ${monthlyRangeClause}
            GROUP BY 1, date_trunc('month', i.issue_date)
            ORDER BY date_trunc('month', i.issue_date)`,
-          [tenantId]
+          monthlyParams
         ).then(r => r.rows)
       );
 
