@@ -639,7 +639,7 @@ export function settingsRoutes(db: DatabaseClient) {
               </p>
             </div>
           `,
-          bodyText: `You've been invited to join ${workspaceName} on AmanaCX as ${role ?? 'agent'}.\n\nSet your password here: ${inviteUrl}\n\nThis link expires in 7 days.`,
+          bodyText: `You've been invited to join ${workspaceName} on AmanahCX as ${role ?? 'agent'}.\n\nSet your password here: ${inviteUrl}\n\nThis link expires in 7 days.`,
         });
       } catch {
         // Email failure should not block the invite — user is created, admin can resend

@@ -1,4 +1,4 @@
-# AmanaCX (Itqan) CRM — contributor notes
+# AmanahCX (Itqan) CRM — contributor notes
 
 ## Plaintext credentials file
 

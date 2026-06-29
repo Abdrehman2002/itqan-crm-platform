@@ -180,7 +180,7 @@ function Sidebar() {
             </svg>
           </div>
           <div className="min-w-0">
-            <p className="text-sm font-bold text-white leading-tight truncate">AmanaCX</p>
+            <p className="text-sm font-bold text-white leading-tight truncate">AmanahCX</p>
             <p className="text-[10px] text-brand-300 font-medium">Operations</p>
           </div>
         </div>
