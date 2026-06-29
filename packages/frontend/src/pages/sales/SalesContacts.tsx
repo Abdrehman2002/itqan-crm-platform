@@ -5,7 +5,11 @@ import { CURRENCIES, type BillingContact } from './types';
 import { Plus, Pencil, Trash2, X, Save } from 'lucide-react';
 import { v4 as uuid } from 'uuid';
 
-const COUNTRY_OPTS = ['USA','UK','India','UAE','Singapore','Australia','Canada','Germany','Other'].map(c => ({ value: c, label: c }));
+// SQA-3 (2026-06-29) found: country list was missing Pakistan even though the
+// product targets Pakistani banking. Putting Pakistan first; dropped India
+// (separately removed alongside IFSC field in SWEEP-6). UAE/SA included since
+// the Currency type supports AED/SAR for cross-border customers.
+const COUNTRY_OPTS = ['Pakistan','UAE','Saudi Arabia','UK','USA','Singapore','Australia','Canada','Germany','Other'].map(c => ({ value: c, label: c }));
 const empty = (): BillingContact => ({ id: uuid(), name: '', email: '', phone: '', company: '', currency: 'PKR', taxId: '', billingAddress: { line1: '', city: '', state: '', country: 'Pakistan', postalCode: '' } });
 
 export function SalesContacts() {
@@ -120,7 +124,7 @@ export function SalesContacts() {
               ))}
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-gray-700">Country</label>
-                <select value={editing.billingAddress.country || 'USA'} onChange={e => setEditing({ ...editing, billingAddress: { ...editing.billingAddress, country: e.target.value } })}
+                <select value={editing.billingAddress.country || 'Pakistan'} onChange={e => setEditing({ ...editing, billingAddress: { ...editing.billingAddress, country: e.target.value } })}
                   className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-1 focus:ring-blue-500">
                   {COUNTRY_OPTS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </select>

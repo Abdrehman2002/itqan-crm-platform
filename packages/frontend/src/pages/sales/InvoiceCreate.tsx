@@ -43,7 +43,10 @@ export function InvoiceCreate() {
   const [issueDate, setIssueDate] = useState(new Date().toISOString().split('T')[0]);
   const [payTerms, setPayTerms] = useState(String(s.defaultPaymentTerms ?? 30));
   const [poRef, setPoRef] = useState('');
-  const [currency, setCurrency] = useState(s.defaultCurrency ?? 'USD');
+  // SQA-3 (2026-06-29) found: currency default was USD even though Bill Contact
+  // and the rest of the Pakistani-targeted app use PKR. Aligning default to PKR
+  // for consistency. Workspace can still override via SalesSettings.defaultCurrency.
+  const [currency, setCurrency] = useState(s.defaultCurrency ?? 'PKR');
   const [notes, setNotes] = useState('');
   const [terms, setTerms] = useState('Payment due within the specified terms. Late payments may attract interest.');
   const [lines, setLines] = useState<LineItem[]>([mkLine(defaultTax)]);
