@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { DatabaseClient } from '@crm/core';
 import { requireScope, requireEntitlement, requirePermission } from '../../middlewares/auth.middleware';
 import { EmailService } from '../../services/email.service';
+import { audit } from '../settings';
 
 const LineItemSchema = z.object({
   description: z.string(),
@@ -243,6 +244,12 @@ export function invoiceRoutes(db: DatabaseClient) {
         )
       );
 
+      await audit(db, tenantId,
+        { id: (req as any).user?.sub },
+        { action: 'invoice_created', entityType: 'invoice',
+          entityId: inv.id, entityLabel: inv.number,
+          newValue: { number: inv.number, status: inv.status, total: inv.total, currency: inv.currency } });
+
       return reply.status(201).send({ success: true, data: rowToInvoice({ ...inv, lineItems: [], payments: [] }) });
     });
 
@@ -262,6 +269,14 @@ export function invoiceRoutes(db: DatabaseClient) {
         const result = await client.query(`UPDATE invoices SET ${sets.join(',')} WHERE tenant_id=$1 AND id=$2 RETURNING *`, vals);
         return result.rows;
       });
+
+      if (row) {
+        await audit(db, tenantId,
+          { id: (req as any).user?.sub },
+          { action: body.status ? `invoice_${body.status}` : 'invoice_updated', entityType: 'invoice',
+            entityId: row.id, entityLabel: row.number, newValue: body });
+      }
+
       return reply.send({ success: true, data: row });
     });
 
@@ -269,9 +284,16 @@ export function invoiceRoutes(db: DatabaseClient) {
     fastify.delete('/:id', { preHandler: [requireScope('contacts:write'), requirePermission('invoices:delete')] }, async (req, reply) => {
       const { id } = req.params as { id: string };
       const tenantId = req.tenant.id;
+      const [old] = await db.withTenant(tenantId, async (client) => {
+        const r = await client.query(`SELECT number FROM invoices WHERE tenant_id=$1 AND id=$2`, [tenantId, id]);
+        return r.rows;
+      });
       await db.withTenant(tenantId, (client) =>
         client.query(`DELETE FROM invoices WHERE tenant_id=$1 AND id=$2`, [tenantId, id])
       );
+      await audit(db, tenantId,
+        { id: (req as any).user?.sub },
+        { action: 'invoice_deleted', entityType: 'invoice', entityId: id, entityLabel: old?.number ?? null });
       return reply.send({ success: true });
     });
 

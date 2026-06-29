@@ -12,13 +12,13 @@ import { readCsvFromRequest, validateRows, type BulkRowError } from '../lib/bulk
 // can show "all activities done by tenant admin and sub admins" as the user
 // requested 2026-06-29. Best-effort: any DB error is logged but never thrown
 // — we don't want a failed audit insert to undo the actual mutation.
-async function audit(
+export async function audit(
   db: DatabaseClient,
   tenantId: string,
   actor: { id?: string; name?: string; email?: string; role?: string },
   payload: {
     action: string;
-    entityType: 'user' | 'role' | 'department' | 'settings' | string;
+    entityType: 'user' | 'role' | 'department' | 'settings' | 'invoice' | 'tax_rate' | 'company' | 'contact' | string;
     entityId?: string | null;
     entityLabel?: string | null;
     oldValue?: unknown;
@@ -28,13 +28,30 @@ async function audit(
 ) {
   try {
     await db.withTenant(tenantId, async (client) => {
+      // If caller only supplied actor.id (the common case — JWT doesn't carry
+      // name/email), look up the snapshot so the dashboard widget shows the
+      // person's name + role, not "System". User reported (2026-06-29) the
+      // audit feed was missing names for actions taken by him.
+      let { name, email, role } = actor;
+      if (actor.id && (!name || !email || !role)) {
+        const r = await client.query(
+          'SELECT name, email, role FROM users WHERE id = $1',
+          [actor.id],
+        );
+        const u = r.rows[0];
+        if (u) {
+          name  = name  ?? u.name;
+          email = email ?? u.email;
+          role  = role  ?? u.role;
+        }
+      }
       await client.query(
         `INSERT INTO system_audit_log
            (tenant_id, actor_id, actor_name, actor_email, actor_role,
             action, entity_type, entity_id, entity_label, old_value, new_value, meta)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12::jsonb)`,
         [
-          tenantId, actor.id ?? null, actor.name ?? null, actor.email ?? null, actor.role ?? null,
+          tenantId, actor.id ?? null, name ?? null, email ?? null, role ?? null,
           payload.action, payload.entityType, payload.entityId ?? null, payload.entityLabel ?? null,
           payload.oldValue ? JSON.stringify(payload.oldValue) : null,
           payload.newValue ? JSON.stringify(payload.newValue) : null,

@@ -266,16 +266,31 @@ export function NotificationSettings() {
         <h2 className="text-base font-semibold text-gray-900">Notifications</h2>
         <p className="text-sm text-gray-500 mt-0.5">Choose what you want to be notified about.</p>
       </div>
+      {/* User reported (2026-06-29) the toggles were not aligning to each other
+          when descriptions wrapped to two lines or the parent container went wide.
+          Fixes:
+            - shrink-0 on the toggle button so flex never squashes/stretches it
+            - min-w-0 + truncate-friendly left column
+            - explicit row layout with gap so left text + right toggle keep
+              consistent vertical centering even when desc text is longer.
+          The whole panel still respects max-w-lg above so the right edge is
+          guaranteed identical for every row. */}
       <div className="space-y-3">
         {toggles.map(({ key, label, desc }) => (
-          <div key={key} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-            <div>
+          <div key={key} className="flex items-center justify-between gap-4 px-4 py-3 bg-gray-50 rounded-lg">
+            <div className="min-w-0 flex-1">
               <p className="text-sm font-medium text-gray-900">{label}</p>
-              <p className="text-xs text-gray-400">{desc}</p>
+              <p className="text-xs text-gray-400 mt-0.5">{desc}</p>
             </div>
-            <button onClick={() => setPrefs({ ...prefs, [key]: !prefs[key] })}
-              className={`w-10 h-6 rounded-full transition-colors relative ${prefs[key] ? 'bg-brand-500' : 'bg-gray-300'}`}>
-              <span className={`absolute top-1 w-4 h-4 bg-white rounded-full shadow transition-transform ${prefs[key] ? 'translate-x-5' : 'translate-x-1'}`} />
+            <button
+              type="button"
+              onClick={() => setPrefs({ ...prefs, [key]: !prefs[key] })}
+              aria-pressed={prefs[key]}
+              className={`shrink-0 w-11 h-6 rounded-full transition-colors relative ${prefs[key] ? 'bg-brand-500' : 'bg-gray-300'}`}
+            >
+              <span
+                className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${prefs[key] ? 'translate-x-[1.375rem]' : 'translate-x-0.5'}`}
+              />
             </button>
           </div>
         ))}
