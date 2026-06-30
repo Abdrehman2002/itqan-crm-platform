@@ -35,6 +35,71 @@ import { requireScope, requireRole } from '../middlewares/auth.middleware';
 import { findSlaPolicy } from './tickets';
 import * as sla from '../lib/sla';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 2026-06-30 BUG-AG — voice-bot tickets sat unassigned in their dept queue,
+// forcing managers to manually pick them up. The user wants the bot tickets
+// to **auto-route** to an available agent in the right dept; manager only
+// oversees. Queue config already had routing_method='push_random' — handlers
+// just weren't calling the assignment step. This helper centralises it.
+//
+// Picks the LEAST-LOADED online/busy agent in the queue's department_type
+// (offline + away skipped). If no one's online, the ticket stays in the queue
+// and the manager sees it as "needs attention" — same behaviour as today.
+// ─────────────────────────────────────────────────────────────────────────────
+async function pushAssignFromQueue(
+  db: DatabaseClient,
+  tenantId: string,
+  ticketId: string,
+  queueId: string | null,
+): Promise<{ assigneeId: string; assigneeName: string } | null> {
+  if (!queueId) return null;
+  return await db.withSuperAdmin(async (c) => {
+    // Only auto-assign if the queue is in push mode.
+    const qrow = (await c.query(
+      `SELECT routing_method, department_type FROM ticket_queues WHERE id = $1`,
+      [queueId],
+    )).rows[0];
+    if (!qrow) return null;
+    const method   = qrow.routing_method as string;
+    const deptType = qrow.department_type as string | null;
+    if (method !== 'push_random' && method !== 'push_criteria') return null;
+
+    // Pick least-loaded eligible agent. Filters:
+    //   • role agent OR line_manager (managers stay out of auto-assignment)
+    //   • is_active + not soft-deleted
+    //   • agent_status in (online, busy) — skip offline/away
+    //   • department_type matches the queue when the queue is dept-scoped
+    const deptFilter = deptType ? `AND u.department_type = $2` : '';
+    const params: any[] = [tenantId];
+    if (deptType) params.push(deptType);
+    const candidates = (await c.query(
+      `SELECT u.id, u.name,
+              COUNT(t.id) FILTER (WHERE t.status NOT IN ('resolved','closed','cancelled')) AS load
+         FROM users u
+         LEFT JOIN tickets t ON t.assignee_id = u.id
+        WHERE u.tenant_id = $1
+          AND u.role IN ('agent','line_manager')
+          AND u.is_active = true
+          AND u.deleted_at IS NULL
+          AND u.agent_status IN ('online','busy')
+          ${deptFilter}
+        GROUP BY u.id, u.name
+        ORDER BY load ASC, RANDOM()
+        LIMIT 1`,
+      params,
+    )).rows;
+
+    const agent = candidates[0];
+    if (!agent) return null;
+
+    await c.query(
+      `UPDATE tickets SET assignee_id = $1, status = 'assigned' WHERE id = $2`,
+      [agent.id, ticketId],
+    );
+    return { assigneeId: agent.id as string, assigneeName: agent.name as string };
+  });
+}
+
 // Voice tickets were skipping the SLA pipeline — INSERTed with sla_policy_id=null,
 // so the worker couldn't compute breach / reminders, and reports filtered them out.
 // This helper runs the same matching + due-date math as the ticket-create path.
@@ -540,7 +605,7 @@ async function createComplaintFromStructured(
   eventBus: EventBus,
   tenantId: string,
   s: StructuredComplaint,
-): Promise<{ ticketId: string; ticketNumber: string; voiceCallId: string } | null> {
+): Promise<{ ticketId: string; ticketNumber: string; voiceCallId: string; assignedTo: string | null } | null> {
   lastComplaintError = null;
   try {
     const priority = PRIORITY_MAP[(s.priority || 'medium').toLowerCase()] ?? 'medium';
@@ -628,11 +693,23 @@ async function createComplaintFromStructured(
     await applySlaToVoiceTicket(db, tenantId, ticket.id as string, priority, 'voice_bot', 'complaints',
                                 s.category ? [s.category] : []);
 
+    // BUG-AG: auto-route to a live agent so the manager doesn't have to. If the
+    // queue is push-mode (Complaints Queue is), pick the least-loaded online
+    // agent in the right dept and assign. Silent no-op if no one's online —
+    // ticket stays in queue, manager sees it as "needs attention".
+    const assigned = await pushAssignFromQueue(db, tenantId, ticket.id as string, queueRow?.id ?? null);
+
     await eventBus.publish(tenantId, CRM_EVENTS.TICKET_CREATED, {
       source: 'livekit', ticketId: ticket.id, ticketType: 'complaint',
+      assigneeId: assigned?.assigneeId ?? null,
     });
 
-    return { ticketId: ticket.id as string, ticketNumber, voiceCallId: botCall.id as string };
+    return {
+      ticketId: ticket.id as string,
+      ticketNumber,
+      voiceCallId: botCall.id as string,
+      assignedTo: assigned?.assigneeName ?? null,  // bot can mention this to caller
+    };
   } catch (err: any) {
     lastComplaintError = `${err?.message ?? err} ${err?.code ?? ''} ${err?.detail ?? ''}`.trim();
     console.error('[LiveKit→Ticket]', err?.message, err?.stack);
@@ -1303,13 +1380,21 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
            JSON.stringify(b)],
         )).rows;
 
-        return { ticketNumber: ticketRow.ticket_number, voiceCallId: callRow.id, ticketId: ticketRow.id };
+        return { ticketNumber: ticketRow.ticket_number, voiceCallId: callRow.id, ticketId: ticketRow.id, queueId: queueRow?.id ?? null };
       });
 
       // Attach SLA policy + due_at AFTER the insert transaction so the worker picks it up.
       await applySlaToVoiceTicket(db, tenantId, (result as any).ticketId, priority, 'voice_bot', 'sales');
 
-      return reply.code(201).send({ success: true, ticketNumber: result.ticketNumber, voiceCallId: result.voiceCallId });
+      // BUG-AG auto-route to a live sales agent so Manager Imran doesn't manually assign.
+      const assigned = await pushAssignFromQueue(db, tenantId, (result as any).ticketId, (result as any).queueId ?? null);
+
+      return reply.code(201).send({
+        success: true,
+        ticketNumber: result.ticketNumber,
+        voiceCallId: result.voiceCallId,
+        assignedTo: assigned?.assigneeName ?? null,
+      });
     });
 
     // Support inquiry — Sara uses this when the caller needs human follow-up.
@@ -1379,12 +1464,20 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
            JSON.stringify(b)],
         )).rows;
 
-        return { ticketNumber: ticketRow.ticket_number, voiceCallId: callRow.id, ticketId: ticketRow.id };
+        return { ticketNumber: ticketRow.ticket_number, voiceCallId: callRow.id, ticketId: ticketRow.id, queueId: queueRow?.id ?? null };
       });
 
       await applySlaToVoiceTicket(db, tenantId, (result as any).ticketId, priority, 'voice_bot', 'support', [b.category ?? 'general']);
 
-      return reply.code(201).send({ success: true, ticketNumber: result.ticketNumber, voiceCallId: result.voiceCallId });
+      // BUG-AG auto-route to a live support agent.
+      const assigned = await pushAssignFromQueue(db, tenantId, (result as any).ticketId, (result as any).queueId ?? null);
+
+      return reply.code(201).send({
+        success: true,
+        ticketNumber: result.ticketNumber,
+        voiceCallId: result.voiceCallId,
+        assignedTo: assigned?.assigneeName ?? null,
+      });
     });
   };
 }
