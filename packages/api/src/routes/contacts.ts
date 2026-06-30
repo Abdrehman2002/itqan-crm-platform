@@ -85,6 +85,12 @@ export function contactRoutes(db: DatabaseClient, eventBus: EventBus) {
     // GET single contact
     fastify.get('/:id', { preHandler: requireScope('contacts:read') }, async (req, reply) => {
       const { id } = req.params as { id: string };
+      // SQA-2026-06-30: bad path like /contacts/search 500'd because Postgres
+      // rejected "search" as a uuid. Return 404 cleanly when the id isn't a uuid.
+      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!UUID_RE.test(id)) {
+        return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Contact not found' } });
+      }
       const [contact] = await db.withTenant(req.tenant.id, async (client) => {
         const result = await client.query(
           `SELECT c.*, comp.name as company_name, u.name as owner_name

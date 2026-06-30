@@ -385,10 +385,17 @@ export function Contacts() {
                 >
                   <Mail className="w-4 h-4" /> Email
                 </button>
-                <button onClick={() => navigate(`/contacts/${selected.id}`)}
-                  className="flex items-center gap-1.5 px-3 py-2 border border-gray-200 text-gray-600 text-sm rounded-lg hover:bg-gray-50">
-                  <ChevronRight className="w-4 h-4" /> Full Profile
-                </button>
+                {/* SQA 2026-06-30: when super_admin views customer-contacts,
+                    the row id is a synthetic "${kind}:${uuid}" composite (e.g.
+                    "tenant_admin:79270e40-…") that the operational Contact 360
+                    route doesn't understand → 500. Only render the Full Profile
+                    button for real contact rows (raw uuid). */}
+                {!/^[a-z_]+:/.test(selected.id) && (
+                  <button onClick={() => navigate(`/contacts/${selected.id}`)}
+                    className="flex items-center gap-1.5 px-3 py-2 border border-gray-200 text-gray-600 text-sm rounded-lg hover:bg-gray-50">
+                    <ChevronRight className="w-4 h-4" /> Full Profile
+                  </button>
+                )}
                 {can.writeRecords && (
                   <>
                     <button onClick={openEdit}
