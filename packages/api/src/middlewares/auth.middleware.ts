@@ -102,6 +102,7 @@ const ROLE_LEVEL: Record<string, number> = {
   tenant_admin: 40,
   manager:      30,
   line_manager: 25,   // BUG-P: was missing — caused requireScope to deny EVERY operational endpoint for line managers
+  policy_admin: 25,   // Governance role — sits between manager (30) and agent (20); only role allowed to WRITE sla_policies
   agent:        20,
   viewer:       10,
 };

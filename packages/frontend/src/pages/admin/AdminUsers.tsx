@@ -95,8 +95,16 @@ function parseRoleKey(key: string, allRoles: Role[]): { role: string; custom_rol
 function InviteModal({ roles, members, onClose, onSuccess }: {
   roles: Role[]; members: Member[]; onClose: () => void; onSuccess: () => void;
 }) {
-  const [form, setForm] = useState({ name: '', email: '', role_key: 'system:agent', department_id: '', manager_id: '' });
+  const [form, setForm] = useState({
+    name: '',
+    email: '',
+    role_key: 'system:agent',
+    department_id: '',
+    manager_id: '',
+    governed_departments: [] as string[], // only sent when role_key === 'system:policy_admin'
+  });
   const [error, setError] = useState('');
+  const isPolicyAdminRole = form.role_key === 'system:policy_admin';
 
   const { data: departments = [] } = useQuery<Department[]>({
     queryKey: ['departments'],
@@ -125,6 +133,8 @@ function InviteModal({ roles, members, onClose, onSuccess }: {
         department: dept?.name,
         departmentType: dept?.department_type,
         manager_id: form.manager_id || undefined,
+        // Governance allow-list — only meaningful when role is policy_admin.
+        governed_departments: isPolicyAdminRole ? form.governed_departments : undefined,
       });
     },
     onSuccess: () => { onSuccess(); onClose(); },
@@ -191,6 +201,39 @@ function InviteModal({ roles, members, onClose, onSuccess }: {
             </select>
             <p className="text-xs text-gray-400 mt-1">Controls what this member can see and do</p>
           </div>
+          {/* Governance — appears only for policy_admin role.
+              Lets the inviter scope which ticket-type domains the new user can
+              write SLA policies for. Backend matches each value against
+              sla_policies.ticket_type. */}
+          {isPolicyAdminRole && (
+            <div>
+              <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">
+                Departments to Govern <span className="text-gray-400 font-normal normal-case">(select one or more)</span>
+              </label>
+              <div className="flex flex-col gap-2 px-3 py-3 border border-gray-200 rounded-xl">
+                {(['Sales', 'Support', 'Complaint'] as const).map(dept => {
+                  const key = dept.toLowerCase();
+                  return (
+                    <label key={dept} className="flex items-center gap-2.5 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={form.governed_departments.includes(key)}
+                        onChange={e => setForm(f => ({
+                          ...f,
+                          governed_departments: e.target.checked
+                            ? [...f.governed_departments, key]
+                            : f.governed_departments.filter(d => d !== key),
+                        }))}
+                        className="w-4 h-4 rounded border-gray-300 text-blue-500 focus:ring-2 focus:ring-blue-200"
+                      />
+                      <span className="text-sm text-gray-700">{dept}</span>
+                    </label>
+                  );
+                })}
+              </div>
+              <p className="text-xs text-gray-400 mt-1">This user can only create or edit SLA policies whose ticket type is one of the selected departments.</p>
+            </div>
+          )}
           {/* U-LM — Line Manager picker. Optional; sourced from existing managers
               of the same workspace. Backend stores the choice in users.manager_id. */}
           <div>

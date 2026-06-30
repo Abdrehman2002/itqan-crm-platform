@@ -401,11 +401,53 @@ function CreateTicketModal({ queues, onClose }: { queues: Queue[]; onClose: () =
   // department + smart matching on the backend. Managers + tenant_admin keep
   // the queue picker so they can move a ticket to a specific queue.
   const isAgent = user?.role === 'agent';
+
+  // Contact-linking — the agent must pick an existing contact (recommended) or
+  // fall back to manual reporter entry by toggling "New Contact". When a
+  // contact is selected we send contactId so the backend links the ticket to
+  // the contact row (powering Customer 360 history + CSAT averages).
+  const [contactSearch, setContactSearch]   = useState('');
+  const [showDropdown,  setShowDropdown]    = useState(false);
+  const [selectedContact, setSelectedContact] = useState<
+    { id: string; name: string; email: string; phone: string } | null
+  >(null);
+
+  const { data: contactResults } = useQuery({
+    queryKey: ['contact-search', contactSearch],
+    queryFn: () =>
+      api.get(`/api/v1/contacts?search=${encodeURIComponent(contactSearch)}&pageSize=8`)
+         .then(r => r.data.data ?? []),
+    enabled: contactSearch.length >= 2,
+  });
+
   const [form, setForm] = useState({
     subject: '', description: '', priority: 'medium',
     queueId: '', reporterName: '', reporterEmail: '', reporterPhone: '',
     reporterWhatsapp: '', preferredChannel: 'email' as 'email' | 'sms' | 'whatsapp',
   });
+
+  function pickContact(c: any) {
+    const name = [c.first_name, c.last_name].filter(Boolean).join(' ');
+    setSelectedContact({
+      id:    c.id,
+      name,
+      email: c.email ?? '',
+      phone: c.phone ?? c.mobile ?? '',
+    });
+    setForm(f => ({
+      ...f,
+      reporterName:  name || f.reporterName,
+      reporterEmail: c.email          ?? f.reporterEmail,
+      reporterPhone: c.phone ?? c.mobile ?? f.reporterPhone,
+    }));
+    setContactSearch('');
+    setShowDropdown(false);
+  }
+
+  function clearContact() {
+    setSelectedContact(null);
+    setForm(f => ({ ...f, reporterName: '', reporterEmail: '', reporterPhone: '' }));
+  }
 
   const mutation = useMutation({
     mutationFn: () => api.post('/api/v1/tickets', {
@@ -420,6 +462,9 @@ function CreateTicketModal({ queues, onClose }: { queues: Queue[]; onClose: () =
       autoAccept:    isAgent ? true : undefined,
       // A4 — never let an agent's payload set queueId.
       queueId:       isAgent ? undefined : (form.queueId || undefined),
+      // Munir-merge — link the ticket to a contact row so the Customer 360
+      // page can list it under that contact's Tickets tab.
+      contactId:        selectedContact?.id  || undefined,
       reporterName:     form.reporterName     || undefined,
       reporterEmail:    form.reporterEmail    || undefined,
       reporterPhone:     form.reporterPhone     || undefined,
@@ -438,8 +483,8 @@ function CreateTicketModal({ queues, onClose }: { queues: Queue[]; onClose: () =
 
   return (
     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
-      <div className="bg-white border border-gray-200 rounded-2xl shadow-xl w-full max-w-lg">
-        <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-gray-200">
+      <div className="bg-white border border-gray-200 rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-gray-200 sticky top-0 bg-white z-10">
           <h2 className="font-semibold text-gray-900 flex items-center gap-2">
             <LifeBuoy className="w-4 h-4 text-brand-400" /> New Support Ticket
           </h2>
@@ -447,16 +492,98 @@ function CreateTicketModal({ queues, onClose }: { queues: Queue[]; onClose: () =
         </div>
 
         <div className="p-6 space-y-4">
-          {/* Reporter section */}
+          {/* ── Contact search ─────────────────────────────────────────────
+              Munir-merge — agents pick an existing contact first so the
+              ticket links to a customer row. Falling back to free-form
+              reporter entry is allowed (warning shown below) but the
+              recommended flow is "search → pick → submit". */}
           <div>
-            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Reporter Details</p>
+            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
+              Customer <span className="text-red-400">*</span>
+            </p>
+            {selectedContact ? (
+              <div className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-xl border border-brand-300 bg-brand-50">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="w-7 h-7 rounded-full bg-brand-500 text-white text-xs font-bold flex items-center justify-center shrink-0">
+                    {selectedContact.name.charAt(0).toUpperCase() || '?'}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-gray-900 truncate">{selectedContact.name || 'Unnamed contact'}</p>
+                    <p className="text-xs text-gray-500 truncate">
+                      {selectedContact.email || selectedContact.phone || 'No contact info'}
+                    </p>
+                  </div>
+                </div>
+                <button onClick={clearContact} className="text-gray-400 hover:text-red-500 shrink-0" title="Clear contact">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            ) : (
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
+                <input
+                  value={contactSearch}
+                  onChange={e => { setContactSearch(e.target.value); setShowDropdown(true); }}
+                  onFocus={() => setShowDropdown(true)}
+                  placeholder="Search by name, email or phone…"
+                  className="w-full bg-white border border-gray-200 text-gray-900 placeholder-gray-400 rounded-xl pl-9 pr-3 py-2.5 text-sm outline-none focus:border-brand-400"
+                />
+                {showDropdown && contactSearch.length >= 2 && (
+                  <div className="absolute z-20 top-full mt-1 w-full bg-white border border-gray-200 rounded-xl shadow-lg overflow-hidden max-h-72 overflow-y-auto">
+                    {(contactResults as any[])?.length > 0 ? (
+                      (contactResults as any[]).map((c: any) => {
+                        const name = [c.first_name, c.last_name].filter(Boolean).join(' ');
+                        return (
+                          <button key={c.id} type="button" onMouseDown={() => pickContact(c)}
+                            className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-gray-50 text-left border-b border-gray-100 last:border-0">
+                            <div className="w-7 h-7 rounded-full bg-brand-100 text-brand-700 text-xs font-bold flex items-center justify-center shrink-0">
+                              {(name[0] ?? '?').toUpperCase()}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <p className="text-sm font-medium text-gray-900 truncate">{name || c.email || 'Unnamed'}</p>
+                              <p className="text-xs text-gray-400 truncate">{[c.email, c.phone || c.mobile].filter(Boolean).join(' · ')}</p>
+                            </div>
+                            <span className="text-[10px] text-gray-400 shrink-0 capitalize">{c.status}</span>
+                          </button>
+                        );
+                      })
+                    ) : (
+                      <p className="px-3 py-3 text-sm text-gray-400">
+                        No contacts found. Fill in details below, or create the contact first.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+            {!selectedContact && (
+              <p className="text-[11px] text-amber-600 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-2">
+                No customer selected — ticket will not be linked to a contact row, and won't show up under their Customer 360 history.
+              </p>
+            )}
+          </div>
+
+          {/* Reporter section — pre-filled & read-only when a contact is linked. */}
+          <div>
+            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
+              {selectedContact ? 'Reporter Details (from contact)' : 'Reporter Details'}
+            </p>
             <div className="grid grid-cols-2 gap-3">
               <input value={form.reporterName} onChange={set('reporterName')} placeholder="Full Name"
-                className="col-span-2 bg-white border border-gray-200 text-gray-900 placeholder-gray-400 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-brand-400" />
+                readOnly={!!selectedContact}
+                className={`col-span-2 border text-gray-900 placeholder-gray-400 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-brand-400 ${
+                  selectedContact ? 'bg-gray-50 border-gray-100 text-gray-500' : 'bg-white border-gray-200'
+                }`} />
               <input value={form.reporterEmail} onChange={set('reporterEmail')} placeholder="Email address" type="email"
-                className="bg-white border border-gray-200 text-gray-900 placeholder-gray-400 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-brand-400" />
+                readOnly={!!selectedContact}
+                className={`border text-gray-900 placeholder-gray-400 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-brand-400 ${
+                  selectedContact ? 'bg-gray-50 border-gray-100 text-gray-500' : 'bg-white border-gray-200'
+                }`} />
               <input value={form.reporterPhone} onChange={set('reporterPhone')} placeholder="Phone / SMS number"
-                className="bg-white border border-gray-200 text-gray-900 placeholder-gray-400 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-brand-400" />
+                readOnly={!!selectedContact}
+                className={`border text-gray-900 placeholder-gray-400 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-brand-400 ${
+                  selectedContact ? 'bg-gray-50 border-gray-100 text-gray-500' : 'bg-white border-gray-200'
+                }`} />
               <input value={form.reporterWhatsapp} onChange={set('reporterWhatsapp')} placeholder="WhatsApp number (if different)"
                 className="col-span-2 bg-white border border-gray-200 text-gray-900 placeholder-gray-400 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-brand-400" />
             </div>
@@ -1106,10 +1233,16 @@ export function Tickets() {
   // the create modal opens immediately instead of dumping the user on the list.
   const [search$, setSearch$]   = useSearchParams();
   const [showCreate, setCreate] = useState(search$.get('create') === '1');
-  const [selectedId, setSelect] = useState<string | null>(null);
+  // Munir-merge — ?open=<ticket-id> arriving from ContactDetail.tsx (or any
+  // notification link) auto-opens the ticket detail panel.
+  const [selectedId, setSelect] = useState<string | null>(search$.get('open'));
   useEffect(() => {
-    if (search$.get('create') === '1') {
-      const next = new URLSearchParams(search$); next.delete('create');
+    const hadCreate = search$.get('create') === '1';
+    const hadOpen   = !!search$.get('open');
+    if (hadCreate || hadOpen) {
+      const next = new URLSearchParams(search$);
+      if (hadCreate) next.delete('create');
+      if (hadOpen)   next.delete('open');
       setSearch$(next, { replace: true });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps

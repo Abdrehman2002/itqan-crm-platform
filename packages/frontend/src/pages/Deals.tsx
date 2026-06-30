@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Plus, DollarSign, Trophy, X, Loader2, ChevronDown,
@@ -38,6 +39,13 @@ function getStageType(name: string): 'new' | 'qualified' | 'proposal' | 'negotia
 export function Deals() {
   const qc = useQueryClient();
   const can = useCan();
+  // URL-driven open — when other pages link with ?open=<deal-id> (e.g. clickable
+  // deal rows in ContactDetail) we auto-open the matching deal as soon as the
+  // board for any pipeline finishes loading. We strip the param after consuming
+  // it so the back button doesn't keep re-triggering it.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const openDealParam = searchParams.get('open');
+  const [pendingOpenId, setPendingOpenId] = useState<string | null>(openDealParam);
   const [selectedPipeline, setSelectedPipeline] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [dragging, setDragging] = useState<any | null>(null);
@@ -64,11 +72,52 @@ export function Deals() {
     if (!selectedPipeline && pipelines?.[0]) setSelectedPipeline(pipelines[0].id);
   }, [pipelines, selectedPipeline]);
 
+  // Auto-open from ?open=<deal-id>. Fetch the deal once, switch to its pipeline
+  // (so the kanban shows the right board), then pop the drawer open. We swallow
+  // 404s silently — the URL may point at a deleted or cross-tenant deal.
+  useEffect(() => {
+    if (!pendingOpenId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.get(`/api/v1/deals/${pendingOpenId}`);
+        const deal = res.data.data;
+        if (cancelled || !deal) return;
+        if (deal.pipeline_id) setSelectedPipeline(deal.pipeline_id);
+        setSelected(deal);
+        // Strip ?open= so refresh/back doesn't keep re-opening.
+        const next = new URLSearchParams(searchParams);
+        next.delete('open');
+        setSearchParams(next, { replace: true });
+      } catch {
+        // ignore
+      } finally {
+        if (!cancelled) setPendingOpenId(null);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingOpenId]);
+
   const { data: board, isLoading } = useQuery({
     queryKey: ['board', selectedPipeline],
     queryFn: () => api.get(`/api/v1/deals/board/${selectedPipeline}`).then((r) => r.data.data),
     enabled: !!selectedPipeline,
   });
+
+  // Once the board for the auto-opened deal loads, try to pin selectedStage so
+  // the stage badge in the drawer shows the right column.
+  useEffect(() => {
+    if (!selected || selectedStage) return;
+    const stages = board?.board ?? [];
+    for (const s of stages) {
+      if ((s.deals ?? []).some((d: any) => d.id === selected.id)) {
+        setSelectedStage(s);
+        break;
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [board, selected]);
 
   const { data: dealActivities } = useQuery({
     queryKey: ['deal-activities', selected?.id],

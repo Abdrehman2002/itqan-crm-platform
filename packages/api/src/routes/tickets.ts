@@ -103,6 +103,9 @@ const CreateSlaSchema = z.object({
   name:                z.string().min(1),
   description:         z.string().optional(),
   priority:            z.enum(['urgent','high','medium','low']),
+  // Governance: which ticket domain this policy applies to. policy_admin can only
+  // write policies whose ticket_type matches one of their governed_departments.
+  ticketType:          z.enum(['sales','complaint','support']).nullable().optional(),
   firstResponseHours:  z.number().int().min(0),
   resolutionHours:     z.number().int().min(1),
   reminderPct:         z.number().int().min(1).max(99).default(80),
@@ -788,6 +791,52 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
     });
 
     // ── SLA policy CRUD ───────────────────────────────────────────────────
+    //
+    // Governance model (Munir + AmanahCX merged):
+    //   • READ  → any user with tickets:read (manager+ effectively; same as before)
+    //   • WRITE → ONLY policy_admin. tenant_admin / super_admin / manager are
+    //     read-only here. policy_admin is additionally scoped to write policies
+    //     whose ticket_type matches one of their governed_departments.
+    //
+    // Helper centralises the two checks so POST/PATCH/DELETE stay in lockstep
+    // and we don't accidentally drift one of them.
+    const assertSlaWrite = (
+      req: any,
+      reply: any,
+      ticketType: string | null | undefined,
+    ): boolean => {
+      if (req.user?.role !== 'policy_admin') {
+        reply.code(403).send({
+          success: false,
+          error: { code: 'SLA_WRITE_FORBIDDEN', message: 'Only policy_admin can write SLA policies.' },
+        });
+        return false;
+      }
+      // governed_departments is the allow-list. An empty/missing list means
+      // "ungoverned" → deny by default (admin must scope them). Match the
+      // policy's ticket_type against the list (case-insensitive).
+      const governed = ((req.user as any).governed_departments ?? []) as string[];
+      const tt = (ticketType ?? '').toLowerCase();
+      if (!tt) {
+        // No ticket_type on the policy means "all domains" — only allow if the
+        // user governs every supported domain. Conservative: require an explicit
+        // ticket_type instead.
+        reply.code(400).send({
+          success: false,
+          error: { code: 'SLA_TICKET_TYPE_REQUIRED', message: 'ticketType is required for governance-scoped writes.' },
+        });
+        return false;
+      }
+      if (!governed.map(d => d.toLowerCase()).includes(tt)) {
+        reply.code(403).send({
+          success: false,
+          error: { code: 'SLA_DEPT_FORBIDDEN', message: `You do not govern the "${tt}" department.` },
+        });
+        return false;
+      }
+      return true;
+    };
+
     fastify.get('/sla-policies', { preHandler: requireScope('tickets:read') }, async (req, reply) => {
       const policies = await db.withTenant(req.tenant.id, async (client) => {
         const r = await client.query('SELECT * FROM sla_policies ORDER BY priority DESC, name ASC');
@@ -798,6 +847,8 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
 
     fastify.post('/sla-policies', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const body = CreateSlaSchema.parse(req.body);
+      // Governance gate: policy_admin only, and only for governed departments.
+      if (!assertSlaWrite(req, reply, body.ticketType)) return;
       // BUG-L fix: original INSERT silently dropped business_hours_schedule + pause_on_pending.
       // Made the param positions explicit by name + added ::jsonb casts so pg never silently
       // coerces the text payload to null.
@@ -812,8 +863,8 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
            `INSERT INTO sla_policies
               (tenant_id, name, description, priority, first_response_hours, resolution_hours,
                reminder_pct, l1_escalation_pct, l2_escalation_pct, business_hours_only,
-               business_hours_schedule, pause_on_pending, is_active, reminder_schedule)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14::jsonb)
+               business_hours_schedule, pause_on_pending, is_active, reminder_schedule, ticket_type)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14::jsonb, $15)
             RETURNING *`,
            [
              req.tenant.id,                  // $1
@@ -830,6 +881,7 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
              body.pauseOnPending,            // $12 → pause_on_pending (bool, has Zod default false)
              body.isActive,                  // $13
              remSched,                       // $14 → reminder_schedule (jsonb)
+             body.ticketType ?? null,        // $15 → ticket_type (governance domain)
            ],
          );
         return r.rows;
@@ -840,6 +892,18 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
     fastify.patch('/sla-policies/:id', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const { id } = req.params as { id: string };
       const body = CreateSlaSchema.partial().parse(req.body);
+      // Governance: must be policy_admin AND must govern both the existing AND any new ticket_type.
+      // Look up the current row's ticket_type so the user can't sneak past by omitting the field.
+      const existing = await db.withTenant(req.tenant.id, async (client) => {
+        const r = await client.query('SELECT ticket_type FROM sla_policies WHERE id = $1', [id]);
+        return r.rows[0];
+      });
+      if (!existing) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'SLA policy not found' } });
+      if (!assertSlaWrite(req, reply, existing.ticket_type)) return;
+      // If the request is changing ticket_type, also gate on the NEW value.
+      if (body.ticketType !== undefined && body.ticketType !== existing.ticket_type) {
+        if (!assertSlaWrite(req, reply, body.ticketType)) return;
+      }
       const [policy] = await db.withTenant(req.tenant.id, async (client) => {
         const r = await client.query(
            `UPDATE sla_policies SET
@@ -856,15 +920,18 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
              pause_on_pending        = COALESCE($11,        pause_on_pending),
              is_active               = COALESCE($12,        is_active),
              reminder_schedule       = COALESCE($13::jsonb, reminder_schedule),
+             ticket_type             = COALESCE($14,        ticket_type),
              updated_at              = NOW()
-           WHERE id = $14 RETURNING *`,
+           WHERE id = $15 RETURNING *`,
           [body.name, body.description, body.priority, body.firstResponseHours,
            body.resolutionHours, body.reminderPct, body.l1EscalationPct,
            body.l2EscalationPct, body.businessHoursOnly,
            body.businessHoursSchedule !== undefined ? JSON.stringify(body.businessHoursSchedule) : null,
            body.pauseOnPending ?? null,
            body.isActive,
-           body.reminderSchedule !== undefined ? JSON.stringify(body.reminderSchedule) : null, id],
+           body.reminderSchedule !== undefined ? JSON.stringify(body.reminderSchedule) : null,
+           body.ticketType ?? null,
+           id],
         );
         return r.rows;
       });
@@ -874,6 +941,13 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
 
     fastify.delete('/sla-policies/:id', { preHandler: requireScope('tickets:write') }, async (req, reply) => {
       const { id } = req.params as { id: string };
+      // Governance: lookup ticket_type first, then gate via assertSlaWrite.
+      const existing = await db.withTenant(req.tenant.id, async (client) => {
+        const r = await client.query('SELECT ticket_type FROM sla_policies WHERE id = $1', [id]);
+        return r.rows[0];
+      });
+      if (!existing) return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'SLA policy not found' } });
+      if (!assertSlaWrite(req, reply, existing.ticket_type)) return;
       await db.withTenant(req.tenant.id, async (client) => {
         await client.query('UPDATE tickets SET sla_policy_id = NULL WHERE sla_policy_id = $1', [id]);
         await client.query('DELETE FROM sla_policies WHERE id = $1', [id]);

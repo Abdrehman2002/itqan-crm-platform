@@ -332,6 +332,10 @@ export function authRoutes(db: DatabaseClient, redis: RedisClient) {
         department: user.department ?? null,
         sector:     tenant.sector ?? 'other',
         permissions: effectivePermissions,
+        // Governance allow-list — only meaningful for policy_admin. Carried in the
+        // JWT so the SLA write guard in tickets.ts can enforce it without re-reading
+        // the user row on every request.
+        governed_departments: user.governed_departments ?? [],
         jti,
       });
 

@@ -10,12 +10,15 @@
 
 import { useAuthStore } from '../store/auth.store';
 
-type Role = 'super_admin' | 'tenant_admin' | 'manager' | 'agent' | 'viewer';
+type Role = 'super_admin' | 'tenant_admin' | 'manager' | 'policy_admin' | 'agent' | 'viewer';
 
 const ROLE_RANK: Record<Role, number> = {
   super_admin:  50,
   tenant_admin: 40,
   manager:      30,
+  // policy_admin — independent governance role, sits between manager and agent.
+  // Reports to no department; governs SLA policies cross-cutting.
+  policy_admin: 25,
   agent:        20,
   viewer:       10,
 };
@@ -58,6 +61,12 @@ export function useIsManager(): boolean {
   return getRank(user?.role) >= ROLE_RANK.manager;
 }
 
+/** Policy Governance Admin — independent role that governs SLA policies cross-department. */
+export function useIsPolicyAdmin(): boolean {
+  const { user } = useAuthStore();
+  return user?.role === 'policy_admin';
+}
+
 /**
  * Granular permission check.
  * add_more_permissions here as the product grows.
@@ -77,7 +86,10 @@ export function useCan() {
     manageWorkspace: rank >= ROLE_RANK.tenant_admin,
     /** Create / revoke API keys and webhooks */
     manageIntegrations: rank >= ROLE_RANK.manager,
-    manageSla: rank >= ROLE_RANK.manager,
+    /** WRITE access to SLA policies (Create/Edit/Delete). Only policy_admin governs SLA. */
+    manageSla: user?.role === 'policy_admin',
+    /** READ access to SLA policies page — manager and above keep visibility. */
+    viewSla: rank >= ROLE_RANK.manager || user?.role === 'policy_admin',
     /** View analytics and reports */
     viewAnalytics: rank >= ROLE_RANK.agent,
     /** Manage all workspaces on the platform */

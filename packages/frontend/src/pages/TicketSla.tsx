@@ -718,6 +718,18 @@ export function TicketSla() {
         )}
       </div>
 
+      {/* Governance read-only notice — shown to manager / tenant_admin / super_admin
+          who can view but not write SLA policies (only policy_admin can write). */}
+      {!can.manageSla && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 flex items-start gap-2.5">
+          <ShieldAlert className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
+          <div className="text-xs text-amber-900">
+            <p className="font-semibold">Read-only view</p>
+            <p className="text-amber-800/90 mt-0.5">SLA policies are governed by the <strong>policy_admin</strong> role. Contact your governance admin to make changes.</p>
+          </div>
+        </div>
+      )}
+
       {/* How it works */}
       <div className="bg-brand-50 rounded-2xl p-4 border border-brand-100">
         <p className="text-sm font-semibold text-brand-800 mb-2">How multi-step escalation works</p>

@@ -49,6 +49,7 @@ import { sectorRoutes } from './routes/sector';
 import { departmentRoutes } from './routes/departments';
 import { opportunityRoutes } from './routes/opportunities';
 import { teamMessageRoutes } from './routes/team-messages';
+import { agentStatusRoutes } from './routes/agent-status';
 
 // Feature modules (internal building blocks)
 import { ContactsModule } from '../../../modules/contacts/src';
@@ -276,6 +277,7 @@ async function buildServer() {
       '/api/v1/departments',
       '/api/v1/opportunities',
       '/api/v1/sales',
+      '/api/v1/agent',
     ];
     if (
       req.url.startsWith('/api/v1/') &&
@@ -356,6 +358,7 @@ async function buildServer() {
   await fastify.register(departmentRoutes(db),     { prefix: '/api/v1/departments' });
   await fastify.register(opportunityRoutes(db),    { prefix: '/api/v1/opportunities' });
   await fastify.register(teamMessageRoutes(db),    { prefix: '/api/v1/messages' });
+  await fastify.register(agentStatusRoutes(db),    { prefix: '/api/v1/agent' });
 
   // Health check
   fastify.get('/health', async () => ({

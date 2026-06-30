@@ -1,4 +1,4 @@
-export type UserRole = 'super_admin' | 'tenant_admin' | 'manager' | 'agent' | 'readonly';
+export type UserRole = 'super_admin' | 'tenant_admin' | 'manager' | 'policy_admin' | 'agent' | 'readonly';
 
 export interface User {
   id: string;
@@ -13,6 +13,11 @@ export interface User {
   createdAt: Date;
   /** Department scoping: 'sales' | 'support' | 'complaints' | null */
   department?: string | null;
+  /**
+   * Governance: department names this user (policy_admin role) is authorised to
+   * write SLA policies for. Matches against sla_policies.ticket_type.
+   */
+  governed_departments?: string[];
 }
 
 export interface UserPreferences {
@@ -40,4 +45,6 @@ export interface AuthToken {
   sector?: string;
   /** Module-level permission map from users.permissions column (e.g. { deals: "view", tickets: "full" }) */
   permissions?: Record<string, string>;
+  /** Governance domains the user (policy_admin) is authorised to write SLA policies for. */
+  governed_departments?: string[];
 }

@@ -533,19 +533,22 @@ export function settingsRoutes(db: DatabaseClient) {
         email:           z.string().email(),
         name:            z.string().max(100).optional(),
         // Tenant admins can only assign roles up to their own level; super_admin is never assignable here
-        role:            z.enum(['tenant_admin', 'manager', 'agent', 'viewer']).default('agent'),
+        role:            z.enum(['tenant_admin', 'manager', 'policy_admin', 'agent', 'viewer']).default('agent'),
         custom_role_id:  z.string().uuid().optional(),
         permissions:     z.record(z.string()).optional(),
         department:      z.string().max(100).optional(),
         // Gap 8: explicit dept type — prevents fragile keyword matching on ambiguous dept names
         departmentType:  z.enum(DEPT_TYPES).optional(),
         manager_id:      z.string().uuid().nullable().optional(),
+        // Governance: only meaningful for role === 'policy_admin'. Allow-list of
+        // ticket-type domains the new user can write SLA policies for.
+        governed_departments: z.array(z.string()).optional(),
       });
       const parsed = InviteSchema.safeParse(req.body);
       if (!parsed.success) {
         return reply.code(400).send({ success: false, error: { code: 'INVALID_INPUT', message: parsed.error.issues[0]?.message ?? 'Invalid input' } });
       }
-      const { email, name, role, custom_role_id, permissions: customPermissions, department, departmentType, manager_id } = parsed.data;
+      const { email, name, role, custom_role_id, permissions: customPermissions, department, departmentType, manager_id, governed_departments } = parsed.data;
 
       const displayName  = name?.trim() || email.split('@')[0];
       const assignedRole = role ?? 'agent';
@@ -557,15 +560,19 @@ export function settingsRoutes(db: DatabaseClient) {
       // 1. Create (or update) user account with role + permissions + department
       const [user] = await db.withTenant(req.tenant.id, async (client) => {
         const result = await client.query(
-          `INSERT INTO users (tenant_id, email, name, role, password_hash, permissions, custom_role_id, department, department_type, manager_id)
-           VALUES ($1, $2, $3, $4, 'INVITE_PENDING', $5, $6, $7, $8, $9)
+          `INSERT INTO users (tenant_id, email, name, role, password_hash, permissions, custom_role_id, department, department_type, manager_id, governed_departments)
+           VALUES ($1, $2, $3, $4, 'INVITE_PENDING', $5, $6, $7, $8, $9, $10)
            ON CONFLICT (tenant_id, email) DO UPDATE
              SET role = EXCLUDED.role, name = EXCLUDED.name,
                  permissions = EXCLUDED.permissions, custom_role_id = EXCLUDED.custom_role_id,
                  department = EXCLUDED.department, department_type = EXCLUDED.department_type,
-                 manager_id = EXCLUDED.manager_id
-           RETURNING id, email, name, role, permissions, custom_role_id, department, department_type, manager_id`,
-          [req.tenant.id, email, displayName, assignedRole, JSON.stringify(perms), custom_role_id ?? null, department ?? null, departmentType ?? null, manager_id ?? null],
+                 manager_id = EXCLUDED.manager_id,
+                 governed_departments = EXCLUDED.governed_departments
+           RETURNING id, email, name, role, permissions, custom_role_id, department, department_type, manager_id, governed_departments`,
+          [req.tenant.id, email, displayName, assignedRole, JSON.stringify(perms), custom_role_id ?? null, department ?? null, departmentType ?? null, manager_id ?? null,
+           // Only persist governed_departments when the assigned role is policy_admin —
+           // for every other role it has no meaning and would just be dead data.
+           assignedRole === 'policy_admin' ? (governed_departments ?? []) : null],
         );
         return result.rows;
       });

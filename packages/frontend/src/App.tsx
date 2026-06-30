@@ -8,7 +8,7 @@ import {
   FileText, Layers, MessageCircle, Key, Bell, Lock, Loader2,
 } from 'lucide-react';
 import { useAuthStore } from './store/auth.store';
-import { useIsSuperAdmin, useIsAdmin, useIsTenantAdmin, useHasRole } from './hooks/useRole';
+import { useIsSuperAdmin, useIsAdmin, useIsTenantAdmin, useHasRole, useIsPolicyAdmin } from './hooks/useRole';
 import { useApplyAppearance } from './hooks/useApplyAppearance';
 import { api } from './services/api';
 import { NotificationBell } from './components/NotificationBell';
@@ -42,6 +42,7 @@ const SuperAdmin        = lazy(() => import('./pages/SuperAdmin').then(m => ({ d
 const VoiceAnalytics    = lazy(() => import('./pages/VoiceAnalytics').then(m => ({ default: m.VoiceAnalytics })));
 const Tickets           = lazy(() => import('./pages/Tickets').then(m => ({ default: m.Tickets })));
 const TicketQueues      = lazy(() => import('./pages/TicketQueues').then(m => ({ default: m.TicketQueues })));
+const Wallboard         = lazy(() => import('./pages/Wallboard').then(m => ({ default: m.Wallboard })));
 const TicketSla         = lazy(() => import('./pages/TicketSla').then(m => ({ default: m.TicketSla })));
 const Emails            = lazy(() => import('./pages/Emails').then(m => ({ default: m.Emails })));
 const VoiceBotConfig    = lazy(() => import('./pages/VoiceBotConfig').then(m => ({ default: m.VoiceBotConfig })));
@@ -145,12 +146,88 @@ function MessagingNavLink() {
   );
 }
 
+// ── Agent Status presence widget ──────────────────────────────────────────
+// Small picker shown only to frontline operational roles (agent, line_manager).
+// Lets them flip their own presence between online/busy/away/offline; the
+// wallboard reads the result for managers. Managers/admins don't need it —
+// they don't appear on the wallboard as agents.
+const AGENT_STATUSES = [
+  { value: 'online',  label: 'Online',  dot: 'bg-emerald-400', text: 'text-emerald-400' },
+  { value: 'busy',    label: 'Busy',    dot: 'bg-red-400',     text: 'text-red-400'     },
+  { value: 'away',    label: 'Away',    dot: 'bg-yellow-400',  text: 'text-yellow-400'  },
+  { value: 'offline', label: 'Offline', dot: 'bg-gray-400',    text: 'text-gray-400'    },
+] as const;
+
+function AgentStatusPicker() {
+  const [status, setStatus] = React.useState<string>('offline');
+  const [open, setOpen]     = React.useState(false);
+  const ref = React.useRef<HTMLDivElement>(null);
+
+  // Load current status on mount
+  React.useEffect(() => {
+    api.get('/api/v1/agent/status').then(r => {
+      if (r.data?.data?.status) setStatus(r.data.data.status);
+    }).catch(() => { /* endpoint may not be live yet — leave default */ });
+  }, []);
+
+  // Close on outside click
+  React.useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const current = AGENT_STATUSES.find(s => s.value === status) ?? AGENT_STATUSES[3];
+
+  const pick = async (val: string) => {
+    setStatus(val);
+    setOpen(false);
+    try { await api.patch('/api/v1/agent/status', { status: val }); }
+    catch { /* swallow — UI optimistically updated */ }
+  };
+
+  return (
+    <div ref={ref} className="relative mb-2">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center gap-2 px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 transition-colors"
+        title="Set your status"
+      >
+        <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${current.dot}`} />
+        <span className="text-xs text-white font-medium flex-1 text-left">{current.label}</span>
+        <span className="text-[10px] text-white/40">change</span>
+      </button>
+      {open && (
+        <div className="absolute bottom-full left-0 right-0 mb-1 bg-white rounded-xl shadow-xl border border-gray-100 py-1 z-50">
+          {AGENT_STATUSES.map(s => (
+            <button
+              key={s.value}
+              onClick={() => pick(s.value)}
+              className={`w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-gray-50 transition-colors ${
+                status === s.value ? 'font-semibold text-gray-900' : 'text-gray-700'
+              }`}
+            >
+              <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${s.dot}`} />
+              {s.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Sidebar() {
   const { user, tenant, logout } = useAuthStore();
   const isSuperAdmin  = useIsSuperAdmin();
   const isAdmin       = useIsAdmin();
   const isTenantAdmin = useIsTenantAdmin();
   const isManager     = useHasRole('manager');
+  const isPolicyAdmin = useIsPolicyAdmin();
+  // Presence picker is only relevant for frontline roles that take work.
+  const showPresence  = user?.role === 'agent' || user?.role === 'line_manager';
 
   // Fetch active modules from the API — drives the sidebar dynamically
   const { data: modulesData } = useQuery<ActiveModule[]>({
@@ -419,8 +496,10 @@ function Sidebar() {
           </NavLink>
         )}
 
-        {/* SLA Policies — managers only */}
-        {isManager && !isTenantAdmin && (
+        {/* SLA Policies — policy_admin (governance) or super_admin only.
+            Manager / tenant_admin lost direct nav access; the page itself is now
+            governance-owned. Super admin retains visibility for support. */}
+        {(isPolicyAdmin || isSuperAdmin) && (
           <NavLink to="/tickets/sla"
             className={({ isActive }) =>
               `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition-all ${
@@ -454,6 +533,9 @@ function Sidebar() {
             Routing & SLA
           </NavLink>
         )}
+
+        {/* Agent Status presence — frontline roles only, just above the user chip */}
+        {showPresence && <AgentStatusPicker />}
 
         {/* User chip — always visible; avatar links to Personal Settings */}
         <div className="mt-2 px-2 py-2 rounded-xl bg-white/10 flex items-center gap-2">
@@ -593,6 +675,8 @@ function AppLayout() {
           <Route path="/voice/analytics" element={op(<VoiceAnalytics />)} />
           <Route path="/tickets"         element={op(<Tickets />)} />
           <Route path="/tickets/queues"  element={op(<TicketQueues />)} />
+          {/* Live Wallboard — manager/admin presence board. Frontline agents are excluded. */}
+          <Route path="/wallboard"       element={(isSuperAdmin || isTenantAdmin || isManager) ? <Wallboard /> : <Navigate to="/dashboard" replace />} />
           <Route path="/tickets/sla"     element={op(<TicketSla />)} />
           <Route path="/emails"          element={op(<Emails />)} />
           <Route path="/messages"        element={<TeamMessaging />} />

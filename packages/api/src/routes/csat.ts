@@ -154,6 +154,31 @@ export function csatProtectedRoutes(db: DatabaseClient) {
       return reply.send({ success: true, data: { ...stats, responseRate } });
     });
 
+    // GET /api/v1/tickets/csat/contact/:contactId — per-contact CSAT summary
+    // (avg + count) for the Customer 360 page. Falls back to resolved-ticket
+    // csat_rating if no csat_surveys rows exist.
+    fastify.get('/contact/:contactId', { preHandler }, async (req, reply) => {
+      const { contactId } = req.params as { contactId: string };
+      const tenantId = req.tenant.id;
+
+      const [row] = await db.withTenant(tenantId, async (c) => {
+        const r = await c.query(`
+          SELECT
+            ROUND(AVG(cs.rating) FILTER (WHERE cs.rating IS NOT NULL), 1)::float8 AS avg,
+            COUNT(*) FILTER (WHERE cs.rating IS NOT NULL)::int                    AS count
+          FROM csat_surveys cs
+          JOIN tickets t ON t.id = cs.ticket_id
+          WHERE t.contact_id = $1
+        `, [contactId]);
+        return r.rows;
+      });
+
+      return reply.send({
+        success: true,
+        data: { avg: row?.avg ?? null, count: row?.count ?? 0 },
+      });
+    });
+
     // GET /api/v1/tickets/csat — list responses with pagination
     fastify.get('/', { preHandler }, async (req, reply) => {
       const { page = 1, pageSize = 25, rated } = req.query as any;

@@ -5,7 +5,7 @@ import {
   ArrowLeft, User, Building2, Mail, Phone, Tag,
   TrendingUp, CheckSquare, LifeBuoy,
   Edit2, Save, X, Loader2,
-  Clock, Calendar, PhoneCall,
+  Clock, Calendar, PhoneCall, Plus, Star,
 } from 'lucide-react';
 import { api } from '../services/api';
 import { formatCurrency } from '../utils/format';
@@ -165,6 +165,7 @@ function EditModal({ contact, onClose }: { contact: Contact; onClose: () => void
 // ── Deals tab ─────────────────────────────────────────────────────────────────
 
 function DealsTab({ contactId }: { contactId: string }) {
+  const navigate = useNavigate();
   const { data } = useQuery({
     queryKey: ['contact-deals', contactId],
     queryFn: () => api.get(`/api/v1/deals?contactId=${contactId}`).then((r) => r.data.data ?? []),
@@ -183,7 +184,14 @@ function DealsTab({ contactId }: { contactId: string }) {
   return (
     <div className="space-y-2">
       {deals.map((deal) => (
-        <div key={deal.id} className="bg-white border border-gray-100 rounded-xl p-4 flex items-center justify-between hover:border-brand-200 transition-colors">
+        // Munir-merge — rows are clickable. We navigate to /deals?open=<id>
+        // and the Deals page picks up the param, switches to the right
+        // pipeline, and opens the drawer.
+        <button
+          key={deal.id}
+          onClick={() => navigate(`/deals?open=${deal.id}`)}
+          className="w-full text-left bg-white border border-gray-100 rounded-xl p-4 flex items-center justify-between hover:border-brand-300 hover:bg-brand-50/40 transition-colors"
+        >
           <div className="flex-1 min-w-0">
             <p className="text-sm font-medium text-gray-900 truncate">{deal.name}</p>
             <p className="text-xs text-gray-400 mt-0.5">{deal.stage_name ?? '—'} · Close: {fmtDate(deal.close_date)}</p>
@@ -196,7 +204,7 @@ function DealsTab({ contactId }: { contactId: string }) {
               {deal.amount ? formatCurrency(deal.amount, deal.currency) : '—'}
             </span>
           </div>
-        </div>
+        </button>
       ))}
     </div>
   );
@@ -205,11 +213,51 @@ function DealsTab({ contactId }: { contactId: string }) {
 // ── Timeline tab ──────────────────────────────────────────────────────────────
 
 function TimelineTab({ contactId }: { contactId: string }) {
-  const { data, isLoading } = useQuery({
+  const navigate = useNavigate();
+
+  // Munir-merge — Unified Timeline pulls four independent feeds (activities &
+  // voice calls already merged server-side; tickets + deals fetched separately)
+  // and merges them on the client by created_at desc. Each item keeps a `type`
+  // tag so we render the correct icon + click target.
+  const { data: baseTimeline, isLoading } = useQuery({
     queryKey: ['contact-timeline', contactId],
     queryFn: () => api.get(`/api/v1/contacts/${contactId}/timeline`).then((r) => r.data.data ?? []),
   });
-  const items: TimelineItem[] = data ?? [];
+  const { data: ticketRows } = useQuery({
+    queryKey: ['contact-timeline-tickets', contactId],
+    queryFn: () => api.get(`/api/v1/tickets?contactId=${contactId}&pageSize=50`).then((r) => r.data.data ?? []),
+  });
+  const { data: dealRows } = useQuery({
+    queryKey: ['contact-timeline-deals', contactId],
+    queryFn: () => api.get(`/api/v1/deals?contactId=${contactId}`).then((r) => r.data.data ?? []),
+  });
+
+  type Item = TimelineItem & { onClick?: () => void; meta?: string };
+  const items: Item[] = [
+    ...((baseTimeline as TimelineItem[] | undefined) ?? []),
+    ...((ticketRows as any[] | undefined) ?? []).map((t: any): Item => ({
+      id:         t.id,
+      type:       'ticket',
+      subtype:    t.status,
+      subject:    `#${t.ticket_number} · ${t.subject ?? '—'}`,
+      created_at: t.created_at,
+      owner_id:   t.assignee_id ?? '',
+      metadata:   null,
+      meta:       t.priority ? `${t.priority} priority` : undefined,
+      onClick:    () => navigate(`/tickets?open=${t.id}`),
+    })),
+    ...((dealRows as any[] | undefined) ?? []).map((d: any): Item => ({
+      id:         d.id,
+      type:       'deal',
+      subtype:    d.stage_name ?? d.status,
+      subject:    d.name,
+      created_at: d.created_at,
+      owner_id:   d.owner_id ?? '',
+      metadata:   null,
+      meta:       d.amount ? formatCurrency(parseFloat(d.amount), d.currency) : undefined,
+      onClick:    () => navigate(`/deals?open=${d.id}`),
+    })),
+  ].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
   if (isLoading) return <div className="flex justify-center py-8"><Loader2 className="w-5 h-5 text-brand-400 animate-spin" /></div>;
   if (items.length === 0) {
@@ -229,15 +277,25 @@ function TimelineTab({ contactId }: { contactId: string }) {
         {items.map((item) => {
           const iconInfo = TIMELINE_ICONS[item.type] ?? TIMELINE_ICONS.activity;
           const Icon = iconInfo.icon;
+          const clickable = !!item.onClick;
           return (
             <div key={`${item.type}-${item.id}`} className="flex gap-4 relative pl-2">
               <div className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 mt-1 z-10 ${iconInfo.bg}`}>
                 <Icon className={`w-3 h-3 ${iconInfo.text}`} />
               </div>
-              <div className="flex-1 bg-white border border-gray-100 rounded-xl p-3 mb-2">
+              <div
+                onClick={item.onClick}
+                className={`flex-1 bg-white border border-gray-100 rounded-xl p-3 mb-2 ${
+                  clickable ? 'cursor-pointer hover:border-brand-300 hover:bg-brand-50/30' : ''
+                }`}
+              >
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex-1 min-w-0">
-                    <p className="text-xs text-gray-400 capitalize mb-0.5">{item.type.replace('_', ' ')} · {item.subtype?.replace('_',' ')}</p>
+                    <p className="text-xs text-gray-400 capitalize mb-0.5">
+                      {item.type.replace('_', ' ')}
+                      {item.subtype ? ` · ${String(item.subtype).replace('_',' ')}` : ''}
+                      {item.meta ? ` · ${item.meta}` : ''}
+                    </p>
                     <p className="text-sm font-medium text-gray-800 leading-snug">{item.subject || '—'}</p>
                   </div>
                   <span className="text-xs text-gray-400 shrink-0">{fmtRelative(item.created_at)}</span>
@@ -305,10 +363,125 @@ function EmailsTab({ contactId }: { contactId: string }) {
 
 // ── Tickets tab ───────────────────────────────────────────────────────────────
 
-function TicketsTab({ contactId }: { contactId: string }) {
+function NewTicketModal({
+  contact, onClose, onCreated,
+}: {
+  contact: Contact;
+  onClose: () => void;
+  onCreated: (ticketId: string) => void;
+}) {
+  const qc = useQueryClient();
+  const [form, setForm] = useState({
+    subject: '',
+    description: '',
+    priority: 'medium',
+  });
+
+  const mutation = useMutation({
+    mutationFn: () => api.post('/api/v1/tickets', {
+      subject:       form.subject,
+      description:   form.description || undefined,
+      priority:      form.priority,
+      channel:       'manual',
+      // Munir-merge — always link to the contact we're viewing + pre-fill
+      // reporter fields so the agent gets the same record on submit as if
+      // they had searched on the Tickets page.
+      contactId:     contact.id,
+      reporterName:  [contact.first_name, contact.last_name].filter(Boolean).join(' ') || undefined,
+      reporterEmail: contact.email  || undefined,
+      reporterPhone: contact.phone  || contact.mobile || undefined,
+    }),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ['contact-tickets', contact.id] });
+      qc.invalidateQueries({ queryKey: ['contact-timeline', contact.id] });
+      qc.invalidateQueries({ queryKey: ['contact-timeline-tickets', contact.id] });
+      qc.invalidateQueries({ queryKey: ['contact-csat', contact.id] });
+      const newId = res?.data?.data?.id;
+      if (newId) onCreated(newId);
+      onClose();
+    },
+  });
+
+  const PRIORITY_OPTS = ['low', 'medium', 'high', 'urgent'] as const;
+  const fullName = [contact.first_name, contact.last_name].filter(Boolean).join(' ') || 'this contact';
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-md">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+          <h2 className="text-sm font-semibold text-gray-900">New Ticket for {fullName}</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-700"><X className="w-4 h-4" /></button>
+        </div>
+        <div className="p-6 space-y-4">
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">
+              Subject <span className="text-red-500">*</span>
+            </label>
+            <input
+              value={form.subject}
+              onChange={(e) => setForm({ ...form, subject: e.target.value })}
+              placeholder="Describe the issue…"
+              className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-brand-400"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Description</label>
+            <textarea
+              value={form.description}
+              onChange={(e) => setForm({ ...form, description: e.target.value })}
+              rows={3}
+              placeholder="Optional context…"
+              className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-brand-400 resize-none"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Priority</label>
+            <div className="flex gap-2">
+              {PRIORITY_OPTS.map((p) => (
+                <button key={p} type="button"
+                  onClick={() => setForm({ ...form, priority: p })}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium capitalize border transition-colors ${
+                    form.priority === p
+                      ? 'border-brand-400 bg-brand-50 text-brand-700'
+                      : 'border-gray-200 text-gray-500 hover:border-gray-300'
+                  }`}>
+                  {p}
+                </button>
+              ))}
+            </div>
+          </div>
+          <p className="text-[11px] text-gray-400 bg-gray-50 border border-gray-100 rounded-lg px-3 py-2">
+            This ticket will be linked to {fullName} and pre-filled with their contact details.
+          </p>
+          {mutation.isError && (
+            <p className="text-xs text-red-600">Failed to create ticket. Try again.</p>
+          )}
+        </div>
+        <div className="px-6 pb-5 flex justify-end gap-2">
+          <button onClick={onClose}
+            className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-xl hover:bg-gray-50">
+            Cancel
+          </button>
+          <button
+            onClick={() => mutation.mutate()}
+            disabled={!form.subject.trim() || mutation.isPending}
+            className="px-4 py-2 text-sm font-medium text-white bg-brand-600 hover:bg-brand-700 rounded-xl disabled:opacity-50 flex items-center gap-1.5"
+          >
+            {mutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+            Create Ticket
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TicketsTab({ contact }: { contact: Contact }) {
+  const navigate = useNavigate();
+  const [showNew, setShowNew] = useState(false);
   const { data } = useQuery({
-    queryKey: ['contact-tickets', contactId],
-    queryFn: () => api.get(`/api/v1/tickets?contactId=${contactId}&pageSize=20`).then((r) => r.data.data ?? []),
+    queryKey: ['contact-tickets', contact.id],
+    queryFn: () => api.get(`/api/v1/tickets?contactId=${contact.id}&pageSize=20`).then((r) => r.data.data ?? []),
   });
   const tickets: any[] = data ?? [];
 
@@ -337,39 +510,63 @@ function TicketsTab({ contactId }: { contactId: string }) {
     return { text, cls };
   };
 
-  if (tickets.length === 0) {
-    return (
-      <div className="text-center py-12 text-gray-400">
-        <LifeBuoy className="w-8 h-8 mx-auto mb-2 opacity-40" />
-        <p className="text-sm">No support tickets from this contact</p>
-      </div>
-    );
-  }
+  // Munir-merge — quick "New Ticket" button on the Tickets tab. Opens an
+  // inline modal pre-linked to this contact and routes to the new ticket
+  // detail panel on success.
+  const NewBtn = (
+    <div className="flex justify-end mb-3">
+      <button onClick={() => setShowNew(true)}
+        className="flex items-center gap-1.5 text-xs font-medium text-white bg-brand-600 hover:bg-brand-700 px-3 py-1.5 rounded-lg transition-colors">
+        <Plus className="w-3.5 h-3.5" /> New Ticket
+      </button>
+    </div>
+  );
 
   return (
-    <div className="space-y-2">
-      {tickets.map((t) => (
-        <div key={t.id} className="bg-white border border-gray-100 rounded-xl p-4 flex items-center justify-between hover:border-brand-200 transition-colors">
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 mb-0.5">
-              <span className="text-xs font-mono text-gray-400">#{t.ticket_number}</span>
-              <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium ${PRIORITY_COLORS[t.priority]}`}>{t.priority}</span>
-            </div>
-            <p className="text-sm font-medium text-gray-900 truncate">{t.subject}</p>
-            <p className="text-xs text-gray-400 mt-0.5">{fmtRelative(t.created_at)}</p>
-          </div>
-          <div className="flex flex-col items-end shrink-0 ml-3 gap-0.5">
-            <span className={`text-xs font-medium capitalize ${t.status === 'resolved' || t.status === 'closed' ? 'text-emerald-600' : 'text-blue-600'}`}>
-              {t.status?.replace('_', ' ')}
-            </span>
-            {(() => {
-              const tat = tatLabel(t);
-              return tat ? <span className={`text-[11px] font-medium ${tat.cls}`}>{tat.text}</span> : null;
-            })()}
-          </div>
+    <>
+      {showNew && (
+        <NewTicketModal
+          contact={contact}
+          onClose={() => setShowNew(false)}
+          onCreated={(id) => navigate(`/tickets?open=${id}`)}
+        />
+      )}
+      {NewBtn}
+      {tickets.length === 0 ? (
+        <div className="text-center py-12 text-gray-400">
+          <LifeBuoy className="w-8 h-8 mx-auto mb-2 opacity-40" />
+          <p className="text-sm">No support tickets from this contact</p>
         </div>
-      ))}
-    </div>
+      ) : (
+        <div className="space-y-2">
+          {tickets.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => navigate(`/tickets?open=${t.id}`)}
+              className="w-full text-left bg-white border border-gray-100 rounded-xl p-4 flex items-center justify-between hover:border-brand-300 hover:bg-brand-50/40 transition-colors"
+            >
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-0.5">
+                  <span className="text-xs font-mono text-gray-400">#{t.ticket_number}</span>
+                  <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium ${PRIORITY_COLORS[t.priority]}`}>{t.priority}</span>
+                </div>
+                <p className="text-sm font-medium text-gray-900 truncate">{t.subject}</p>
+                <p className="text-xs text-gray-400 mt-0.5">{fmtRelative(t.created_at)}</p>
+              </div>
+              <div className="flex flex-col items-end shrink-0 ml-3 gap-0.5">
+                <span className={`text-xs font-medium capitalize ${t.status === 'resolved' || t.status === 'closed' ? 'text-emerald-600' : 'text-blue-600'}`}>
+                  {t.status?.replace('_', ' ')}
+                </span>
+                {(() => {
+                  const tat = tatLabel(t);
+                  return tat ? <span className={`text-[11px] font-medium ${tat.cls}`}>{tat.text}</span> : null;
+                })()}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -394,6 +591,16 @@ export function ContactDetail() {
     enabled: !!id,
   });
   const contact: Contact | undefined = data;
+
+  // Munir-merge — CSAT summary (avg + count) from resolved tickets linked to
+  // this contact. Endpoint added to packages/api/src/routes/csat.ts under
+  // /api/v1/tickets/csat/contact/:contactId.
+  const { data: csatData } = useQuery<{ avg: number | null; count: number }>({
+    queryKey: ['contact-csat', id],
+    queryFn: () =>
+      api.get(`/api/v1/tickets/csat/contact/${id}`).then((r) => r.data.data),
+    enabled: !!id,
+  });
 
   if (isLoading) {
     return (
@@ -443,6 +650,23 @@ export function ContactDetail() {
           <span className={`inline-block mt-2 text-xs px-2 py-0.5 rounded-full font-medium capitalize ${STATUS_COLORS[contact.status] ?? 'bg-gray-100 text-gray-600'}`}>
             {contact.status}
           </span>
+
+          {/* CSAT widget — shows the rolling average of CSAT survey responses
+              across this contact's resolved tickets. Hidden when there are
+              no ratings yet (avoid showing a misleading 0★). */}
+          {csatData && csatData.count > 0 && csatData.avg != null && (
+            <div className="mt-3 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 border border-amber-200">
+              {[1,2,3,4,5].map(n => (
+                <Star key={n}
+                  className={`w-3.5 h-3.5 ${n <= Math.round(csatData.avg!) ? 'text-amber-400 fill-amber-400' : 'text-gray-200 fill-gray-200'}`}
+                />
+              ))}
+              <span className="text-xs font-bold text-gray-800 ml-0.5">{csatData.avg.toFixed(1)}</span>
+              <span className="text-[10px] text-gray-500">
+                ({csatData.count} {csatData.count === 1 ? 'rating' : 'ratings'})
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Contact info */}
@@ -547,7 +771,7 @@ export function ContactDetail() {
           {tab === 'timeline' && <TimelineTab contactId={id!} />}
           {tab === 'deals'    && <DealsTab    contactId={id!} />}
           {tab === 'emails'   && <EmailsTab   contactId={id!} />}
-          {tab === 'tickets'  && <TicketsTab  contactId={id!} />}
+          {tab === 'tickets'  && <TicketsTab  contact={contact} />}
         </div>
       </div>
 
