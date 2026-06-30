@@ -514,12 +514,18 @@ interface StructuredComplaint {
   callId?: string;
 }
 
+// BUG-AE diagnostic: when this function fails we lose the error inside the
+// catch. Expose the last error via a module-scope ref so the route handler
+// can echo it back to the caller for debugging.
+let lastComplaintError: string | null = null;
+
 async function createComplaintFromStructured(
   db: DatabaseClient,
   eventBus: EventBus,
   tenantId: string,
   s: StructuredComplaint,
 ): Promise<{ ticketId: string; ticketNumber: string; voiceCallId: string } | null> {
+  lastComplaintError = null;
   try {
     const priority = PRIORITY_MAP[(s.priority || 'medium').toLowerCase()] ?? 'medium';
     const subject = (s.subject || s.description || 'Voice complaint').slice(0, 120);
@@ -612,10 +618,15 @@ async function createComplaintFromStructured(
 
     return { ticketId: ticket.id as string, ticketNumber, voiceCallId: botCall.id as string };
   } catch (err: any) {
-    console.error('[LiveKit→Ticket]', err.message);
+    lastComplaintError = `${err?.message ?? err} ${err?.code ?? ''} ${err?.detail ?? ''}`.trim();
+    console.error('[LiveKit→Ticket]', err?.message, err?.stack);
     return null;
   }
 }
+
+// Module-level read so the route handler can attach the captured error to its
+// 500 response without making the function signature ugly.
+function getLastComplaintError(): string | null { return lastComplaintError; }
 
 // ── Route factory ─────────────────────────────────────────────────────────
 
@@ -1119,12 +1130,10 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
         db, eventBus, tenantId, (req.body ?? {}) as StructuredComplaint,
       );
       if (!result) {
-        // BUG-AE: was returning 'ticket_creation_failed' with no detail; the
-        // underlying err.message was only logged server-side, making this
-        // silent for the LiveKit agent. Echo the last error message back so
-        // the agent (and SQA) can see why.
+        // BUG-AE: captured the underlying error via module-level lastComplaintError
+        // ref so the agent (and SQA) can see why instead of an opaque "failed".
         return reply.code(500).send({ success: false, error: 'ticket_creation_failed',
-          message: 'Check server logs for [LiveKit→Ticket] error' });
+          message: getLastComplaintError() ?? 'unknown error' });
       }
       return reply.code(201).send({ success: true, ...result });
     });
