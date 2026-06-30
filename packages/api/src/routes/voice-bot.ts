@@ -69,14 +69,23 @@ async function applySlaToVoiceTicket(
   //      handler's catch as "Cannot read properties of undefined (reading 'map')"
   // Fix: open a real pg client via withSuperAdmin and call loadHolidays(c).
   const holidays = await db.withSuperAdmin(async (c) => sla.loadHolidays(c));
-  const dueAt = sla.computeSlaDueAt({
-    from: new Date(),
-    hours: polRow?.resolution_hours ?? policy['resolution_hours' as keyof typeof policy] as number ?? 24,
-    businessHoursOnly: polRow?.business_hours_only ?? false,
-    schedule,
-    timezone: tz,
+  // BUG-AE: computeSlaDueAt takes POSITIONAL args (acceptedAt, policy, tz,
+  // holidays) — voice-bot was calling it with a named-args object which
+  // collapsed `policy` to undefined inside the function and threw
+  // "Cannot read properties of undefined (reading 'resolution_hours')".
+  // Fixed to use the positional form.
+  const dueAt = sla.computeSlaDueAt(
+    new Date(),
+    {
+      resolution_hours: polRow?.resolution_hours
+        ?? (policy as any).resolution_hours
+        ?? 24,
+      business_hours_only: polRow?.business_hours_only ?? false,
+      business_hours_schedule: schedule,
+    },
+    tz,
     holidays,
-  });
+  );
   await db.withSuperAdmin(async (c) => {
     await c.query(
       `UPDATE tickets SET sla_policy_id = $1, sla_due_at = $2 WHERE id = $3`,
