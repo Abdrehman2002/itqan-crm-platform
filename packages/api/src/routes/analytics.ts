@@ -335,8 +335,13 @@ export function analyticsRoutes(db: DatabaseClient) {
       // NOTE: db.withTenant sets RLS context — no need for tenant_id in params.
       // Agent queries use $1 = userId; manager queries have no params.
 
+      // PERF: ops-dashboard was opening 12 sequential connections to Mumbai
+      // Supabase → 15s+ load time. Now fire all blocks in parallel with
+      // Promise.all so wall-clock = max-of-one rather than sum-of-all (~2s).
+      // Each block keeps its own withTenant connection — pool size 20 absorbs
+      // the burst fine. (2026-06-30)
       // ── Ticket type breakdown ────────────────────────────────────────────
-      const ticketBreakdown = await db.withTenant(tenantId, async (client) => {
+      const ticketBreakdownP = db.withTenant(tenantId, async (client) => {
         const [sql, params] = resolveDept(`
           SELECT
             COALESCE(ticket_type,'support')                 AS ticket_type,
@@ -357,7 +362,7 @@ export function analyticsRoutes(db: DatabaseClient) {
       });
 
       // ── Call stats ───────────────────────────────────────────────────────
-      const callStats = await db.withTenant(tenantId, async (client) => {
+      const callStatsP = db.withTenant(tenantId, async (client) => {
         const r = await client.query(`
           SELECT
             COUNT(*) FILTER (WHERE status = 'completed')                          AS completed_calls,
@@ -376,7 +381,7 @@ export function analyticsRoutes(db: DatabaseClient) {
       });
 
       // ── Ticket summary totals ────────────────────────────────────────────
-      const myTickets = await db.withTenant(tenantId, async (client) => {
+      const myTicketsP = db.withTenant(tenantId, async (client) => {
         const [sql1, params1] = resolveDept(`
           SELECT
             COUNT(*)                                                              AS total,
@@ -405,7 +410,7 @@ export function analyticsRoutes(db: DatabaseClient) {
       });
 
       // ── Sentiment / ratings ──────────────────────────────────────────────
-      const sentiment = await db.withTenant(tenantId, async (client) => {
+      const sentimentP = db.withTenant(tenantId, async (client) => {
         const r = await client.query(`
           SELECT
             ROUND(AVG((sentiment->>'score')::numeric) FILTER (WHERE sentiment IS NOT NULL))::int AS avg_sentiment,
@@ -434,7 +439,7 @@ export function analyticsRoutes(db: DatabaseClient) {
       });
 
       // ── Recent tickets (hierarchy-scoped) ───────────────────────────────
-      const recentTickets = await db.withTenant(tenantId, async (client) => {
+      const recentTicketsP = db.withTenant(tenantId, async (client) => {
         const [sql, params] = resolveDept(`
           SELECT t.id, t.ticket_number, t.subject, t.status, t.priority,
                  t.ticket_type, t.created_at, t.sla_due_at, t.assignee_id,
@@ -457,7 +462,7 @@ export function analyticsRoutes(db: DatabaseClient) {
       });
 
       // ── CRM Activities (hierarchy-scoped) ────────────────────────────────
-      const activityStats = await db.withTenant(tenantId, async (client) => {
+      const activityStatsP = db.withTenant(tenantId, async (client) => {
         const r = await client.query(`
           SELECT
             COUNT(*)                                                             AS total,
@@ -477,7 +482,7 @@ export function analyticsRoutes(db: DatabaseClient) {
         return r.rows[0] ?? {};
       });
 
-      const recentActivities = await db.withTenant(tenantId, async (client) => {
+      const recentActivitiesP = db.withTenant(tenantId, async (client) => {
         const r = await client.query(`
           SELECT a.id, a.type, a.subject, a.status, a.due_at, a.created_at,
                  u.name AS owner_name,
@@ -496,7 +501,7 @@ export function analyticsRoutes(db: DatabaseClient) {
       // ════════════════════════════════════════════════════════════════════
 
       // ── Bot stats (voice_bot_calls) ───────────────────────────────────────
-      const botStats = isManager ? await db.withTenant(tenantId, async (client) => {
+      const botStatsP = isManager ? db.withTenant(tenantId, async (client) => {
         const [botSql, botParams] = resolveDept(`
           SELECT
             COUNT(*)                                                              AS total_calls,
@@ -540,7 +545,7 @@ export function analyticsRoutes(db: DatabaseClient) {
       }) : null;
 
       // ── Human agent stats (hierarchy-scoped for managers) ────────────────
-      const humanStats = isManager ? await db.withTenant(tenantId, async (client) => {
+      const humanStatsP = isManager ? db.withTenant(tenantId, async (client) => {
         const calls = await client.query(`
           SELECT
             COUNT(*) FILTER (WHERE status = 'completed')                         AS completed_calls,
@@ -645,7 +650,7 @@ export function analyticsRoutes(db: DatabaseClient) {
       // TENANT ADMIN BLOCK
       // ════════════════════════════════════════════════════════════════════
       const isTenantAdmin = role === 'tenant_admin';
-      const tenantAdminStats = isTenantAdmin ? await db.withTenant(tenantId, async (client) => {
+      const tenantAdminStatsP = isTenantAdmin ? db.withTenant(tenantId, async (client) => {
         // User stats (users table has no RLS — filter by tenant_id)
         const users = await client.query(`
           SELECT
@@ -719,7 +724,7 @@ export function analyticsRoutes(db: DatabaseClient) {
       // hierarchy filter as the rest of the dashboard.
       // Note: FILTER (WHERE …) clauses must live on the aggregate (AVG/COUNT),
       // not on the surrounding ROUND wrapper.
-      const kpiStrip = await db.withTenant(tenantId, async (client) => {
+      const kpiStripP = db.withTenant(tenantId, async (client) => {
         const [sql, params] = resolveDept(`
           SELECT
             ROUND(AVG(cs.rating::numeric), 2) AS csat_avg,
@@ -740,6 +745,35 @@ export function analyticsRoutes(db: DatabaseClient) {
         const r = await client.query(sql, params);
         return r.rows[0] ?? {};
       });
+
+      // PERF: await all 11 query blocks in parallel. Each has its own
+      // withTenant connection (pool size 20 absorbs the burst). Wall-clock
+      // becomes max-of-one rather than sum-of-all → ~15s → ~2s for managers.
+      const [
+        ticketBreakdown,
+        callStats,
+        myTickets,
+        sentiment,
+        recentTickets,
+        activityStats,
+        recentActivities,
+        botStats,
+        humanStats,
+        tenantAdminStats,
+        kpiStrip,
+      ] = await Promise.all([
+        ticketBreakdownP,
+        callStatsP,
+        myTicketsP,
+        sentimentP,
+        recentTicketsP,
+        activityStatsP,
+        recentActivitiesP,
+        botStatsP,
+        humanStatsP,
+        tenantAdminStatsP,
+        kpiStripP,
+      ]);
 
       return reply.send({
         success: true,
