@@ -1248,14 +1248,22 @@ export function Tickets() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 2026-06-30: was hard-filtered to channel='manual', which hid every
+  // voice-bot ticket (Nadia/Sara/Zara) from this page even though the
+  // tenant lives one queue. Managers reported "I had a call and the
+  // ticket isn't anywhere." Now defaults to 'all' channels with a chip
+  // toggle so users can still narrow to Manual or Voice Bot.
+  const [channelFilter, setChannelFilter] = useState<'all'|'manual'|'voice_bot'>('all');
+
   // Derive API params
   const params = useMemo(() => {
-    const p: Record<string, string> = { pageSize: '50', channel: 'manual' };
+    const p: Record<string, string> = { pageSize: '50' };
+    if (channelFilter !== 'all') p.channel = channelFilter;
     if (tab !== 'all') p.status = tab;
     if (search)   p.search   = search;
     if (priority) p.priority = priority;
     return p;
-  }, [tab, search, priority]);
+  }, [tab, search, priority, channelFilter]);
 
   const { data: statsData } = useQuery<Stats>({
     queryKey: ['ticket-stats'],
@@ -1305,7 +1313,11 @@ export function Tickets() {
             </div>
             <div>
               <h1 className="text-lg font-bold text-gray-900">Support Tickets</h1>
-              <p className="text-xs text-gray-400">Manually created tickets</p>
+              <p className="text-xs text-gray-400">
+                {channelFilter === 'manual'    ? 'Manually created tickets' :
+                 channelFilter === 'voice_bot' ? 'Tickets created by voice bots (Nadia / Sara / Zara)' :
+                                                  'All tickets — manual and voice bot'}
+              </p>
             </div>
           </div>
           {can.writeRecords && (
@@ -1370,6 +1382,25 @@ export function Tickets() {
                 <option key={p} value={p}>{PRIORITY_CFG[p].label}</option>
               ))}
             </select>
+          </div>
+          {/* Source filter — All / Manual / Voice Bot. Was previously hardcoded
+              to 'manual' which silently hid every voice-bot ticket. */}
+          <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-xl p-1">
+            {([
+              { id: 'all',       label: 'All sources' },
+              { id: 'manual',    label: 'Manual'      },
+              { id: 'voice_bot', label: 'Voice bot'   },
+            ] as const).map(c => (
+              <button key={c.id}
+                onClick={() => setChannelFilter(c.id)}
+                className={`px-2.5 py-1 text-xs rounded-lg transition-colors ${
+                  channelFilter === c.id
+                    ? 'bg-brand-600 text-white font-semibold'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}>
+                {c.label}
+              </button>
+            ))}
           </div>
         </div>
       </div>
