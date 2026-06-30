@@ -61,7 +61,14 @@ async function applySlaToVoiceTicket(
   });
   const tz = (polRow?.settings?.timezone as string) ?? 'Asia/Karachi';
   const schedule = polRow?.business_hours_schedule ?? null;
-  const holidays = await sla.loadHolidays(db, tenantId);
+  // BUG-AE: sla.loadHolidays takes a pg client (returns {rows:[...]}), NOT the
+  // DatabaseClient wrapper (which returns rows[] directly). Old call
+  // `sla.loadHolidays(db, tenantId)` had two bugs:
+  //   1. Passed 2 args but loadHolidays takes 1 → tenantId silently dropped
+  //   2. r.rows was undefined → r.rows.map() threw → swallowed by complaint
+  //      handler's catch as "Cannot read properties of undefined (reading 'map')"
+  // Fix: open a real pg client via withSuperAdmin and call loadHolidays(c).
+  const holidays = await db.withSuperAdmin(async (c) => sla.loadHolidays(c));
   const dueAt = sla.computeSlaDueAt({
     from: new Date(),
     hours: polRow?.resolution_hours ?? policy['resolution_hours' as keyof typeof policy] as number ?? 24,
