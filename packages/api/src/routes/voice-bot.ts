@@ -560,13 +560,20 @@ async function createComplaintFromStructured(
     const slaRow = matched ? { id: matched.id } : null;
 
     // Call record (provider='livekit')
+    // BUG-AE (2026-06-30): the INSERT was omitting `direction` which is NOT NULL
+    // on voice_bot_calls → every Nadia complaint silently 500'd at this step
+    // and the caller-facing handler returned ticket_creation_failed. Now sets
+    // direction='inbound' (LiveKit room means the user joined us) and started_at
+    // explicitly so the timeline math works.
     const [botCall] = await db.withSuperAdmin(async (c) =>
       (await c.query(
         `INSERT INTO voice_bot_calls
-           (tenant_id, provider, provider_call_id, from_number, status, transcript, summary,
+           (tenant_id, provider, provider_call_id, from_number, direction, status,
+            started_at, transcript, summary,
             sentiment, extracted_subject, extracted_priority, extracted_reporter_name,
             extracted_reporter_email, raw_payload)
-         VALUES ($1,'livekit',$2,$3,'completed',$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
+         VALUES ($1,'livekit',$2,$3,'inbound','completed', NOW(),
+                 $4,$5,$6,$7,$8,$9,$10,$11::jsonb)
          RETURNING id`,
         [tenantId, s.callId ?? null, s.reporterPhone ?? null, s.transcript ?? null, description,
          priority === 'urgent' ? 'urgent' : 'negative', subject, priority,
@@ -1111,7 +1118,14 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
       const result = await createComplaintFromStructured(
         db, eventBus, tenantId, (req.body ?? {}) as StructuredComplaint,
       );
-      if (!result) return reply.code(500).send({ success: false, error: 'ticket_creation_failed' });
+      if (!result) {
+        // BUG-AE: was returning 'ticket_creation_failed' with no detail; the
+        // underlying err.message was only logged server-side, making this
+        // silent for the LiveKit agent. Echo the last error message back so
+        // the agent (and SQA) can see why.
+        return reply.code(500).send({ success: false, error: 'ticket_creation_failed',
+          message: 'Check server logs for [LiveKit→Ticket] error' });
+      }
       return reply.code(201).send({ success: true, ...result });
     });
 
