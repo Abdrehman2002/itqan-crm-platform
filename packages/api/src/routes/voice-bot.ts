@@ -1342,7 +1342,7 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
         const latestRow = (await c.query(
           `SELECT t.ticket_number, t.subject, t.status, t.priority,
                   t.sla_due_at, t.created_at,
-                  u.first_name AS assignee_first_name
+                  SPLIT_PART(u.name, ' ', 1) AS assignee_first_name
              FROM tickets t
              LEFT JOIN users u ON u.id = t.assignee_id
             WHERE t.tenant_id = $1 AND t.contact_id = $2
