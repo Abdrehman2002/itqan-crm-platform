@@ -1259,7 +1259,13 @@ export function Tickets() {
   const params = useMemo(() => {
     const p: Record<string, string> = { pageSize: '50' };
     if (channelFilter !== 'all') p.channel = channelFilter;
-    if (tab !== 'all') p.status = tab;
+    // When a ticket is accepted its status becomes 'accepted'. It stays there
+    // until the assignee adds their first note/reply — only then does it move
+    // to 'in_progress'. The /tickets/stats aggregate already counts 'accepted'
+    // under the In Progress bucket, so the list filter must mirror that or
+    // the tab counter (4) won't match the visible rows (3). Send both statuses.
+    if (tab === 'in_progress') p.status = 'accepted,in_progress';
+    else if (tab !== 'all')    p.status = tab;
     if (search)   p.search   = search;
     if (priority) p.priority = priority;
     return p;
