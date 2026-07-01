@@ -1265,6 +1265,128 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
       return (req.headers['authorization'] || '') === `Bearer ${secret}`;
     };
 
+    // ── Mid-call identity lookup ────────────────────────────────────────────────
+    // The bot calls this during the greeting (via LLM function-tool) to check if
+    // the caller is a known contact and has open tickets. Keyed by CNIC or
+    // ticket number — NEVER by phone alone (spoofable) or name (guessable).
+    //
+    // Response is intentionally SPARSE and MASKED so the bot cannot leak PII to
+    // an unverified caller. Full CNIC / full name never leave the server.
+    // Contract used by NadiaAgent.lookup_customer() in agent.py.
+    //
+    // The bot MUST challenge with `verificationRequired` before revealing
+    // ANYTHING back to the caller. If challenge fails, don't disclose.
+    fastify.get('/livekit/lookup', async (req, reply) => {
+      const { tenantId, cnic, ticket } = req.query as {
+        tenantId?: string; cnic?: string; ticket?: string;
+      };
+      if (!tenantId) return reply.code(400).send({ error: 'tenantId query param required' });
+      if (!checkSecret(req)) return reply.code(401).send({ error: 'unauthorized' });
+      if (!cnic && !ticket) {
+        return reply.code(400).send({ error: 'cnic or ticket required' });
+      }
+
+      const mask = (nic: string | null): string | null => {
+        if (!nic) return null;
+        const clean = nic.replace(/\s/g, '');
+        // 42101-1234567-8 → 42101-*****-8 (keep district + last check digit)
+        const m = clean.match(/^(\d{5})-?(\d{7})-?(\d)$/);
+        if (m) return `${m[1]}-*****-${m[3]}`;
+        return clean.slice(0, 3) + '*****' + clean.slice(-1);
+      };
+      const firstNameInitial = (first: string | null, last: string | null): string => {
+        const f = (first ?? '').trim();
+        const l = (last ?? '').trim();
+        if (!f) return 'Caller';
+        return l ? `${f} ${l[0]}.` : f;
+      };
+
+      const result = await db.withSuperAdmin(async (c) => {
+        // 1) Resolve the contact (CNIC exact → or via ticket_number's contact_id)
+        let contactRow: any = null;
+        if (cnic) {
+          const r = await c.query(
+            `SELECT id, first_name, last_name, nic_number
+               FROM contacts
+              WHERE tenant_id = $1 AND nic_number = $2
+              LIMIT 1`,
+            [tenantId, cnic.trim()],
+          );
+          contactRow = r.rows[0] ?? null;
+        }
+        if (!contactRow && ticket) {
+          const r = await c.query(
+            `SELECT co.id, co.first_name, co.last_name, co.nic_number
+               FROM tickets t
+               JOIN contacts co ON co.id = t.contact_id
+              WHERE t.tenant_id = $1 AND t.ticket_number = $2
+              LIMIT 1`,
+            [tenantId, ticket.trim()],
+          );
+          contactRow = r.rows[0] ?? null;
+        }
+        if (!contactRow) return null;
+
+        // 2) Aggregate + fetch latest ticket
+        const stats = (await c.query(
+          `SELECT
+             COUNT(*) FILTER (WHERE status NOT IN ('resolved','closed','cancelled')) AS open_count,
+             COUNT(*)                                                                 AS total_count,
+             BOOL_OR(priority IN ('urgent','high') AND status NOT IN ('resolved','closed','cancelled'))
+               AS has_critical_open
+             FROM tickets
+            WHERE tenant_id = $1 AND contact_id = $2`,
+          [tenantId, contactRow.id],
+        )).rows[0];
+
+        const latestRow = (await c.query(
+          `SELECT t.ticket_number, t.subject, t.status, t.priority,
+                  t.sla_due_at, t.created_at,
+                  u.first_name AS assignee_first_name
+             FROM tickets t
+             LEFT JOIN users u ON u.id = t.assignee_id
+            WHERE t.tenant_id = $1 AND t.contact_id = $2
+            ORDER BY t.created_at DESC
+            LIMIT 1`,
+          [tenantId, contactRow.id],
+        )).rows[0];
+
+        let latest: any = null;
+        if (latestRow) {
+          const now = Date.now();
+          const dueMs = latestRow.sla_due_at ? new Date(latestRow.sla_due_at).getTime() : null;
+          const hoursLeft = dueMs != null ? Math.max(0, (dueMs - now) / 3_600_000) : null;
+          const created = new Date(latestRow.created_at).getTime();
+          const daysAgo = Math.floor((now - created) / 86_400_000);
+          latest = {
+            number: latestRow.ticket_number,
+            subject: (latestRow.subject ?? '').slice(0, 80),
+            status: latestRow.status,
+            priority: latestRow.priority,
+            slaHoursLeft: hoursLeft != null ? Number(hoursLeft.toFixed(1)) : null,
+            assigneeFirstName: latestRow.assignee_first_name ?? null,
+            daysAgo,
+          };
+        }
+
+        return {
+          contactId: contactRow.id,
+          displayName: firstNameInitial(contactRow.first_name, contactRow.last_name),
+          cnicMasked: mask(contactRow.nic_number),
+          totalTicketCount: Number(stats.total_count),
+          openTicketCount:  Number(stats.open_count),
+          hasCriticalOpen:  Boolean(stats.has_critical_open),
+          latestTicket: latest,
+          verificationRequired: 'last4Cnic',
+        };
+      });
+
+      if (!result) {
+        return reply.send({ found: false });
+      }
+      return reply.send({ found: true, ...result });
+    });
+
     // Mid-call: create the complaint ticket from structured fields, return the TKT number.
     fastify.post('/livekit/complaint', async (req, reply) => {
       const { tenantId } = req.query as { tenantId?: string };
