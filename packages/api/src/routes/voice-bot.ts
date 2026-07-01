@@ -46,6 +46,59 @@ import * as sla from '../lib/sla';
 // (offline + away skipped). If no one's online, the ticket stays in the queue
 // and the manager sees it as "needs attention" — same behaviour as today.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// resolveVoiceBotContact — CNIC → phone → create-if-missing.
+// Every voice-bot call MUST land on a contact row so managers can click the
+// contact and see all past complaints/inquiries. Prior code only SELECTed by
+// phone and left contact_id NULL for new callers → orphan tickets invisible in
+// Customer 360. Lookup: (1) CNIC exact, (2) phone last-10 fuzzy, (3) create.
+async function resolveVoiceBotContact(
+  db: DatabaseClient,
+  tenantId: string,
+  input: {
+    name?: string | null;
+    phone?: string | null;
+    email?: string | null;
+    nic?: string | null;
+  },
+): Promise<string | null> {
+  return await db.withSuperAdmin(async (c) => {
+    if (input.nic && input.nic.trim()) {
+      const r = await c.query(
+        `SELECT id FROM contacts WHERE tenant_id = $1 AND nic_number = $2 LIMIT 1`,
+        [tenantId, input.nic.trim()],
+      );
+      if (r.rows[0]) return r.rows[0].id as string;
+    }
+    if (input.phone) {
+      const last10 = input.phone.replace(/\D/g, '').slice(-10);
+      if (last10.length >= 7) {
+        const r = await c.query(
+          `SELECT id FROM contacts
+             WHERE tenant_id = $1
+               AND (phone ILIKE $2 OR mobile ILIKE $2)
+             LIMIT 1`,
+          [tenantId, `%${last10}%`],
+        );
+        if (r.rows[0]) return r.rows[0].id as string;
+      }
+    }
+    const raw = (input.name ?? '').trim();
+    const parts = raw.split(/\s+/).filter(Boolean);
+    const first = parts[0] || 'Unknown';
+    const last  = parts.slice(1).join(' ') || null;
+    const r = await c.query(
+      `INSERT INTO contacts
+         (tenant_id, first_name, last_name, phone, mobile, email, nic_number,
+          status, source, tags, custom_fields, score, do_not_call, do_not_email)
+       VALUES ($1,$2,$3,$4,$4,$5,$6,'active','voice_bot','{}','{}',0,false,false)
+       RETURNING id`,
+      [tenantId, first, last, input.phone ?? null, input.email ?? null, input.nic ?? null],
+    );
+    return r.rows[0].id as string;
+  });
+}
+
 async function pushAssignFromQueue(
   db: DatabaseClient,
   tenantId: string,
@@ -412,14 +465,11 @@ async function createTicketFromBotCall(
       call.transcript ? `\nTranscript:\n${call.transcript.slice(0, 2000)}` : null,
     ].filter(Boolean).join('\n');
 
-    // Look up contact by phone number
-    const [contact] = await db.withSuperAdmin(async (c) => {
-      if (!call.fromNumber) return [];
-      const r = await c.query(
-        `SELECT id FROM contacts WHERE tenant_id = $1 AND phone ILIKE $2 LIMIT 1`,
-        [tenantId, `%${call.fromNumber.replace(/\D/g, '').slice(-10)}%`],
-      );
-      return r.rows;
+    // Look up contact by CNIC → phone → create if new. (See resolveVoiceBotContact.)
+    const contactId = await resolveVoiceBotContact(db, tenantId, {
+      name:  call.extractedName,
+      phone: call.fromNumber,
+      email: call.extractedEmail,
     });
 
     const [{ next_val }] = (await db.withSuperAdmin(async (c) =>
@@ -505,7 +555,7 @@ async function createTicketFromBotCall(
           tenantId, ticketNumber, subject, description, priority,
           resolvedQueueId,
           slaRow?.id   ?? null,
-          contact?.id  ?? null,
+          contactId,
           call.fromNumber       ?? null,
           call.extractedName    ?? null,
           call.extractedEmail   ?? null,
@@ -589,6 +639,7 @@ interface StructuredComplaint {
   reporterName?: string;
   reporterPhone?: string;
   reporterEmail?: string;
+  reporterNic?: string; // CNIC captured by bot during identity verification
   category?: string;   // loan_issue | account_issue | staff_complaint | digital_banking | fraud | branch_service | other
   priority?: string;   // P1..P4 or urgent..low
   subject?: string;
@@ -615,13 +666,11 @@ async function createComplaintFromStructured(
     const subject = (s.subject || s.description || 'Voice complaint').slice(0, 120);
     const description = s.description || s.subject || '';
 
-    const [contact] = await db.withSuperAdmin(async (c) => {
-      if (!s.reporterPhone) return [];
-      const r = await c.query(
-        `SELECT id FROM contacts WHERE tenant_id=$1 AND phone ILIKE $2 LIMIT 1`,
-        [tenantId, `%${s.reporterPhone.replace(/\D/g, '').slice(-10)}%`],
-      );
-      return r.rows;
+    const contactId = await resolveVoiceBotContact(db, tenantId, {
+      name:  s.reporterName,
+      phone: s.reporterPhone,
+      email: s.reporterEmail,
+      nic:   s.reporterNic,
     });
 
     const [{ next_val }] = await db.withSuperAdmin(async (c) =>
@@ -680,7 +729,7 @@ async function createComplaintFromStructured(
          VALUES ($1,$2,$3,$4,'open',$5,'voice_bot',$6,$7,$8,$9,$10,$11,'complaint',$12,$13::jsonb)
          RETURNING id`,
         [tenantId, ticketNumber, subject, description, priority,
-         queueRow?.id ?? null, slaRow?.id ?? null, contact?.id ?? null,
+         queueRow?.id ?? null, slaRow?.id ?? null, contactId,
          s.reporterPhone ?? null, s.reporterName ?? null, s.reporterEmail ?? null,
          [s.category ?? 'other'],
          JSON.stringify({ category: s.category, fraud_amount: s.fraudAmount, agent: 'nadia' })],
@@ -1308,12 +1357,20 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
       const b = (req.body ?? {}) as {
         agent?: string;
         reporterName?: string; reporterPhone?: string | null;
+        reporterEmail?: string | null; reporterNic?: string | null;
         city?: string;
         productInterest?: string; loanPurpose?: string;
         incomeRange?: string; employmentType?: string;
         leadScore?: string; callbackTime?: string;
         objections?: string;
       };
+      // Contact upsert — CNIC → phone → create-if-new (Zara).
+      const leadContactId = await resolveVoiceBotContact(db, tenantId, {
+        name:  b.reporterName,
+        phone: b.reporterPhone,
+        email: b.reporterEmail,
+        nic:   b.reporterNic,
+      });
 
       const score = (b.leadScore ?? '').toLowerCase();
       const priority = score === 'hot' ? 'high' : score === 'warm' ? 'medium' : 'low';
@@ -1356,10 +1413,11 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
         const [ticketRow] = (await c.query(
           `INSERT INTO tickets
              (tenant_id, ticket_number, subject, description, status, priority, channel,
-              ticket_type, queue_id, reporter_name, reporter_phone, tags, custom_fields)
-           VALUES ($1,$2,$3,$4,'open',$5,'voice_bot','sales',$6,$7,$8,'{}', $9::jsonb)
+              ticket_type, queue_id, contact_id, reporter_name, reporter_phone, tags, custom_fields)
+           VALUES ($1,$2,$3,$4,'open',$5,'voice_bot','sales',$6,$7,$8,$9,'{}', $10::jsonb)
            RETURNING id, ticket_number`,
           [tenantId, num, subject, description, priority, queueRow?.id ?? null,
+           leadContactId,
            b.reporterName ?? null, b.reporterPhone ?? null,
            JSON.stringify({
              productInterest: b.productInterest,
@@ -1411,10 +1469,18 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
       const b = (req.body ?? {}) as {
         agent?: string;
         reporterName?: string; reporterPhone?: string | null; reporterEmail?: string | null;
+        reporterNic?: string | null;
         subject?: string; description?: string;
         category?: string;        // billing / technical / account / general
         urgency?: string;         // low / medium / high
       };
+      // Contact upsert — CNIC → phone → create-if-new (Sara).
+      const supportContactId = await resolveVoiceBotContact(db, tenantId, {
+        name:  b.reporterName,
+        phone: b.reporterPhone,
+        email: b.reporterEmail,
+        nic:   b.reporterNic,
+      });
 
       const urgency  = (b.urgency ?? 'medium').toLowerCase();
       const priority = urgency === 'high' ? 'high' : urgency === 'low' ? 'low' : 'medium';
@@ -1447,10 +1513,11 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
         const [ticketRow] = (await c.query(
           `INSERT INTO tickets
              (tenant_id, ticket_number, subject, description, status, priority, channel,
-              ticket_type, queue_id, reporter_name, reporter_phone, reporter_email, tags, custom_fields)
-           VALUES ($1,$2,$3,$4,'open',$5,'voice_bot','support',$6,$7,$8,$9,'{}', $10::jsonb)
+              ticket_type, queue_id, contact_id, reporter_name, reporter_phone, reporter_email, tags, custom_fields)
+           VALUES ($1,$2,$3,$4,'open',$5,'voice_bot','support',$6,$7,$8,$9,$10,'{}', $11::jsonb)
            RETURNING id, ticket_number`,
           [tenantId, num, subject, description, priority, queueRow?.id ?? null,
+           supportContactId,
            b.reporterName ?? null, b.reporterPhone ?? null, b.reporterEmail ?? null,
            JSON.stringify({ category: b.category, urgency: b.urgency })],
         )).rows;
