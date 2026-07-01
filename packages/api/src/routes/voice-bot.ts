@@ -1351,21 +1351,32 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
           if (nameTrim.length < 2) {
             return { __ambiguous: true, reason: 'invalid_name' };
           }
-          // Match on last-4 of the DIGIT-ONLY CNIC (dashes stripped) so both
-          // interpretations work: last 4 numeric digits, ignoring formatting.
-          // Also fuzzy on name (both directions, contains, first-word too).
+          // Fuzzy match using pg_trgm — STT can mishear names by 1-2 letters
+          // (e.g. Urdu ساد vs سعد, English 'Saad' vs 'Sad'). Threshold 0.30
+          // similarity works for both scripts. Last-4 CNIC uses exact match
+          // on digits-only to keep the identity gate meaningful.
+          //
+          // Ranking:
+          //   1. exact substring match on full name (strongest signal)
+          //   2. trigram similarity ≥ 0.30
+          //   3. word_similarity ≥ 0.25 (matches first-name in a longer full-name)
           const rows = (await c.query(
-            `SELECT id, first_name, last_name, nic_number
+            `SELECT id, first_name, last_name, nic_number,
+                    GREATEST(
+                      similarity(first_name || ' ' || COALESCE(last_name,''), $3),
+                      word_similarity($3, first_name || ' ' || COALESCE(last_name,''))
+                    ) AS name_score
                FROM contacts
               WHERE tenant_id = $1
                 AND REGEXP_REPLACE(nic_number, '\\D', '', 'g') LIKE $2
                 AND (
-                     (first_name || ' ' || COALESCE(last_name,'')) ILIKE $3
-                  OR (first_name || ' ' || COALESCE(last_name,'')) ILIKE $4
-                  OR $3 ILIKE ('%' || first_name || '%')
+                     (first_name || ' ' || COALESCE(last_name,'')) ILIKE ('%' || $3 || '%')
+                  OR similarity(first_name || ' ' || COALESCE(last_name,''), $3) >= 0.30
+                  OR word_similarity($3, first_name || ' ' || COALESCE(last_name,'')) >= 0.25
                 )
+              ORDER BY name_score DESC
               LIMIT 5`,
-            [tenantId, `%${l4}`, `%${nameTrim}%`, `%${nameTrim.split(/\s+/)[0]}%`],
+            [tenantId, `%${l4}`, nameTrim],
           )).rows;
           if (rows.length === 0) {
             contactRow = null;
