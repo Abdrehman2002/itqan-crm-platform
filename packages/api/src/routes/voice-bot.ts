@@ -1351,11 +1351,14 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
           if (nameTrim.length < 2) {
             return { __ambiguous: true, reason: 'invalid_name' };
           }
+          // Match on last-4 of the DIGIT-ONLY CNIC (dashes stripped) so both
+          // interpretations work: last 4 numeric digits, ignoring formatting.
+          // Also fuzzy on name (both directions, contains, first-word too).
           const rows = (await c.query(
             `SELECT id, first_name, last_name, nic_number
                FROM contacts
               WHERE tenant_id = $1
-                AND nic_number LIKE $2
+                AND REGEXP_REPLACE(nic_number, '\\D', '', 'g') LIKE $2
                 AND (
                      (first_name || ' ' || COALESCE(last_name,'')) ILIKE $3
                   OR (first_name || ' ' || COALESCE(last_name,'')) ILIKE $4
