@@ -65,7 +65,10 @@ async function pushAssignFromQueue(
     if (method !== 'push_random' && method !== 'push_criteria') return null;
 
     // Pick least-loaded eligible agent. Filters:
-    //   • role agent OR line_manager (managers stay out of auto-assignment)
+    //   • role = 'agent' ONLY. Managers oversee, line_managers coach & escalate
+    //     their sub-team — they see the ticket via BUG-Y subtree scope but are
+    //     NOT in the push pool. User confirmed on 2026-07-01: standard call-centre
+    //     pattern. They can still self-assign via the 3-dot menu if they choose.
     //   • is_active + not soft-deleted
     //   • agent_status in (online, busy) — skip offline/away
     //   • department_type matches the queue when the queue is dept-scoped
@@ -78,7 +81,7 @@ async function pushAssignFromQueue(
          FROM users u
          LEFT JOIN tickets t ON t.assignee_id = u.id
         WHERE u.tenant_id = $1
-          AND u.role IN ('agent','line_manager')
+          AND u.role = 'agent'
           AND u.is_active = true
           AND u.deleted_at IS NULL
           AND u.agent_status IN ('online','busy')
