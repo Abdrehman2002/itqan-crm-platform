@@ -1277,13 +1277,22 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
     // The bot MUST challenge with `verificationRequired` before revealing
     // ANYTHING back to the caller. If challenge fails, don't disclose.
     fastify.get('/livekit/lookup', async (req, reply) => {
-      const { tenantId, cnic, ticket } = req.query as {
+      const { tenantId, cnic, ticket, name, last4 } = req.query as {
         tenantId?: string; cnic?: string; ticket?: string;
+        name?: string;   // Caller-spoken name (first + last, any casing)
+        last4?: string;  // Last 4 digits of caller's CNIC
       };
       if (!tenantId) return reply.code(400).send({ error: 'tenantId query param required' });
       if (!checkSecret(req)) return reply.code(401).send({ error: 'unauthorized' });
-      if (!cnic && !ticket) {
-        return reply.code(400).send({ error: 'cnic or ticket required' });
+      // Accepted lookup shapes:
+      //   ?cnic=XXXXX-XXXXXXX-X                (full CNIC, exact match)
+      //   ?ticket=TKT-XXXXX                     (full ticket number)
+      //   ?name=Ahmed+Raza&last4=1234           (STT-friendly: name + last 4 CNIC)
+      const nameLast4Path = name && last4;
+      if (!cnic && !ticket && !nameLast4Path) {
+        return reply.code(400).send({
+          error: 'need one of: (cnic) OR (ticket) OR (name + last4)',
+        });
       }
 
       const mask = (nic: string | null): string | null => {
@@ -1324,6 +1333,44 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
             [tenantId, ticket.trim()],
           );
           contactRow = r.rows[0] ?? null;
+        }
+        // Name + last-4-CNIC path — STT-friendly identity check.
+        // Deepgram's Urdu ASR mangles long digit runs; asking for a name and just
+        // the last 4 CNIC digits is far more reliable. Match rules:
+        //   - last4: extract 4 trailing digits from the caller-spoken value
+        //   - name:  fuzzy compare (contains, both directions, case-insensitive)
+        //   - REQUIRE EXACTLY ONE MATCH — if 2+ contacts share the same last 4
+        //     digits and a name substring, reject with 'ambiguous' so the bot
+        //     falls back to asking for the full CNIC.
+        if (!contactRow && nameLast4Path) {
+          const l4 = last4!.replace(/\D/g, '').slice(-4);
+          if (l4.length !== 4) {
+            return { __ambiguous: true, reason: 'invalid_last4' };
+          }
+          const nameTrim = name!.trim();
+          if (nameTrim.length < 2) {
+            return { __ambiguous: true, reason: 'invalid_name' };
+          }
+          const rows = (await c.query(
+            `SELECT id, first_name, last_name, nic_number
+               FROM contacts
+              WHERE tenant_id = $1
+                AND nic_number LIKE $2
+                AND (
+                     (first_name || ' ' || COALESCE(last_name,'')) ILIKE $3
+                  OR (first_name || ' ' || COALESCE(last_name,'')) ILIKE $4
+                  OR $3 ILIKE ('%' || first_name || '%')
+                )
+              LIMIT 5`,
+            [tenantId, `%${l4}`, `%${nameTrim}%`, `%${nameTrim.split(/\s+/)[0]}%`],
+          )).rows;
+          if (rows.length === 0) {
+            contactRow = null;
+          } else if (rows.length > 1) {
+            return { __ambiguous: true, reason: 'multiple_matches', count: rows.length };
+          } else {
+            contactRow = rows[0];
+          }
         }
         if (!contactRow) return null;
 
@@ -1377,12 +1424,24 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
           openTicketCount:  Number(stats.open_count),
           hasCriticalOpen:  Boolean(stats.has_critical_open),
           latestTicket: latest,
-          verificationRequired: 'last4Cnic',
+          // No further verification needed on the name+last4 path — the caller
+          // has already produced both identity signals to reach this match.
+          verificationRequired: nameLast4Path ? 'none' : 'last4Cnic',
         };
       });
 
       if (!result) {
         return reply.send({ found: false });
+      }
+      // Ambiguous sentinel from the name+last4 branch — bot must ask for the
+      // full CNIC to disambiguate. Never disclose ticket details on this path.
+      if ((result as any).__ambiguous) {
+        return reply.send({
+          found: false,
+          ambiguous: true,
+          reason: (result as any).reason,
+          hint: 'need_full_cnic',
+        });
       }
       return reply.send({ found: true, ...result });
     });
