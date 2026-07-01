@@ -51,6 +51,7 @@ interface Ticket {
   assignee_id?: string;
   assignee_name?: string;
   contact_name?: string;
+  contact_nic?: string;
   queue_name?: string;
   queue_color?: string;
   reporter_name?: string;
@@ -289,6 +290,11 @@ function TicketCard({
           )}
           {ticket.reporter_phone && (
             <p className="text-xs text-gray-400">{ticket.reporter_phone}</p>
+          )}
+          {ticket.contact_nic && (
+            <p className="text-xs text-brand-400 font-mono mt-0.5" title="CNIC on file">
+              CNIC {ticket.contact_nic}
+            </p>
           )}
         </div>
 
@@ -1031,6 +1037,7 @@ function TicketPanel({ ticketId, onClose }: { ticketId: string; onClose: () => v
           <div className="grid grid-cols-2 gap-3">
             {[
               { label: 'Reporter',    val: t.reporter_name  || '—' },
+              { label: 'CNIC',        val: t.contact_nic    || '—' },
               { label: 'Phone',       val: t.reporter_phone || '—' },
               { label: 'Email',       val: t.reporter_email || '—' },
               { label: 'Assigned To', val: t.assignee_name  || 'Unassigned' },

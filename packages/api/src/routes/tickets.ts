@@ -1279,6 +1279,7 @@ export function ticketRoutes(db: DatabaseClient, eventBus: EventBus) {
              pu.name  AS prev_assignee_name,
              mob.name AS manager_overridden_by_name,
              c.first_name || ' ' || COALESCE(c.last_name,'') AS contact_name,
+             c.nic_number AS contact_nic,
              q.name  AS queue_name,
              q.color AS queue_color,
              s.name  AS sla_name,
