@@ -1351,17 +1351,21 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
           if (nameTrim.length < 2) {
             return { __ambiguous: true, reason: 'invalid_name' };
           }
-          // Fuzzy match using pg_trgm — STT can mishear names by 1-2 letters
-          // (e.g. Urdu ساد vs سعد, English 'Saad' vs 'Sad'). Threshold 0.30
-          // similarity works for both scripts. Last-4 CNIC uses exact match
-          // on digits-only to keep the identity gate meaningful.
+          // Fuzzy name match — STT can mishear names by 1-2 letters (Urdu ساد vs
+          // سعد measures 0.45, English 'Saad' vs 'Sad' similar). Last-4 CNIC is
+          // ALWAYS an exact match (tail of digit-only stored value).
           //
-          // Ranking:
-          //   1. exact substring match on full name (strongest signal)
-          //   2. trigram similarity ≥ 0.30
-          //   3. word_similarity ≥ 0.25 (matches first-name in a longer full-name)
+          // Thresholds raised 2026-07-02 after a wrong CNIC + fuzzy name match
+          // false-positived onto another contact. The demo tenant has 10+ pairs
+          // of contacts sharing the same last-4, so name filter must be strict:
+          //   similarity ≥ 0.45  OR  word_similarity ≥ 0.40  OR exact substring.
+          // Anything below is treated as unrelated names.
+          const NAME_SIM_MIN = 0.45;
+          const WORD_SIM_MIN = 0.40;
           const rows = (await c.query(
             `SELECT id, first_name, last_name, nic_number,
+                    similarity(first_name || ' ' || COALESCE(last_name,''), $3) AS full_sim,
+                    word_similarity($3, first_name || ' ' || COALESCE(last_name,'')) AS word_sim,
                     GREATEST(
                       similarity(first_name || ' ' || COALESCE(last_name,''), $3),
                       word_similarity($3, first_name || ' ' || COALESCE(last_name,''))
@@ -1371,8 +1375,8 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
                 AND REGEXP_REPLACE(nic_number, '\\D', '', 'g') LIKE $2
                 AND (
                      (first_name || ' ' || COALESCE(last_name,'')) ILIKE ('%' || $3 || '%')
-                  OR similarity(first_name || ' ' || COALESCE(last_name,''), $3) >= 0.30
-                  OR word_similarity($3, first_name || ' ' || COALESCE(last_name,'')) >= 0.25
+                  OR similarity(first_name || ' ' || COALESCE(last_name,''), $3) >= ${NAME_SIM_MIN}
+                  OR word_similarity($3, first_name || ' ' || COALESCE(last_name,'')) >= ${WORD_SIM_MIN}
                 )
               ORDER BY name_score DESC
               LIMIT 5`,
@@ -1433,14 +1437,22 @@ export function voiceBotRoutes(db: DatabaseClient, eventBus: EventBus) {
         return {
           contactId: contactRow.id,
           displayName: firstNameInitial(contactRow.first_name, contactRow.last_name),
+          // matchedFirstName is the first token of the STORED name — bot reads
+          // this back to caller for confirmation before disclosing ticket
+          // details. Short + STT-safe. This is the identity double-check when
+          // the fuzzy name path was used (STT could still route to the wrong
+          // contact if the fuzzy threshold is anywhere near a similar name).
+          matchedFirstName: (contactRow.first_name ?? '').trim().split(/\s+/)[0] || null,
           cnicMasked: mask(contactRow.nic_number),
           totalTicketCount: Number(stats.total_count),
           openTicketCount:  Number(stats.open_count),
           hasCriticalOpen:  Boolean(stats.has_critical_open),
           latestTicket: latest,
-          // No further verification needed on the name+last4 path — the caller
-          // has already produced both identity signals to reach this match.
-          verificationRequired: nameLast4Path ? 'none' : 'last4Cnic',
+          // On name+last4 path, still require ONE spoken confirmation from the
+          // caller — read the matched first name back and get a 'ji/haan/sahi'
+          // before disclosing ticket details. This is the last guard against
+          // last-4 collisions.
+          verificationRequired: nameLast4Path ? 'firstNameReadback' : 'last4Cnic',
         };
       });
 
