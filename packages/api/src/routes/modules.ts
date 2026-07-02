@@ -7,6 +7,7 @@
 
 import type { FastifyInstance } from 'fastify';
 import type { ModuleRegistry } from '@crm/core';
+import { defaultPermissions } from './roles';
 
 // Nav path → the licensed feature that unlocks it. A nav item is hidden when the
 // tenant isn't entitled to its feature. Paths not listed here are always shown
@@ -81,7 +82,15 @@ export function modulesRoute(moduleRegistry: ModuleRegistry) {
       // Two formats exist:
       //   New: { 'contacts:read': true }   — from defaultPermissions()
       //   Old: { contacts: 'full'|'view'|'none' } — from legacy custom roles
-      const perms: Record<string, unknown> = user?.permissions ?? {};
+      //
+      // 2026-07-02: added role-defaults fallback. Existing users provisioned
+      // before line_manager / policy_admin cases were added to
+      // defaultPermissions() have stale/empty perms columns in the DB. Reading
+      // them literally strips the sidebar down to nothing. Compute the role
+      // defaults on the fly and let stored perms OVERRIDE, not replace.
+      const storedPerms: Record<string, unknown> = user?.permissions ?? {};
+      const roleDefaults = defaultPermissions(role);
+      const perms: Record<string, unknown> = { ...roleDefaults, ...storedPerms };
 
       function hasPermission(permKey: string): boolean {
         // New format check
