@@ -104,7 +104,14 @@ export function modulesRoute(moduleRegistry: ModuleRegistry) {
       // for the /deals tile. Also treats dept=null as "restrict conservatively"
       // — an unassigned agent shouldn't see cross-dept modules.
       const dept: string | null = user?.department_type ?? null;
-      const scopedRoles = new Set(['agent', 'line_manager', 'viewer']);
+      // Managers ARE dept-scoped (2026-07-02, user decision). A Complaint
+      // Manager should not see the Sales module or the Deals tile in their
+      // sidebar even though their permissions are broad enough. This aligns
+      // with the v3.0 spec's per-role × per-dept module allocation matrix.
+      // The visibility layer (getVisibleUserIds) already scopes their record
+      // access by manager_id subtree, so this is only about hiding the wrong
+      // line-of-business tools from view.
+      const scopedRoles = new Set(['manager', 'line_manager', 'agent', 'viewer']);
       const excludedModulesByDept: Record<string, string[]> = {
         support:   ['sales'],
         complaint: ['sales'],
