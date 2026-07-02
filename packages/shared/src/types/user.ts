@@ -1,4 +1,16 @@
-export type UserRole = 'super_admin' | 'tenant_admin' | 'manager' | 'policy_admin' | 'agent' | 'readonly';
+// UserRole — kept aligned with the backend ROLE_HIERARCHY. 'readonly' is a
+// legacy alias for the customer/originator role and mapped to 'viewer' in the
+// backend; both are listed so old rows still typecheck. 'line_manager' is a
+// team-scoped supervisor sitting between manager and agent (BUG-P + audit fix).
+export type UserRole =
+  | 'super_admin'
+  | 'tenant_admin'
+  | 'manager'
+  | 'line_manager'
+  | 'policy_admin'
+  | 'agent'
+  | 'viewer'
+  | 'readonly';
 
 export interface User {
   id: string;

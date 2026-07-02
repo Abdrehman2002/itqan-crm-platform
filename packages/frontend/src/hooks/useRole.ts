@@ -10,12 +10,16 @@
 
 import { useAuthStore } from '../store/auth.store';
 
-type Role = 'super_admin' | 'tenant_admin' | 'manager' | 'policy_admin' | 'agent' | 'viewer';
+type Role = 'super_admin' | 'tenant_admin' | 'manager' | 'line_manager' | 'policy_admin' | 'agent' | 'viewer';
 
 const ROLE_RANK: Record<Role, number> = {
   super_admin:  50,
   tenant_admin: 40,
   manager:      30,
+  // line_manager — team-scoped supervisor (same rank as manager per backend
+  // ROLE_LEVEL, kept slightly lower here so useIsManager() stays true only for
+  // full managers when we need dept-wide vs team-only distinction).
+  line_manager: 28,
   // policy_admin — independent governance role, sits between manager and agent.
   // Reports to no department; governs SLA policies cross-cutting.
   policy_admin: 25,

@@ -94,30 +94,48 @@ export function modulesRoute(moduleRegistry: ModuleRegistry) {
 
       // Department-scope for line-of-business roles (agent, line_manager, viewer).
       // Managers and above see everything their tenant is entitled to; a customer
-      // support agent should NOT see the Sales module in their sidebar (Sales
-      // invoicing/payments is a different line of business), and vice versa.
+      // support agent should NOT see the Sales module or Deals pipeline in
+      // their sidebar (different lines of business), and vice versa.
       // Nadia/Sara/Zara webhooks route by department_type, so this is the same
       // scoping the ticket queues already use.
+      //
+      // 2026-07-02: extended to also filter nav-item PATHS, since /deals lives
+      // inside the crm module — filtering by top-level module id was a no-op
+      // for the /deals tile. Also treats dept=null as "restrict conservatively"
+      // — an unassigned agent shouldn't see cross-dept modules.
       const dept: string | null = user?.department_type ?? null;
       const scopedRoles = new Set(['agent', 'line_manager', 'viewer']);
       const excludedModulesByDept: Record<string, string[]> = {
-        // Support + complaint agents: no sales invoicing, no CRM deals pipeline.
-        support:   ['sales', 'deals'],
-        complaint: ['sales', 'deals'],
-        // Sales agents: no complaint-specific analytics module (if it exists).
+        support:   ['sales'],
+        complaint: ['sales'],
         sales:     [],
       };
-      const excludedIds = (scopedRoles.has(role) && dept && excludedModulesByDept[dept])
-        ? new Set(excludedModulesByDept[dept])
+      const excludedNavPathsByDept: Record<string, string[]> = {
+        // Deals pipeline is Sales-line-of-business; hide from support/complaint.
+        support:   ['/deals'],
+        complaint: ['/deals'],
+        sales:     [],
+      };
+      const isScoped = scopedRoles.has(role);
+      // If a scoped user has no dept, default to support-style restrictions so
+      // they don't accidentally see sales/deals. Better to be conservative.
+      const effDept = dept ?? (isScoped ? 'support' : null);
+      const excludedIds = (isScoped && effDept && excludedModulesByDept[effDept])
+        ? new Set(excludedModulesByDept[effDept])
+        : new Set<string>();
+      const excludedPaths = (isScoped && effDept && excludedNavPathsByDept[effDept])
+        ? new Set(excludedNavPathsByDept[effDept])
         : new Set<string>();
 
       const filtered = allModules
         .filter((mod) => !excludedIds.has(mod.id))
         .map((mod) => ({
           ...mod,
-          navItems: mod.navItems.filter((item: any) =>
-            !item.permissionKey || hasPermission(item.permissionKey),
-          ),
+          navItems: mod.navItems.filter((item: any) => {
+            if (excludedPaths.has(item.path)) return false;
+            if (item.permissionKey && !hasPermission(item.permissionKey)) return false;
+            return true;
+          }),
         }))
         .filter((mod) => mod.navItems.length > 0);
 

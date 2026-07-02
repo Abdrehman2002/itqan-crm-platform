@@ -191,6 +191,38 @@ export function defaultPermissions(baseRole: string): Record<string, boolean> {
       'billing:read': false,  'billing:manage': false,
     };
 
+    // Line manager = manager, scoped to their subtree at the visibility layer.
+    // Same permission surface; the BUG-Y visibility filter enforces the
+    // team-only scope, not the permission set.
+    case 'line_manager': return {
+      ...none,
+      'dashboard:read': true,
+      'contacts:read': true,  'contacts:create': true,  'contacts:edit': true,  'contacts:delete': false,
+      'companies:read': true, 'companies:create': true, 'companies:edit': true, 'companies:delete': false,
+      'deals:read': true,     'deals:create': true,     'deals:move': true,     'deals:close': true,  'deals:delete': false,
+      'activities:read': true,'activities:create': true,'activities:edit': true,'activities:complete': true,'activities:delete': false,
+      'tickets:read': true,   'tickets:create': true,   'tickets:assign': true, 'tickets:resolve': true,   'tickets:delete': false,
+      'emails:read': true,    'emails:compose': true,   'emails:reply': true,   'emails:delete': false,
+      'analytics:read': true, 'analytics:export': false,
+      'voice:read': true,     'voice:call': true,        'voice:recordings': true,
+      'voicebot:read': true,  'voicebot:configure': false,
+      'integrations:read': false,'integrations:configure': false,
+      'settings:read': true,  'settings:edit': false,
+      'billing:read': false,  'billing:manage': false,
+    };
+
+    // Policy admin = governance-only. Reads SLA / policies across the tenant,
+    // no direct operational access (no contact/deal writes, no ticket assign).
+    case 'policy_admin': return {
+      ...none,
+      'dashboard:read': true,
+      'tickets:read': true,
+      'sla:read': true,       'sla:edit': true,
+      'analytics:read': true,
+      'settings:read': true,
+      'contacts:read': true,  'companies:read': true,
+    };
+
     case 'agent': return {
       ...none,
       'dashboard:read': true,
@@ -208,17 +240,19 @@ export function defaultPermissions(baseRole: string): Record<string, boolean> {
       'billing:read': false,  'billing:manage': false,
     };
 
-    case 'viewer':
+    // Viewer = read-only originator (customer). Only sees tickets they raised.
+    // NEVER falls into agent perms — audit fix (was silently agent before).
+    case 'viewer': return {
+      ...none,
+      'dashboard:read': true,
+      'tickets:read': true,
+      'contacts:read': true,
+    };
+
     default: return {
       ...none,
       'dashboard:read': true,
-      'contacts:read': true,
-      'companies:read': true,
-      'deals:read': true,
-      'activities:read': true,
       'tickets:read': true,
-      'emails:read': true,
-      'analytics:read': true,
     };
   }
 }

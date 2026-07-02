@@ -14,14 +14,15 @@ export class SalesPlatformModule implements PlatformModule {
   readonly requiredPlan = 'starter' as const;
 
   readonly navItems = [
-    { path: '/sales/dashboard',  label: 'Sales Dashboard', icon: 'LayoutDashboard' },
-    { path: '/sales/invoices',   label: 'Invoices',        icon: 'FileText' },
-    { path: '/sales/contacts',   label: 'Bill Contacts',   icon: 'Users' },
-    { path: '/sales/payments',   label: 'Payments',        icon: 'CreditCard' },
-    { path: '/sales/reports',    label: 'Reports',         icon: 'BarChart2' },
-    { path: '/sales/templates',  label: 'Templates',       icon: 'List' },
-    { path: '/sales/builder',    label: 'Builder',         icon: 'Layers' },
-    { path: '/sales/settings',   label: 'Sales Settings',  icon: 'Settings' },
+    // permissionKey — see CRM module for rationale.
+    { path: '/sales/dashboard',  label: 'Sales Dashboard', icon: 'LayoutDashboard', permissionKey: 'dashboard:read' },
+    { path: '/sales/invoices',   label: 'Invoices',        icon: 'FileText',        permissionKey: 'billing:read' },
+    { path: '/sales/contacts',   label: 'Bill Contacts',   icon: 'Users',           permissionKey: 'contacts:read' },
+    { path: '/sales/payments',   label: 'Payments',        icon: 'CreditCard',      permissionKey: 'billing:read' },
+    { path: '/sales/reports',    label: 'Reports',         icon: 'BarChart2',       permissionKey: 'analytics:read' },
+    { path: '/sales/templates',  label: 'Templates',       icon: 'List',            permissionKey: 'billing:manage' },
+    { path: '/sales/builder',    label: 'Builder',         icon: 'Layers',          permissionKey: 'billing:manage' },
+    { path: '/sales/settings',   label: 'Sales Settings',  icon: 'Settings',        permissionKey: 'settings:edit' },
   ];
 
   async onLoad(_ctx: ModuleContext): Promise<void> {
