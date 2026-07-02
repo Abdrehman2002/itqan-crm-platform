@@ -92,7 +92,27 @@ export function modulesRoute(moduleRegistry: ModuleRegistry) {
         return val === 'full' || val === 'view';
       }
 
+      // Department-scope for line-of-business roles (agent, line_manager, viewer).
+      // Managers and above see everything their tenant is entitled to; a customer
+      // support agent should NOT see the Sales module in their sidebar (Sales
+      // invoicing/payments is a different line of business), and vice versa.
+      // Nadia/Sara/Zara webhooks route by department_type, so this is the same
+      // scoping the ticket queues already use.
+      const dept: string | null = user?.department_type ?? null;
+      const scopedRoles = new Set(['agent', 'line_manager', 'viewer']);
+      const excludedModulesByDept: Record<string, string[]> = {
+        // Support + complaint agents: no sales invoicing, no CRM deals pipeline.
+        support:   ['sales', 'deals'],
+        complaint: ['sales', 'deals'],
+        // Sales agents: no complaint-specific analytics module (if it exists).
+        sales:     [],
+      };
+      const excludedIds = (scopedRoles.has(role) && dept && excludedModulesByDept[dept])
+        ? new Set(excludedModulesByDept[dept])
+        : new Set<string>();
+
       const filtered = allModules
+        .filter((mod) => !excludedIds.has(mod.id))
         .map((mod) => ({
           ...mod,
           navItems: mod.navItems.filter((item: any) =>
